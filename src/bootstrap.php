@@ -66,23 +66,28 @@ $GLOBALS['country'] = SYSTEM_COUNTRY;
 error_log("[BOOTSTRAP] Country resolved → " . SYSTEM_COUNTRY);
 
 /* ======================================================
- * 2️⃣ LOAD COUNTRY ENV (.env_BW, .env_NG, etc)
+ * 2️⃣ LOAD COUNTRY ENV (LOCAL ONLY, RAILWAY USES ENV)
  * ====================================================== */
-$envFile = ".env_" . SYSTEM_COUNTRY;
-$envPath = APP_ROOT . "/CORE_CONFIG/countries/" . SYSTEM_COUNTRY . "/" . $envFile;
+if (!getenv('DATABASE_URL')) {
+    // Local development
+    $envFile = ".env_" . SYSTEM_COUNTRY;
+    $envPath = APP_ROOT . "/CORE_CONFIG/countries/" . SYSTEM_COUNTRY . "/" . $envFile;
 
-if (!file_exists($envPath)) {
-    throw new RuntimeException("Missing env file: {$envPath}");
+    if (!file_exists($envPath)) {
+        throw new RuntimeException("Missing local env file: {$envPath}");
+    }
+
+    $repository = Dotenv\Repository\RepositoryBuilder::createWithDefaultAdapters()
+        ->addAdapter(PutenvAdapter::class)
+        ->make();
+
+    Dotenv::create($repository, dirname($envFile), basename($envFile))->load();
+
+    error_log("[BOOTSTRAP] Loaded local env: {$envPath}");
+} else {
+    // Production (Railway) - no file needed
+    error_log("[BOOTSTRAP] Using Railway environment variables for " . SYSTEM_COUNTRY);
 }
-
-$repository = RepositoryBuilder::createWithDefaultAdapters()
-    ->addAdapter(PutenvAdapter::class)
-    ->make();
-
-Dotenv::create($repository, dirname($envPath), basename($envFile))->load();
-
-error_log("[BOOTSTRAP TEST] PG_USER = " . (getenv('PG_USER') ?: 'MISSING'));
-error_log("[BOOTSTRAP TEST] PG_PASS length = " . strlen((string)getenv('PG_PASS')));
 
 /* ======================================================
  * 3️⃣ LOAD COUNTRY CONFIG
@@ -363,3 +368,4 @@ $GLOBALS['CALLBACK_URL'] = getCallbackUrl();
 error_log("[BOOTSTRAP] System initialized successfully for " . SYSTEM_COUNTRY);
 error_log("[BOOTSTRAP] Callback URL: " . $GLOBALS['CALLBACK_URL']);
 error_log("[BOOTSTRAP] SwapService initialized: " . (isset($GLOBALS['swapService']) ? 'YES' : 'NO'));
+
