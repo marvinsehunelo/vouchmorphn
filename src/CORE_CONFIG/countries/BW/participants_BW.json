@@ -1,0 +1,383 @@
+{
+  "metadata": {
+    "version": "2.1.0",
+    "standard": "ISO-20022-JSON / GSMA-MM",
+    "region": "BW-EU-CROSSBORDER",
+    "governance": "CENTRAL_BANK_HUB"
+  },
+   
+  "participants": {
+
+    "ZURUBANK": {
+      "type": "FINANCIAL_INSTITUTION",
+      "category": "BANK",
+      "provider_code": "ZURUBWXX",
+      "auth_type": "MTLS_OAUTH2",
+      "base_url": "http://localhost/zurubank/Backend",
+
+      "security": {
+  "api_key": {
+    "value_env": "API_KEY_ZURUBANK",
+    "header_name": "X-API-KEY"
+  },
+        "oauth2": {
+          "token_endpoint": "/oauth2/token",
+          "client_id_env": "ZURUBANK_CLIENT_ID",
+          "client_secret_env": "ZURUBANK_CLIENT_SECRET",
+          "scope": "payments settlement"
+        },
+        "request_signing": {
+          "algorithm": "RSA-SHA256",
+          "private_key_env": "ZURUBANK_SIGNING_KEY"
+        }
+      },
+
+      "identity": {
+        "system_user_id": 1001,
+        "legal_entity_identifier": "BW-ZURUBANK-LEI-001",
+        "license_number": "CB-BW-017"
+      },
+
+      "capabilities": {
+        "supports_sca": true,
+        "supports_realtime_processing": true,
+        "supports_reversal": true,
+        "supports_idempotency": true,
+        "wallet_types": ["ACCOUNT", "VOUCHER", "ATM"]
+      },
+
+       "resource_endpoints": {
+      "verify_asset": "/api/v1/verify_asset.php",
+      "place_hold": "/api/v1/hold.php",
+      "release_hold": "/api/v1/hold.php",
+      "debit_funds": "/api/v1/settlement/notify_debit.php",
+      "generate_token": "/api/v1/atm/generate_code.php",
+      "verify_token": "/api/v1/atm/atm_cashout.php",
+      "confirm_cashout": "/api/v1/atm_cashout.php",
+      "process_deposit": "/api/v1/deposit/direct.php",
+      "reverse_transaction": "/api/v1/hold.php"
+      },
+       "phone_format": {
+  "prefix": "+",
+  "country_code": "267",
+  "strip_leading_zeros": true,
+  "expected_length": 11,
+  "remove_country_code_for_local": false
+},
+
+      "message_profile": {
+        "correlation_id_header": "X-Correlation-ID",
+        "idempotency_key_header": "X-Idempotency-Key",
+        "signature_header": "X-Signature",
+        "timestamp_header": "X-Timestamp",
+        "content_standard": "ISO20022_JSON"
+      },
+
+      "status": "ACTIVE"
+    },
+     "SACCUSSALIS": {
+      "type": "FINANCIAL_INSTITUTION",
+      "category": "BANK",
+      "provider_code": "SACCUSBWXX",
+      "auth_type": "MTLS_OAUTH2",
+      "base_url": "http://localhost/SaccusSalisbank/backend",
+
+      "security": {
+  "api_key": {
+    "value_env": "API_KEY_SACCUSSALIS",
+    "header_name": "X-API-KEY"
+  },
+            "oauth2": {
+      "token_endpoint": "/oauth2/token",
+      "client_id_env": "SACCUSSALIS_CLIENT_ID",
+      "client_secret_env": "SACCUSSALIS_CLIENT_SECRET",
+      "scope": "payments settlement ewallet atm"
+    },
+         "request_signing": {
+      "algorithm": "RSA-SHA256",
+      "private_key_env": "SACCUSSALIS_SIGNING_KEY"
+    }
+      },
+
+      "identity": {
+        "system_user_id": 1001,
+        "legal_entity_identifier": "BW-SACCUSSALIS-LEI-001",
+        "license_number": "CB-BW-027"
+      },
+
+      "capabilities": {
+        "supports_sca": true,
+        "supports_realtime_processing": true,
+        "supports_reversal": true,
+        "supports_idempotency": true,
+        "wallet_types": ["ACCOUNT", "E-WALLET", "ATM"]
+      },
+     "resource_endpoints": {
+    "verify_asset": "/api/v1/verify_asset.php",             
+    "place_hold": "/api/v1/hold.php",                 
+    "release_hold": "/api/v1/hold.php",           
+    "process_deposit": "/api/v1/transaction/credit_funds.php",                
+    "generate_token": "/api/v1/atm/generate_code.php", 
+    "debit_funds": "/api/v1/notify_debit.php", 
+    "verify_token": "/api/v1/atm/verify-token/index.php",          
+    "confirm_cashout": "/api/v1/confirm_cashout.php",                       
+    "reverse_transaction": "/api/v1/hold.php" 
+  },
+        "phone_format": {
+  "prefix": "+",
+  "country_code": "267",
+  "strip_leading_zeros": true,
+  "expected_length": 11,
+  "remove_country_code_for_local": false
+},
+      "message_profile": {
+        "correlation_id_header": "X-Correlation-ID",
+        "idempotency_key_header": "X-Idempotency-Key",
+        "signature_header": "X-Signature",
+        "timestamp_header": "X-Timestamp",
+        "content_standard": "ISO20022_JSON"
+      },
+
+      "status": "ACTIVE"
+    },
+   
+   
+    "TEST_BANK_A": {
+      "type": "FINANCIAL_INSTITUTION",
+      "category": "BANK",
+      "provider_code": "TEST_BIC_A",
+      "auth_type": "MTLS_OAUTH2",
+      "base_url": "https://sandbox-bank.local",
+      "identity": {
+        "system_user_id": 1,
+        "legal_entity_identifier": "TEST_LEI_001",
+        "license_number": "CB-BW-001"
+      },
+      "capabilities": {
+        "supports_sca": true,
+        "supports_realtime_settlement": true,
+        "wallet_types": ["ACCOUNT", "VOUCHER"]
+      },
+      "routing": {
+        "settlement_account": "TEST_ACC_001",
+        "settlement_type": "RTGS_TRANSIT"
+      },
+      "resource_endpoints": {
+        "payment_initiation": "/sandbox/payments",
+        "funds_confirmation": "/sandbox/accounts/{id}/balance",
+        "beneficiary_validation": "/sandbox/identity/verify",
+        "reversal": "/sandbox/payments/{id}/reversal"
+      },
+      "status": "ACTIVE"
+    },
+    "TEST_BANK_B": {
+      "type": "FINANCIAL_INSTITUTION",
+      "category": "BANK",
+      "provider_code": "TEST_BIC_B",
+      "auth_type": "MTLS_OAUTH2",
+      "base_url": "https://sandbox-bank-b.local",
+      "identity": {
+        "system_user_id": 2,
+        "legal_entity_identifier": "TEST_LEI_002",
+        "license_number": "CB-BW-002"
+      },
+      "capabilities": {
+        "supports_sca": true,
+        "supports_realtime_settlement": true,
+        "wallet_types": ["ACCOUNT", "VOUCHER"]
+      },
+      "routing": {
+        "settlement_account": "TEST_ACC_002",
+        "settlement_type": "RTGS_TRANSIT"
+      },
+     "resource_endpoints": {
+    "identity_lookup": "/api/v1/verify_account.php",
+    "voucher_request": "/api/v1/atm/generate_code.php",
+    "credit_transfer": "/api/v1/deposit/direct.php",
+    "reverse_transaction": "/api/v1/transaction/reverse.php",
+    "status_query": "/api/v1/transaction/status.php",
+    "settlement_instruction": "/api/v1/settlement/notify_debit.php"
+},
+      "status": "ACTIVE"
+    },
+    "TEST_MNO_A": {
+      "type": "MOBILE_MONEY_OPERATOR",
+      "category": "MNO",
+      "provider_code": "TEST_MNC_A",
+      "auth_type": "OAUTH2_JWT",
+      "base_url": "https://sandbox-mno.local",
+      "capabilities": {
+        "supports_sca": true,
+        "supports_realtime_disbursement": true,
+        "wallet_types": ["WALLET"]
+      },
+      "resource_endpoints": {
+        "disbursement": "/sandbox/disbursements",
+        "collection": "/sandbox/request-to-pay",
+        "kyc_check": "/sandbox/subscribers/{msisdn}/validate"
+      },
+      "status": "ACTIVE"
+    },
+    "TEST_MNO_B": {
+      "type": "MOBILE_MONEY_OPERATOR",
+      "category": "MNO",
+      "provider_code": "TEST_MNC_B",
+      "auth_type": "OAUTH2_JWT",
+      "base_url": "https://sandbox-mno-b.local",
+      "capabilities": {
+        "supports_sca": true,
+        "supports_realtime_disbursement": true,
+        "wallet_types": ["WALLET"]
+      },
+      "resource_endpoints": {
+        "disbursement": "/sandbox/disbursements",
+        "collection": "/sandbox/request-to-pay",
+        "kyc_check": "/sandbox/subscribers/{msisdn}/validate"
+      },
+      "status": "ACTIVE"
+    },
+    "TEST_DISTRIBUTOR_A": {
+      "type": "CARD_DISTRIBUTOR",
+      "category": "EMI_CARD",
+      "provider_code": "TEST_EMV_A",
+      "auth_type": "MTLS_OAUTH2",
+      "base_url": "https://sandbox-distributor.local",
+      "capabilities": {
+        "supports_card_issue": true,
+        "supports_top_up": true,
+        "wallet_types": ["CARD"]
+      },
+      "resource_endpoints": {
+        "card_issue": "/sandbox/cards/issue",
+        "top_up": "/sandbox/cards/{id}/load"
+      },
+      "status": "ACTIVE"
+    },
+    "TEST_DISTRIBUTOR_B": {
+      "type": "CARD_DISTRIBUTOR",
+      "category": "EMI_CARD",
+      "provider_code": "TEST_EMV_B",
+      "auth_type": "MTLS_OAUTH2",
+      "base_url": "https://sandbox-distributor-b.local",
+      "capabilities": {
+        "supports_card_issue": true,
+        "supports_top_up": true,
+        "wallet_types": ["CARD"]
+      },
+      "resource_endpoints": {
+        "card_issue": "/sandbox/cards/issue",
+        "top_up": "/sandbox/cards/{id}/load"
+      },
+      "status": "ACTIVE"
+    },
+    "ALPHA": {
+      "type": "FINANCIAL_INSTITUTION",
+      "category": "BANK",
+      "provider_code": "ALPHA_BIC",
+      "auth_type": "MTLS_OAUTH2",
+      "base_url": "https://sandbox-alpha.local",
+      "identity": {
+        "system_user_id": 9999,
+        "legal_entity_identifier": "ALPHA_LEI_001"
+      },
+      "capabilities": {
+        "supports_sca": true,
+        "supports_realtime_settlement": true,
+        "wallet_types": ["ACCOUNT", "E-WALLET"]
+      },
+      "routing": {
+        "settlement_account": "ALPHA_ACC_001",
+        "settlement_type": "RTGS_TRANSIT"
+      },
+      "status": "ACTIVE"
+    },
+    "BRAVO": {
+      "type": "FINANCIAL_INSTITUTION",
+      "category": "BANK",
+      "provider_code": "BRAVO_BIC",
+      "auth_type": "MTLS_OAUTH2",
+      "base_url": "https://sandbox-bravo.local",
+      "identity": {
+        "system_user_id": 9002,
+        "legal_entity_identifier": "BRAVO_LEI_002"
+      },
+      "capabilities": {
+        "supports_sca": true,
+        "supports_realtime_settlement": true,
+        "wallet_types": ["ACCOUNT", "VOUCHER"]
+      },
+      "routing": {
+        "settlement_account": "BRAVO_ACC_001",
+        "settlement_type": "RTGS_TRANSIT"
+      },
+      "status": "ACTIVE"
+    },
+    "CHARLIE": {
+      "type": "FINANCIAL_INSTITUTION",
+      "category": "BANK",
+      "provider_code": "CHARLIE_BIC",
+      "auth_type": "MTLS_OAUTH2",
+      "base_url": "https://sandbox-charlie.local",
+      "identity": {
+        "system_user_id": 9003,
+        "legal_entity_identifier": "CHARLIE_LEI_003"
+      },
+      "capabilities": {
+        "supports_sca": true,
+        "supports_realtime_settlement": true,
+        "wallet_types": ["ACCOUNT", "E-WALLET"]
+      },
+      "routing": {
+        "settlement_account": "CHARLIE_ACC_001",
+        "settlement_type": "RTGS_TRANSIT"
+      },
+      "status": "ACTIVE"
+    },
+    "CARD": {
+      "type": "CARD_DISTRIBUTOR",
+      "category": "EMI_CARD",
+      "provider_code": "CARD_EMV",
+      "auth_type": "MTLS_OAUTH2",
+      "base_url": "https://sandbox-card.local",
+      "identity": {
+        "system_user_id": 9004,
+        "legal_entity_identifier": "CARD_LEI_004"
+      },
+      "capabilities": {
+        "supports_card_issue": true,
+        "supports_top_up": true,
+        "wallet_types": ["CARD"]
+      },
+      "resource_endpoints": {
+        "card_issue": "/sandbox/cards/issue",
+        "top_up": "/sandbox/cards/{id}/load"
+      },
+      "status": "ACTIVE"
+    },
+    "BANK A": {
+      "type": "FINANCIAL_INSTITUTION",
+      "category": "BANK",
+      "provider_code": "BANK_BIC",
+      "auth_type": "MTLS_OAUTH2",
+      "base_url": "https://sandbox-bank2.local",
+      "identity": {
+        "system_user_id": 9005,
+        "legal_entity_identifier": "BANK_LEI_005"
+      },
+      "capabilities": {
+        "supports_sca": true,
+        "supports_realtime_settlement": true,
+        "wallet_types": ["ACCOUNT", "E-WALLET"]
+      },
+      "routing": {
+        "settlement_account": "BANK_ACC_001",
+        "settlement_type": "RTGS_TRANSIT"
+      },
+      "resource_endpoints": {
+        "payment_initiation": "/sandbox/payments",
+        "funds_confirmation": "/sandbox/accounts/{id}/balance"
+      },
+      "status": "ACTIVE"
+    }
+  }
+}

@@ -1,0 +1,115 @@
+
+=== VOUCHMORPHN REGULATORY CERTIFICATION TEST ===
+Time: 2026-02-15 07:48:09
+
+✔ PASS  : System booted
+✔ PASS  : Supervisor heartbeat active
+
+--- Adding liquidity for all participants ---
+  Added 1,000,000 BWP to ALPHA
+  Added 1,000,000 BWP to BRAVO
+  Added 1,000,000 BWP to CHARLIE
+  Added 1,000,000 BWP to CARD
+  Added 1,000,000 BWP to BANK
+
+--- Verifying liquidity ---
+  ALPHA: Float=1,000,000, Settlement=1,000,000, Total=2,000,000
+  BRAVO: Float=1,000,000, Settlement=1,000,000, Total=2,000,000
+  CHARLIE: Float=1,000,000, Settlement=1,000,000, Total=2,000,000
+  CARD: Float=1,000,000, Settlement=1,000,000, Total=2,000,000
+  BANK: Float=1,000,000, Settlement=1,000,000, Total=2,000,000
+
+--- Setting up participants ---
+  Updated user: CARD
+  Updated user: BANK
+
+--- GLOBALS['participants'] keys ---
+  - 'ALPHA'
+  - 'BRAVO'
+  - 'CHARLIE'
+  - 'CARD'
+  - 'BANK'
+✔ PASS  : All participants verified in database
+    * ALPHA: Verified=1, KYC=1
+    * BRAVO: Verified=1, KYC=1
+    * CHARLIE: Verified=1, KYC=1
+    * CARD: Verified=1, KYC=1
+    * BANK: Verified=1, KYC=1
+
+--- Testing SwapService participant access ---
+SwapService participants keys:
+  - 'TEST_BANK'
+  - 'TEST_MNO'
+  - 'TEST_DISTRIBUTOR'
+  - 'ALPHA'
+  - 'BRAVO'
+  - 'CHARLIE'
+  - 'CARD'
+  - 'BANK'
+✔ PASS  : Participants funded and settlement ledger seeded
+
+  → Testing wallet->wallet (ALPHA → BRAVO, 100 BWP)
+
+Warning: file_put_contents(/opt/lampp/htdocs/vouchmorphn/src/BUSINESS_LOGIC_LAYER/services/../../APP_LAYER/logs/swap_audit.log): Failed to open stream: Permission denied in /opt/lampp/htdocs/vouchmorphn/src/BUSINESS_LOGIC_LAYER/services/SwapService.php on line 429
+
+Warning: file_put_contents(/opt/lampp/htdocs/vouchmorphn/src/BUSINESS_LOGIC_LAYER/services/../../APP_LAYER/logs/swap_audit.log): Failed to open stream: Permission denied in /opt/lampp/htdocs/vouchmorphn/src/BUSINESS_LOGIC_LAYER/services/SwapService.php on line 429
+✔ PASS  : wallet->wallet
+
+  → Testing wallet->voucher (ALPHA → BRAVO, 100 BWP)
+
+Warning: file_put_contents(/opt/lampp/htdocs/vouchmorphn/src/BUSINESS_LOGIC_LAYER/services/../../APP_LAYER/logs/swap_audit.log): Failed to open stream: Permission denied in /opt/lampp/htdocs/vouchmorphn/src/BUSINESS_LOGIC_LAYER/services/SwapService.php on line 429
+
+Warning: file_put_contents(/opt/lampp/htdocs/vouchmorphn/src/BUSINESS_LOGIC_LAYER/services/../../APP_LAYER/logs/swap_audit.log): Failed to open stream: Permission denied in /opt/lampp/htdocs/vouchmorphn/src/BUSINESS_LOGIC_LAYER/services/SwapService.php on line 429
+✔ PASS  : wallet->voucher
+
+  → Testing voucher->wallet (BRAVO → ALPHA, 100 BWP)
+
+Warning: file_put_contents(/opt/lampp/htdocs/vouchmorphn/src/BUSINESS_LOGIC_LAYER/services/../../APP_LAYER/logs/swap_audit.log): Failed to open stream: Permission denied in /opt/lampp/htdocs/vouchmorphn/src/BUSINESS_LOGIC_LAYER/services/SwapService.php on line 429
+
+Warning: file_put_contents(/opt/lampp/htdocs/vouchmorphn/src/BUSINESS_LOGIC_LAYER/services/../../APP_LAYER/logs/swap_audit.log): Failed to open stream: Permission denied in /opt/lampp/htdocs/vouchmorphn/src/BUSINESS_LOGIC_LAYER/services/SwapService.php on line 429
+✔ PASS  : voucher->wallet
+
+  → Testing card->bank (CARD → BANK, 100 BWP)
+
+Warning: file_put_contents(/opt/lampp/htdocs/vouchmorphn/src/BUSINESS_LOGIC_LAYER/services/../../APP_LAYER/logs/swap_audit.log): Failed to open stream: Permission denied in /opt/lampp/htdocs/vouchmorphn/src/BUSINESS_LOGIC_LAYER/services/SwapService.php on line 429
+
+Warning: file_put_contents(/opt/lampp/htdocs/vouchmorphn/src/BUSINESS_LOGIC_LAYER/services/../../APP_LAYER/logs/swap_audit.log): Failed to open stream: Permission denied in /opt/lampp/htdocs/vouchmorphn/src/BUSINESS_LOGIC_LAYER/services/SwapService.php on line 429
+✔ PASS  : card->bank
+
+  → Testing bank->wallet (BANK → ALPHA, 100 BWP)
+
+Warning: file_put_contents(/opt/lampp/htdocs/vouchmorphn/src/BUSINESS_LOGIC_LAYER/services/../../APP_LAYER/logs/swap_audit.log): Failed to open stream: Permission denied in /opt/lampp/htdocs/vouchmorphn/src/BUSINESS_LOGIC_LAYER/services/SwapService.php on line 429
+
+Warning: file_put_contents(/opt/lampp/htdocs/vouchmorphn/src/BUSINESS_LOGIC_LAYER/services/../../APP_LAYER/logs/swap_audit.log): Failed to open stream: Permission denied in /opt/lampp/htdocs/vouchmorphn/src/BUSINESS_LOGIC_LAYER/services/SwapService.php on line 429
+✔ PASS  : bank->wallet
+
+  → Testing AML block test (ALPHA → BRAVO, 100 BWP)
+
+Warning: file_put_contents(/opt/lampp/htdocs/vouchmorphn/src/BUSINESS_LOGIC_LAYER/services/../../APP_LAYER/logs/swap_audit.log): Failed to open stream: Permission denied in /opt/lampp/htdocs/vouchmorphn/src/BUSINESS_LOGIC_LAYER/services/SwapService.php on line 429
+✔ PASS  : AML regulatory block working
+
+  → Testing Liquidity rejection (ALPHA → BRAVO, 999999999 BWP)
+
+Warning: file_put_contents(/opt/lampp/htdocs/vouchmorphn/src/BUSINESS_LOGIC_LAYER/services/../../APP_LAYER/logs/swap_audit.log): Failed to open stream: Permission denied in /opt/lampp/htdocs/vouchmorphn/src/BUSINESS_LOGIC_LAYER/services/SwapService.php on line 429
+
+Warning: file_put_contents(/opt/lampp/htdocs/vouchmorphn/src/BUSINESS_LOGIC_LAYER/services/../../APP_LAYER/logs/swap_audit.log): Failed to open stream: Permission denied in /opt/lampp/htdocs/vouchmorphn/src/BUSINESS_LOGIC_LAYER/services/SwapService.php on line 429
+✔ PASS  : Liquidity protection working
+
+  → Testing Idempotent first (ALPHA → BRAVO, 50 BWP)
+
+Warning: file_put_contents(/opt/lampp/htdocs/vouchmorphn/src/BUSINESS_LOGIC_LAYER/services/../../APP_LAYER/logs/swap_audit.log): Failed to open stream: Permission denied in /opt/lampp/htdocs/vouchmorphn/src/BUSINESS_LOGIC_LAYER/services/SwapService.php on line 429
+
+Warning: file_put_contents(/opt/lampp/htdocs/vouchmorphn/src/BUSINESS_LOGIC_LAYER/services/../../APP_LAYER/logs/swap_audit.log): Failed to open stream: Permission denied in /opt/lampp/htdocs/vouchmorphn/src/BUSINESS_LOGIC_LAYER/services/SwapService.php on line 429
+✔ PASS  : Idempotent first
+
+  → Testing Idempotent replay (ALPHA → BRAVO, 50 BWP)
+
+Warning: file_put_contents(/opt/lampp/htdocs/vouchmorphn/src/BUSINESS_LOGIC_LAYER/services/../../APP_LAYER/logs/swap_audit.log): Failed to open stream: Permission denied in /opt/lampp/htdocs/vouchmorphn/src/BUSINESS_LOGIC_LAYER/services/SwapService.php on line 429
+
+Warning: file_put_contents(/opt/lampp/htdocs/vouchmorphn/src/BUSINESS_LOGIC_LAYER/services/../../APP_LAYER/logs/swap_audit.log): Failed to open stream: Permission denied in /opt/lampp/htdocs/vouchmorphn/src/BUSINESS_LOGIC_LAYER/services/SwapService.php on line 429
+✔ PASS  : Idempotent replay
+✔ PASS  : Idempotency protected
+✔ PASS  : Regulator reporting generated
+✔ PASS  : Settlement ledger written
+
+=== TEST COMPLETE ===

@@ -1,0 +1,31 @@
+{
+  "version": "1.0",
+  "base_url": "https://api.prestagedswap.com/v1",
+  "endpoints": [
+    {
+      "name": "Initiate Swap",
+      "method": "POST",
+      "path": "/swap/initiate",
+      "request": {
+        "from_bank": "string",
+        "to_bank": "string",
+        "amount": "float",
+        "reference": "string"
+      },
+      "response": {
+        "status": "success",
+        "transaction_id": "string"
+      }
+    },
+    {
+      "name": "Get Swap Status",
+      "method": "GET",
+      "path": "/swap/status/{transaction_id}",
+      "response": {
+        "status": "string",
+        "progress": "int",
+        "timestamp": "string"
+      }
+    }
+  ]
+}
