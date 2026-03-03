@@ -139,20 +139,22 @@ SessionManager::start();
  * 6️⃣ DATABASE INITIALIZATION
  * ====================================================== */
 
+// Debug: Check if DATABASE_URL is set
+error_log("[DB_DEBUG] DATABASE_URL: " . (getenv('DATABASE_URL') ? 'Set' : 'Not set'));
+
+// Debug: Show first part of DATABASE_URL (safe)
+$dbUrl = getenv('DATABASE_URL');
+if ($dbUrl) {
+    $masked = preg_replace('/:[^@]*@/', ':****@', $dbUrl);
+    error_log("[DB_DEBUG] DATABASE_URL value: " . $masked);
+}
+
 $pdo = DBConnection::getConnection();
 
 if (!$pdo instanceof PDO) {
+    error_log("[DB_DEBUG] DBConnection::getConnection() returned null");
     throw new RuntimeException("Failed to obtain PDO instance");
 }
-
-$databases = [
-    'primary' => $pdo
-];
-
-$primaryDbConnection = $databases['primary']; // ✅ Corrected line
-
-error_log("[BOOTSTRAP] Primary DB connected");
-
 /* ======================================================
  * 7️⃣ LOAD MOJALOOP CONFIG
  * ====================================================== */
@@ -257,6 +259,7 @@ $GLOBALS['CALLBACK_URL'] = getCallbackUrl();
 
 error_log("[BOOTSTRAP] System ready for " . SYSTEM_COUNTRY);
 error_log("[BOOTSTRAP] Callback URL → " . $GLOBALS['CALLBACK_URL']);
+
 
 
 
