@@ -9,6 +9,7 @@ class DBConnection
 {
     private static ?PDO $connection = null;
     private static array $instances = [];
+    private static bool $connectionAttempted = false;
 
     /**
      * Parse Railway DATABASE_URL
@@ -54,13 +55,20 @@ class DBConnection
 
     /**
      * Original method - maintains backward compatibility
+     * Now returns null on failure instead of dying
      */
-    public static function getConnection(): PDO
+    public static function getConnection(): ?PDO
     {
         if (self::$connection !== null) {
             return self::$connection;
         }
 
+        // Prevent multiple connection attempts
+        if (self::$connectionAttempted) {
+            return null;
+        }
+
+        self::$connectionAttempted = true;
         $config = self::getDbConfig();
 
         try {
@@ -82,31 +90,24 @@ class DBConnection
 
         } catch (PDOException $e) {
             error_log("[DBConnection] Connection failed: " . $e->getMessage());
-            
-            // In production, don't expose details
-            if (getenv('APP_ENV') === 'production') {
-                http_response_code(500);
-                die("Database connection failed. Please check logs.");
-            } else {
-                http_response_code(500);
-                die("DATABASE_CONNECTION_FAILED: " . $e->getMessage());
-            }
+            self::$connection = null;
+            return null; // Return null instead of dying
         }
     }
 
     /**
      * New method - matches what USSDController expects
+     * Returns null on failure instead of throwing
      */
-    public static function getInstance(array $dbConfig = []): PDO
+    public static function getInstance(array $dbConfig = []): ?PDO
     {
-        $config = self::getDbConfig();
-        $key = $config['dbname'] ?? 'default';
-        
-        if (!isset(self::$instances[$key])) {
-            self::$instances[$key] = self::getConnection();
+        try {
+            $conn = self::getConnection();
+            return $conn;
+        } catch (\Throwable $e) {
+            error_log("[DBConnection] getInstance failed: " . $e->getMessage());
+            return null;
         }
-        
-        return self::$instances[$key];
     }
 
     /**
@@ -127,9 +128,26 @@ class DBConnection
     }
 
     /**
+     * Check if database is connected
+     */
+    public static function isConnected(): bool
+    {
+        try {
+            $conn = self::getConnection();
+            if (!$conn) {
+                return false;
+            }
+            $conn->query("SELECT 1")->fetch();
+            return true;
+        } catch (\Throwable $e) {
+            return false;
+        }
+    }
+
+    /**
      * Get connection for a specific database (for multi-db setups)
      */
-    public static function getDatabaseConnection(string $dbName): PDO
+    public static function getDatabaseConnection(string $dbName): ?PDO
     {
         $config = self::getDbConfig();
         $config['dbname'] = $dbName;
@@ -149,38 +167,53 @@ class DBConnection
                 
             } catch (PDOException $e) {
                 error_log("[DBConnection] Failed to connect to {$dbName}: " . $e->getMessage());
-                throw $e;
+                return null;
             }
         }
         
-        return self::$instances[$key];
+        return self::$instances[$key] ?? null;
     }
 
     /**
-     * Execute a query and return results
+     * Execute a query and return results (safe version)
      */
     public static function query(string $sql, array $params = []): array
     {
+        $conn = self::getConnection();
+        if (!$conn) {
+            error_log("[DBConnection] No database connection for query");
+            return [];
+        }
+        
         try {
-            $conn = self::getConnection();
             $stmt = $conn->prepare($sql);
             $stmt->execute($params);
             return $stmt->fetchAll();
         } catch (PDOException $e) {
             error_log("[DBConnection] Query failed: " . $e->getMessage());
-            throw $e;
+            return [];
         }
     }
 
     /**
-     * Execute a statement and return row count
+     * Execute a statement and return row count (safe version)
      */
     public static function execute(string $sql, array $params = []): int
     {
         $conn = self::getConnection();
-        $stmt = $conn->prepare($sql);
-        $stmt->execute($params);
-        return $stmt->rowCount();
+        if (!$conn) {
+            error_log("[DBConnection] No database connection for execute");
+            return 0;
+        }
+        
+        try {
+            $stmt = $conn->prepare($sql);
+            $stmt->execute($params);
+            return $stmt->rowCount();
+        } catch (PDOException $e) {
+            error_log("[DBConnection] Execute failed: " . $e->getMessage());
+            return 0;
+        }
     }
 
     /**
@@ -188,7 +221,8 @@ class DBConnection
      */
     public static function beginTransaction(): bool
     {
-        return self::getConnection()->beginTransaction();
+        $conn = self::getConnection();
+        return $conn ? $conn->beginTransaction() : false;
     }
 
     /**
@@ -196,7 +230,8 @@ class DBConnection
      */
     public static function commit(): bool
     {
-        return self::getConnection()->commit();
+        $conn = self::getConnection();
+        return $conn ? $conn->commit() : false;
     }
 
     /**
@@ -204,7 +239,8 @@ class DBConnection
      */
     public static function rollback(): bool
     {
-        return self::getConnection()->rollBack();
+        $conn = self::getConnection();
+        return $conn ? $conn->rollBack() : false;
     }
 
     /**
@@ -212,7 +248,8 @@ class DBConnection
      */
     public static function lastInsertId(?string $name = null)
     {
-        return self::getConnection()->lastInsertId($name);
+        $conn = self::getConnection();
+        return $conn ? $conn->lastInsertId($name) : null;
     }
 
     /**
@@ -228,8 +265,13 @@ class DBConnection
             'railway_url_detected' => getenv('DATABASE_URL') ? true : false
         ];
         
+        $conn = self::getConnection();
+        if (!$conn) {
+            $results['error'] = 'No database connection';
+            return $results;
+        }
+        
         try {
-            $conn = self::getConnection();
             $results['connection'] = true;
             $results['user'] = $conn->query("SELECT current_user")->fetchColumn();
             $results['database'] = $conn->query("SELECT current_database()")->fetchColumn();
@@ -254,11 +296,9 @@ class DBConnection
 
     /**
      * Fix permissions - In Railway, this is handled automatically
-     * This method is kept for compatibility but does nothing in production
      */
     public static function fixPermissions(): bool
     {
-        // In Railway, permissions are managed automatically
         error_log("[DBConnection] Permissions are managed by Railway - no action needed");
         return true;
     }
