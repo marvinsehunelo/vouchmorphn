@@ -1,4 +1,3 @@
-cat > src/DATA_PERSISTENCE_LAYER/config/DBConnection.php << 'EOF'
 <?php
 namespace DATA_PERSISTENCE_LAYER\config;
 
@@ -288,5 +287,4 @@ class DBConnection
             'config' => $config
         ];
     }
-}
-EOF
+}}
