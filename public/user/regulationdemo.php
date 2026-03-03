@@ -3,70 +3,79 @@ declare(strict_types=1);
 
 namespace DASHBOARD;
 
-// DEFINE COUNTRY CODE FIRST - BEFORE ANYTHING ELSE THAT USES IT
+// FIX 1: Start output buffering at the VERY TOP
+ob_start();
+
+// FIX 2: Define country code FIRST - before anything else that uses it
 $countryCode = $_GET['country'] ?? $_SESSION['country'] ?? 'BW';
 
-// 1. DYNAMIC ROOT DETECTION
+// FIX 3: Dynamic root detection with error handling
 if (!defined('APP_ROOT')) {
-    define('APP_ROOT', realpath(__DIR__ . '/../../'));
+    define('APP_ROOT', rtrim(realpath(__DIR__ . '/../../'), '/') ?: '/var/www/html');
 }
 
-// 2. LOAD COMPOSER AUTOLOADER
-if (file_exists(APP_ROOT . '/vendor/autoload.php')) {
-    require_once APP_ROOT . '/vendor/autoload.php';
-}
+// FIX 4: Load Composer autoloader with error suppression
+@include_once APP_ROOT . '/vendor/autoload.php';
 
-// 3. LOAD DOTENV - Check country-specific location too
+// FIX 5: Load Dotenv safely
 if (class_exists('\Dotenv\Dotenv')) {
-    // Check root .env first
+    // Try root .env first
     if (file_exists(APP_ROOT . '/.env')) {
-        $dotenv = \Dotenv\Dotenv::createImmutable(APP_ROOT);
-        $dotenv->load();
+        try {
+            $dotenv = \Dotenv\Dotenv::createImmutable(APP_ROOT);
+            $dotenv->load();
+        } catch (\Exception $e) {
+            error_log("Dotenv root load failed: " . $e->getMessage());
+        }
     }
     
-    // Also check country-specific .env - NOW $countryCode IS DEFINED
+    // Try country-specific .env
     $countryEnv = APP_ROOT . "/src/CORE_CONFIG/countries/{$countryCode}/.env_{$countryCode}";
     if (file_exists($countryEnv)) {
-        $dotenv = \Dotenv\Dotenv::createImmutable(dirname($countryEnv), basename($countryEnv));
-        $dotenv->load();
+        try {
+            $dotenv = \Dotenv\Dotenv::createImmutable(dirname($countryEnv), basename($countryEnv));
+            $dotenv->load();
+        } catch (\Exception $e) {
+            error_log("Dotenv country load failed: " . $e->getMessage());
+        }
     }
 }
 
-// 4. LOAD CONFIG (Using require_once to prevent "Already Defined" crashes)
+// FIX 6: Load config with better error handling
 $configPath = APP_ROOT . '/src/CORE_CONFIG/countries/BW/config_BW.php';
 if (file_exists($configPath)) {
     require_once $configPath;
 } else {
-    // If this fails, we want to know why instead of a 502
-    die("Diagnosis: Config file missing at " . $configPath);
+    error_log("CRITICAL: Config file missing at " . $configPath);
+    // Don't die in production, but log it
 }
 
 // ======================================================
-// RAILWAY COMPATIBILITY FIXES START HERE
+// RAILWAY COMPATIBILITY FIXES
 // ======================================================
 
-// Fix 1: Set correct error logging path for Railway
-ini_set('display_errors', 0);
-ini_set('display_startup_errors', 0);
+// Fix 1: Set correct error logging for Railway
+ini_set('display_errors', '0');
+ini_set('display_startup_errors', '0');
 error_reporting(E_ALL);
 
-// Railway doesn't have /opt/lampp/logs/ - use system temp or current directory
+// Railway log path
 $log_path = sys_get_temp_dir() . '/vouchmorph_errors.log';
 ini_set('error_log', $log_path);
-ini_set('log_errors', 1);
+ini_set('log_errors', '1');
 
-// Custom error handler to catch warnings/notices
+// Custom error handler
 set_error_handler(function($errno, $errstr, $errfile, $errline) {
     error_log("PHP Error [$errno]: $errstr in $errfile line $errline");
     return true;
 });
 
-// Fix 2: Test database connection with proper error handling
+// Fix 2: Database connection test
 $db_status = '❌ Not Connected';
 $db_error = null;
+$db = null;
 
 try {
-    // Check if DBConnection class exists
     if (!class_exists('\DATA_PERSISTENCE_LAYER\config\DBConnection')) {
         throw new \Exception('DBConnection class not found - check autoloader');
     }
@@ -75,8 +84,6 @@ try {
     
     if ($db) {
         $db_status = '✅ Connected';
-        
-        // Test query to verify permissions
         $test = $db->query("SELECT 1 as test")->fetch();
         if ($test) {
             $db_status = '✅ Connected (Working)';
@@ -85,40 +92,43 @@ try {
 } catch (\Exception $e) {
     $db_error = $e->getMessage();
     error_log("Regulation demo DB error: " . $db_error);
-    // Don't display error to user in production
     if (getenv('APP_ENV') !== 'production') {
         echo "<!-- DB Debug: " . htmlspecialchars($db_error) . " -->\n";
     }
 }
 
-// Fix 3: Get Railway environment info
+// Fix 3: Environment info
 $environment = getenv('APP_ENV') ?: 'production';
 $railway_url = getenv('RAILWAY_PUBLIC_DOMAIN') ?: 'Not set';
 $database_url_configured = getenv('DATABASE_URL') ? 'Yes' : 'No';
 
-// Fix 4: Set base URL for API calls
+// Fix 4: Base URL
 $base_url = (isset($_SERVER['HTTPS']) ? 'https://' : 'http://') . 
             ($_SERVER['HTTP_HOST'] ?? 'localhost');
 
+// Fix 5: Safe number formatting function
 function safe_number_format($number, $decimals = 2) {
-    return $number !== null && $number !== '' ? number_format((float)$number, $decimals) : '0.00';
+    if (is_bool($number) || $number === null || $number === '') {
+        return '0.00';
+    }
+    return number_format((float)$number, $decimals, '.', '');
 }
 
 function debug_log($message) {
     error_log("[DEBUG] " . $message);
 }
 
-ob_start();
-
 error_log("=== regulationdemo.php accessed at " . date('Y-m-d H:i:s') . " ===");
 
-use DATA_PERSISTENCE_LAYER\config\DBConnection;
-use BUSINESS_LOGIC_LAYER\services\SwapService;
-use BUSINESS_LOGIC_LAYER\services\settlement\HybridSettlementStrategy;
-use SECURITY_LAYER\Encryption\KeyVault;
+// Fix 6: Load bootstrap with correct path
+$bootstrapPath = __DIR__ . '/../../src/bootstrap.php';
+if (file_exists($bootstrapPath)) {
+    require_once $bootstrapPath;
+} else {
+    error_log("CRITICAL: bootstrap.php not found at " . $bootstrapPath);
+}
 
-require_once __DIR__ . '/../../src/bootstrap.php';
-// ADD THIS DEBUG CODE RIGHT HERE:
+// Debug DATABASE_URL
 error_log("[TEST] DATABASE_URL from env: " . (getenv('DATABASE_URL') ? 'SET' : 'NOT SET'));
 if (getenv('DATABASE_URL')) {
     $url = getenv('DATABASE_URL');
@@ -126,10 +136,12 @@ if (getenv('DATABASE_URL')) {
     error_log("[TEST] DATABASE_URL value: " . $masked);
 }
 
+// Start session if not already started
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
+// Fix 7: AJAX detection
 $isAjax = !empty($_SERVER['HTTP_X_REQUESTED_WITH']) 
           && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest';
 
@@ -142,13 +154,6 @@ $regulatorView = $_GET['regulator_view'] ?? 'supervisory';
 $_SESSION['country'] = $countryCode;
 
 $configPath = __DIR__ . "/../../src/CORE_CONFIG/countries/{$countryCode}/";
-
-try {
-    $db = DBConnection::getConnection();
-} catch (\Exception $e) {
-    error_log("Database connection failed: " . $e->getMessage());
-    $db = null;
-}
 
 // ============================================================================
 // LOAD PARTICIPANTS FROM JSON FILE
@@ -354,7 +359,11 @@ if (!isset($isAjax)) {
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_swap']) && $isAjax) {
 
-    if (ob_get_level() > 0) ob_clean(); else ob_start();
+    // Clean output buffers for JSON response
+    while (ob_get_level() > 0) {
+        ob_end_clean();
+    }
+    ob_start();
 
     header('Content-Type: application/json');
     header('X-Content-Type-Options: nosniff');
@@ -365,11 +374,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_swap']) && $i
     try {
         $debug_log[] = "1. Starting swap execution";
 
-        $keyVault = new KeyVault();
+        // Fix 8: Check if KeyVault class exists
+        if (!class_exists('\SECURITY_LAYER\Encryption\KeyVault')) {
+            throw new \Exception('KeyVault class not found');
+        }
+        
+        $keyVault = new \SECURITY_LAYER\Encryption\KeyVault();
         $encryptionKey = $keyVault->getEncryptionKey();
         $debug_log[] = "2. KeyVault initialized";
 
-        $swapService = new SwapService($db, [], $countryCode, $encryptionKey, ['participants' => $participantsData]);
+        // Fix 9: Check if SwapService class exists
+        if (!class_exists('\BUSINESS_LOGIC_LAYER\services\SwapService')) {
+            throw new \Exception('SwapService class not found');
+        }
+        
+        $swapService = new \BUSINESS_LOGIC_LAYER\services\SwapService($db, [], $countryCode, $encryptionKey, ['participants' => $participantsData]);
         $debug_log[] = "3. SwapService initialized";
 
         $swapType     = $_POST['swap_type'] ?? 'self';
@@ -388,7 +407,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_swap']) && $i
                 $phoneNumber = $_POST['wallet_phone'] ?? '';
                 break;
             case 'voucher':
-                $phoneNumber = $_POST['wallet_phone'] ?? $_POST['ewallet_phone'] ?? ($defaultPhone ?? '');
+                $phoneNumber = $_POST['wallet_phone'] ?? $_POST['ewallet_phone'] ?? '';
                 break;
             default:
                 $phoneNumber = $_POST['account_number'] ?? '';
@@ -418,7 +437,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_swap']) && $i
             $debug_log[] = "6. Business legs built: " . count($legs);
         } else {
             $destPhone = $deliveryMode === 'cashout'
-                ? $_POST['destination_phone'] ?? ($defaultPhone ?? '')
+                ? $_POST['destination_phone'] ?? ''
                 : $_POST['destination_account'] ?? $_POST['destination_card'] ?? '';
             
             $leg = [
@@ -541,9 +560,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_swap']) && $i
         ];
     }
 
-    if (ob_get_length()) ob_clean();
+    // Clean output and send JSON
+    while (ob_get_level() > 0) {
+        ob_end_clean();
+    }
+    header('Content-Type: application/json');
     echo json_encode($response);
-    ob_end_flush();
     exit;
 }
 
@@ -552,7 +574,11 @@ $swapResult = null;
 $showMoneyFlow = false;
 $fieldRequirementsJson = json_encode($fieldRequirements);
 
-ob_clean();
+// Clean output buffer before sending HTML
+while (ob_get_level() > 0) {
+    ob_end_clean();
+}
+ob_start();
 
 ?>
 <!DOCTYPE html>
@@ -1973,6 +1999,7 @@ ob_clean();
     </script>
 </body>
 </html>
+
 
 
 
