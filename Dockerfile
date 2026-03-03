@@ -30,4 +30,4 @@ COPY public/ public/
 EXPOSE 9000
 
 # Start PHP built-in server
-CMD ["php", "-S", "0.0.0.0:$PORT", "-t", "public"]
+CMD php -S 0.0.0.0:${PORT} -t public/
