@@ -114,6 +114,13 @@ use BUSINESS_LOGIC_LAYER\services\settlement\HybridSettlementStrategy;
 use SECURITY_LAYER\Encryption\KeyVault;
 
 require_once __DIR__ . '/../../src/bootstrap.php';
+// ADD THIS DEBUG CODE RIGHT HERE:
+error_log("[TEST] DATABASE_URL from env: " . (getenv('DATABASE_URL') ? 'SET' : 'NOT SET'));
+if (getenv('DATABASE_URL')) {
+    $url = getenv('DATABASE_URL');
+    $masked = preg_replace('/:[^@]*@/', ':****@', $url);
+    error_log("[TEST] DATABASE_URL value: " . $masked);
+}
 
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
@@ -1963,6 +1970,7 @@ ob_clean();
     </script>
 </body>
 </html>
+
 
 
 
