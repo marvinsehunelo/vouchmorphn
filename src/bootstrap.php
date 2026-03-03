@@ -60,6 +60,15 @@ use BUSINESS_LOGIC_LAYER\services\SwapService;
 /* ======================================================
  * 1️⃣ RESOLVE COUNTRY
  * ====================================================== */
+// DEBUG: Check path
+error_log("[DEBUG] APP_ROOT = " . APP_ROOT);
+$countryPath = APP_ROOT . '/src/CORE_CONFIG/system_country.php';
+error_log("[DEBUG] Looking for: " . $countryPath);
+error_log("[DEBUG] File exists: " . (file_exists($countryPath) ? 'YES' : 'NO'));
+error_log("[DEBUG] File readable: " . (is_readable($countryPath) ? 'YES' : 'NO'));
+
+$country = require APP_ROOT . '/src/CORE_CONFIG/system_country.php';
+
 
 $country = require APP_ROOT . '/src/CORE_CONFIG/system_country.php';
 
@@ -267,6 +276,7 @@ $GLOBALS['CALLBACK_URL'] = getCallbackUrl();
 
 error_log("[BOOTSTRAP] System ready for " . SYSTEM_COUNTRY);
 error_log("[BOOTSTRAP] Callback URL → " . $GLOBALS['CALLBACK_URL']);
+
 
 
 
