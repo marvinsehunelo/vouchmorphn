@@ -3,6 +3,24 @@ declare(strict_types=1);
 
 namespace DASHBOARD;
 
+if (!defined('APP_ROOT')) {
+    define('APP_ROOT', realpath(__DIR__ . '/../../'));
+}
+
+// 2. LOAD COMPOSER AUTOLOADER
+// This is critical for class_exists() to work
+if (file_exists(APP_ROOT . '/vendor/autoload.php')) {
+    require_once APP_ROOT . '/vendor/autoload.php';
+}
+
+// 3. LOAD DOTENV (Prevent crash if .env is missing)
+if (class_exists('\Dotenv\Dotenv') && file_exists(APP_ROOT . '/.env')) {
+    $dotenv = \Dotenv\Dotenv::createImmutable(APP_ROOT);
+    $dotenv->load();
+}
+
+// 4. NOW load your config
+require_once APP_ROOT . '/src/CORE_CONFIG/countries/BW/config_BW.php';
 // CRITICAL: Load config FIRST
 require APP_ROOT . '/src/CORE_CONFIG/countries/BW/config_BW.php';
 // ======================================================
@@ -1931,6 +1949,7 @@ ob_clean();
     </script>
 </body>
 </html>
+
 
 
 
