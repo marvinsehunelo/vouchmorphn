@@ -69,9 +69,6 @@ error_log("[DEBUG] File readable: " . (is_readable($countryPath) ? 'YES' : 'NO')
 
 $country = require APP_ROOT . '/src/CORE_CONFIG/system_country.php';
 
-
-$country = require APP_ROOT . '/src/CORE_CONFIG/system_country.php';
-
 if (!$country || !defined('SYSTEM_COUNTRY')) {
     throw new RuntimeException('SYSTEM_COUNTRY not resolved');
 }
@@ -192,8 +189,9 @@ $swapServiceConfig = [
     'environment'    => getenv('APP_ENV') ?: 'production'
 ];
 
+// FIXED: Changed $primaryDbConnection to $pdo
 $swapService = new SwapService(
-    $primaryDbConnection,
+    $pdo,  // Fixed: using the valid PDO connection from above
     $mojaloopConfig,
     SYSTEM_COUNTRY,
     $appKey,
@@ -210,7 +208,9 @@ unset($countryConfig['security']['encryption_key']);
 
 $GLOBALS['config'] = $countryConfig;
 $GLOBALS['participants'] = $participants;
-$GLOBALS['databases'] = $databases;
+// FIXED: Removed undefined $databases variable
+// If you need databases in global context, use:
+$GLOBALS['databases'] = ['primary' => $pdo];
 $GLOBALS['swapService'] = $swapService;
 $GLOBALS['security'] = [
     'encryptor' => $tokenEncryptor,
@@ -276,9 +276,3 @@ $GLOBALS['CALLBACK_URL'] = getCallbackUrl();
 
 error_log("[BOOTSTRAP] System ready for " . SYSTEM_COUNTRY);
 error_log("[BOOTSTRAP] Callback URL → " . $GLOBALS['CALLBACK_URL']);
-
-
-
-
-
-
