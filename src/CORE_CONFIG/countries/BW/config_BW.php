@@ -1,7 +1,7 @@
 <?php
 /**
  * config_BW.php - Regulatory Compliant Sandbox 2026
- * UPDATED FOR RAILWAY DEPLOYMENT
+ * UPDATED FOR RAILWAY DEPLOYMENT with function guards
  */
 
 // ======================================================
@@ -25,40 +25,44 @@ if (!defined('VM_HASH_ALGO')) {
 // ======================================================
 // DYNAMIC BASE URL DETECTION FOR RAILWAY
 // ======================================================
-function getBaseUrl() {
-    $protocol = isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' ? 'https://' : 'http://';
-    $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
-    return $protocol . $host;
+if (!function_exists('getBaseUrl')) {
+    function getBaseUrl() {
+        $protocol = isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' ? 'https://' : 'http://';
+        $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+        return $protocol . $host;
+    }
 }
 
 // ======================================================
 // PARSE RAILWAY DATABASE URL
 // ======================================================
-function getDatabaseConfig() {
-    $database_url = getenv('DATABASE_URL');
-    
-    if ($database_url) {
-        // Parse Railway's DATABASE_URL (postgresql://user:pass@host:port/dbname)
-        $db = parse_url($database_url);
+if (!function_exists('getDatabaseConfig')) {
+    function getDatabaseConfig() {
+        $database_url = getenv('DATABASE_URL');
+        
+        if ($database_url) {
+            // Parse Railway's DATABASE_URL (postgresql://user:pass@host:port/dbname)
+            $db = parse_url($database_url);
+            return [
+                'host' => $db['host'] ?? 'localhost',
+                'port' => $db['port'] ?? '5432',
+                'name' => ltrim($db['path'] ?? '', '/'),
+                'user' => $db['user'] ?? 'postgres',
+                'pass' => $db['pass'] ?? '',
+                'password' => $db['pass'] ?? ''
+            ];
+        }
+        
+        // Fallback for local development
         return [
-            'host' => $db['host'] ?? 'localhost',
-            'port' => $db['port'] ?? '5432',
-            'name' => ltrim($db['path'] ?? '', '/'),
-            'user' => $db['user'] ?? 'postgres',
-            'pass' => $db['pass'] ?? '',
-            'password' => $db['pass'] ?? ''
+            'host' => getenv('PG_HOST') ?: 'localhost',
+            'port' => getenv('PG_PORT') ?: 5432,
+            'name' => getenv('PG_NAME') ?: 'swap_system_bw',
+            'user' => getenv('PG_USER') ?: 'postgres',
+            'pass' => getenv('PG_PASS') ?: '',
+            'password' => getenv('PG_PASS') ?: ''
         ];
     }
-    
-    // Fallback for local development
-    return [
-        'host' => getenv('PG_HOST') ?: 'localhost',
-        'port' => getenv('PG_PORT') ?: 5432,
-        'name' => getenv('PG_NAME') ?: 'swap_system_bw',
-        'user' => getenv('PG_USER') ?: 'postgres',
-        'pass' => getenv('PG_PASS') ?: '',
-        'password' => getenv('PG_PASS') ?: ''
-    ];
 }
 
 $dbConfig = getDatabaseConfig();
