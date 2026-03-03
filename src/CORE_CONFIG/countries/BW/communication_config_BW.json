@@ -1,7 +1,7 @@
 {
   "sms_gateway": {
     "provider": "cazacom",
-    "base_url": "http://localhost/CazaCom",
+    "base_url": "https://cazacom-prod.up.railway.app",
     "api_key": "SACCUS_INTERNAL_KEY_2025",
     "api_path": "/backend/routes/api.php",
     "sms_endpoint": "?path=sms/send",
