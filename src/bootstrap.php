@@ -12,13 +12,13 @@ declare(strict_types=1);
 
 spl_autoload_register(function ($class) {
     $prefixes = [
-        'DFSP_ADAPTER_LAYER\\'     => __DIR__ . '/DFSP_ADAPTER_LAYER/',
-        'BUSINESS_LOGIC_LAYER\\'   => __DIR__ . '/BUSINESS_LOGIC_LAYER/',
-        'DATA_PERSISTENCE_LAYER\\' => __DIR__ . '/DATA_PERSISTENCE_LAYER/',
-        'INTEGRATION_LAYER\\'      => __DIR__ . '/INTEGRATION_LAYER/',
-        'SECURITY_LAYER\\'         => __DIR__ . '/SECURITY_LAYER/',
-        'CORE_CONFIG\\'            => __DIR__ . '/CORE_CONFIG/',
-        'APP_LAYER\\'              => __DIR__ . '/APP_LAYER/'
+        'DFSP_ADAPTER_LAYER\\'     => __DIR__ . '/src/DFSP_ADAPTER_LAYER/',
+        'BUSINESS_LOGIC_LAYER\\'   => __DIR__ . '/src/BUSINESS_LOGIC_LAYER/',
+        'DATA_PERSISTENCE_LAYER\\' => __DIR__ . '/src/DATA_PERSISTENCE_LAYER/',
+        'INTEGRATION_LAYER\\'      => __DIR__ . '/src/INTEGRATION_LAYER/',
+        'SECURITY_LAYER\\'         => __DIR__ . '/src/SECURITY_LAYER/',
+        'CORE_CONFIG\\'            => __DIR__ . '/src/CORE_CONFIG/',
+        'APP_LAYER\\'              => __DIR__ . '/src/APP_LAYER/'
     ];
 
     foreach ($prefixes as $prefix => $baseDir) {
@@ -368,6 +368,7 @@ $GLOBALS['CALLBACK_URL'] = getCallbackUrl();
 error_log("[BOOTSTRAP] System initialized successfully for " . SYSTEM_COUNTRY);
 error_log("[BOOTSTRAP] Callback URL: " . $GLOBALS['CALLBACK_URL']);
 error_log("[BOOTSTRAP] SwapService initialized: " . (isset($GLOBALS['swapService']) ? 'YES' : 'NO'));
+
 
 
 
