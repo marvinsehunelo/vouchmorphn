@@ -38,7 +38,7 @@ spl_autoload_register(function ($class) {
 // Load Composer autoloader first
 require_once __DIR__ . '/../vendor/autoload.php';
 
-define('APP_ROOT', realpath(__DIR__));
+define('APP_ROOT', realpath(__DIR__ . '/../../')); 
 
 use Dotenv\Dotenv;
 use Dotenv\Repository\RepositoryBuilder;
@@ -368,4 +368,5 @@ $GLOBALS['CALLBACK_URL'] = getCallbackUrl();
 error_log("[BOOTSTRAP] System initialized successfully for " . SYSTEM_COUNTRY);
 error_log("[BOOTSTRAP] Callback URL: " . $GLOBALS['CALLBACK_URL']);
 error_log("[BOOTSTRAP] SwapService initialized: " . (isset($GLOBALS['swapService']) ? 'YES' : 'NO'));
+
 
