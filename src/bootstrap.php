@@ -1,6 +1,14 @@
 <?php
 declare(strict_types=1);
-
+// ===== DEBUG START =====
+error_log("[BOOTSTRAP DEBUG] Bootstrap file loaded");
+error_log("[BOOTSTRAP DEBUG] DATABASE_URL exists: " . (getenv('DATABASE_URL') ? 'YES' : 'NO'));
+if (getenv('DATABASE_URL')) {
+    $url = getenv('DATABASE_URL');
+    $masked = preg_replace('/:[^@]*@/', ':****@', $url);
+    error_log("[BOOTSTRAP DEBUG] DATABASE_URL value: " . $masked);
+}
+// ==
 /**
  * GLOBAL SYSTEM BOOTSTRAP
  * Banking-grade, multi-country, regulator-safe
@@ -259,6 +267,7 @@ $GLOBALS['CALLBACK_URL'] = getCallbackUrl();
 
 error_log("[BOOTSTRAP] System ready for " . SYSTEM_COUNTRY);
 error_log("[BOOTSTRAP] Callback URL → " . $GLOBALS['CALLBACK_URL']);
+
 
 
 
