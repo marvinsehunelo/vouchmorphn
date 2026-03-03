@@ -3,6 +3,9 @@ declare(strict_types=1);
 
 namespace DASHBOARD;
 
+// DEFINE COUNTRY CODE FIRST - BEFORE ANYTHING ELSE THAT USES IT
+$countryCode = $_GET['country'] ?? $_SESSION['country'] ?? 'BW';
+
 // 1. DYNAMIC ROOT DETECTION
 if (!defined('APP_ROOT')) {
     define('APP_ROOT', realpath(__DIR__ . '/../../'));
@@ -12,6 +15,7 @@ if (!defined('APP_ROOT')) {
 if (file_exists(APP_ROOT . '/vendor/autoload.php')) {
     require_once APP_ROOT . '/vendor/autoload.php';
 }
+
 // 3. LOAD DOTENV - Check country-specific location too
 if (class_exists('\Dotenv\Dotenv')) {
     // Check root .env first
@@ -20,7 +24,7 @@ if (class_exists('\Dotenv\Dotenv')) {
         $dotenv->load();
     }
     
-    // Also check country-specific .env
+    // Also check country-specific .env - NOW $countryCode IS DEFINED
     $countryEnv = APP_ROOT . "/src/CORE_CONFIG/countries/{$countryCode}/.env_{$countryCode}";
     if (file_exists($countryEnv)) {
         $dotenv = \Dotenv\Dotenv::createImmutable(dirname($countryEnv), basename($countryEnv));
@@ -133,7 +137,6 @@ $isAjax = !empty($_SERVER['HTTP_X_REQUESTED_WITH'])
 // DYNAMIC CONFIGURATION LOADING
 // ============================================================================
 
-$countryCode = $_GET['country'] ?? $_SESSION['country'] ?? 'BW';
 $selectedView = $_GET['view'] ?? 'dashboard';
 $regulatorView = $_GET['regulator_view'] ?? 'supervisory';
 $_SESSION['country'] = $countryCode;
@@ -1970,6 +1973,7 @@ ob_clean();
     </script>
 </body>
 </html>
+
 
 
 
