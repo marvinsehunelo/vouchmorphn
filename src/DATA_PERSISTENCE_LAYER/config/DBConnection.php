@@ -31,13 +31,13 @@ class DBConnection
         }
         
         return [
-    'host' => getenv('PG_HOST') ?: 'localhost',
-    'port' => getenv('PG_PORT') ?: 5432,
-    'dbname' => getenv('PG_NAME') ?: (getenv('PG_DB_SWAP') ?: (getenv('PG_DB_CORE') ?: 'swap_system_bw')),
-    'user' => getenv('PG_USER') ?: 'postgres',
-    'password' => getenv('PG_PASS') ?: '',
-    'sslmode' => getenv('PG_SSL_MODE') ?: 'prefer'
-];
+            'host' => $db['host'] ?? 'localhost',
+            'port' => $db['port'] ?? '5432',
+            'dbname' => ltrim($db['path'] ?? '', '/'),
+            'user' => $db['user'] ?? 'postgres',
+            'password' => $db['pass'] ?? '',
+            'sslmode' => $params['sslmode'] ?? 'require'
+        ];
     }
 
     /**
@@ -51,14 +51,35 @@ class DBConnection
             return $railwayConfig;
         }
         
-        // Fallback to individual environment variables
+        // Check if we're on Railway by looking at host
+        $isRailway = false;
+        $host = getenv('PG_HOST') ?: '';
+        if (strpos($host, 'railway') !== false || strpos($host, 'rlwy.net') !== false) {
+            $isRailway = true;
+        }
+        
+        // Determine database name - priority: PG_NAME > PG_DB_SWAP > PG_DB_CORE > default
+        $dbname = getenv('PG_NAME');
+        if (!$dbname) {
+            $dbname = getenv('PG_DB_SWAP');
+        }
+        if (!$dbname) {
+            $dbname = getenv('PG_DB_CORE');
+        }
+        if (!$dbname) {
+            $dbname = $isRailway ? 'railway' : 'swap_system_bw';
+        }
+        
+        // Determine SSL mode
+        $sslmode = getenv('PG_SSL_MODE') ?: ($isRailway ? 'require' : 'prefer');
+        
         return [
-            'host' => getenv('PG_HOST') ?: 'localhost',
+            'host' => $host ?: 'localhost',
             'port' => getenv('PG_PORT') ?: 5432,
-            'dbname' => getenv('PG_DB_SWAP') ?: getenv('PG_DB_CORE') ?: 'swap_system_bw',
+            'dbname' => $dbname,
             'user' => getenv('PG_USER') ?: 'postgres',
             'password' => getenv('PG_PASS') ?: '',
-            'sslmode' => getenv('PG_SSL_MODE') ?: 'prefer' // Default to prefer for local
+            'sslmode' => $sslmode
         ];
     }
 
