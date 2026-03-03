@@ -3,20 +3,67 @@ declare(strict_types=1);
 
 namespace DASHBOARD;
 
-// CRITICAL FIX: Don't display errors, log them instead
+// CRITICAL: Load config FIRST
+require_once __DIR__ . '/../../config/config_BW.php';
+
+// ======================================================
+// RAILWAY COMPATIBILITY FIXES
+// ======================================================
+
+// Fix 1: Set correct error logging path for Railway
 ini_set('display_errors', 0);
 ini_set('display_startup_errors', 0);
 error_reporting(E_ALL);
 
-// Log errors
+// Railway doesn't have /opt/lampp/logs/ - use system temp or current directory
+$log_path = sys_get_temp_dir() . '/vouchmorph_errors.log';
+ini_set('error_log', $log_path);
 ini_set('log_errors', 1);
-ini_set('error_log', '/opt/lampp/logs/php_error.log');
 
-/// Custom error handler to catch warnings/notices
+// Custom error handler to catch warnings/notices
 set_error_handler(function($errno, $errstr, $errfile, $errline) {
     error_log("PHP Error [$errno]: $errstr in $errfile line $errline");
     return true;
 });
+
+// Fix 2: Test database connection with proper error handling
+$db_status = '❌ Not Connected';
+$db_error = null;
+
+try {
+    // Check if DBConnection class exists
+    if (!class_exists('\DATA_PERSISTENCE_LAYER\config\DBConnection')) {
+        throw new \Exception('DBConnection class not found - check autoloader');
+    }
+    
+    $db = \DATA_PERSISTENCE_LAYER\config\DBConnection::getConnection();
+    
+    if ($db) {
+        $db_status = '✅ Connected';
+        
+        // Test query to verify permissions
+        $test = $db->query("SELECT 1 as test")->fetch();
+        if ($test) {
+            $db_status = '✅ Connected (Working)';
+        }
+    }
+} catch (\Exception $e) {
+    $db_error = $e->getMessage();
+    error_log("Regulation demo DB error: " . $db_error);
+    // Don't display error to user in production
+    if (getenv('APP_ENV') !== 'production') {
+        echo "<!-- DB Debug: " . htmlspecialchars($db_error) . " -->\n";
+    }
+}
+
+// Fix 3: Get Railway environment info
+$environment = getenv('APP_ENV') ?: 'production';
+$railway_url = getenv('RAILWAY_PUBLIC_DOMAIN') ?: 'Not set';
+$database_url_configured = getenv('DATABASE_URL') ? 'Yes' : 'No';
+
+// Fix 4: Set base URL for API calls
+$base_url = (isset($_SERVER['HTTPS']) ? 'https://' : 'http://') . 
+            ($_SERVER['HTTP_HOST'] ?? 'localhost');
 
 function safe_number_format($number, $decimals = 2) {
     return $number !== null && $number !== '' ? number_format((float)$number, $decimals) : '0.00';
@@ -1885,3 +1932,4 @@ ob_clean();
     </script>
 </body>
 </html>
+
