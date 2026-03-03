@@ -4,7 +4,7 @@ declare(strict_types=1);
 namespace DASHBOARD;
 
 // CRITICAL: Load config FIRST
-require_once __DIR__ . '/../../../src/CORE_CONFIG/countries/BW/config_BW.php';
+require_once __DIR__ . '/../../src/CORE_CONFIG/countries/BW/config_BW.php';
 
 // ======================================================
 // RAILWAY COMPATIBILITY FIXES
@@ -1932,5 +1932,6 @@ ob_clean();
     </script>
 </body>
 </html>
+
 
 
