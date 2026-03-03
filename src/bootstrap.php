@@ -71,7 +71,7 @@ error_log("[BOOTSTRAP] Country resolved → " . SYSTEM_COUNTRY);
 if (!getenv('DATABASE_URL')) {
     // Local development
     $envFile = ".env_" . SYSTEM_COUNTRY;
-    $envPath = APP_ROOT . "/CORE_CONFIG/countries/" . SYSTEM_COUNTRY . "/" . $envFile;
+    $envPath = APP_ROOT . "/src/CORE_CONFIG/countries/" . SYSTEM_COUNTRY . "/" . $envFile;
 
     if (!file_exists($envPath)) {
         throw new RuntimeException("Missing local env file: {$envPath}");
@@ -92,8 +92,8 @@ if (!getenv('DATABASE_URL')) {
 /* ======================================================
  * 3️⃣ LOAD COUNTRY CONFIG
  * ====================================================== */
-$configFile = APP_ROOT . "/CORE_CONFIG/countries/" . SYSTEM_COUNTRY . "/config_" . SYSTEM_COUNTRY . ".php";
-$participantsFile = APP_ROOT . "/CORE_CONFIG/countries/" . SYSTEM_COUNTRY . "/participants_" . SYSTEM_COUNTRY . ".json";
+$configFile = APP_ROOT . "/src/CORE_CONFIG/countries/" . SYSTEM_COUNTRY . "/config_" . SYSTEM_COUNTRY . ".php";
+$participantsFile = APP_ROOT . "/src/CORE_CONFIG/countries/" . SYSTEM_COUNTRY . "/participants_" . SYSTEM_COUNTRY . ".json";
 
 if (!file_exists($configFile)) {
     throw new RuntimeException("Missing config: {$configFile}");
@@ -152,7 +152,7 @@ $tokenEncryptor = new TokenEncryptor($keyVault->getEncryptionKey());
 /* ======================================================
  * 5️⃣ START SESSION (SAFE)
  * ====================================================== */
-require_once APP_ROOT . '/APP_LAYER/utils/session_manager.php';
+require_once APP_ROOT . '/src/APP_LAYER/utils/session_manager.php';
 SessionManager::start();
 
 /* ======================================================
@@ -309,8 +309,8 @@ $GLOBALS['security'] = [
 /* ======================================================
  * 1️⃣2️⃣ ENSURE LOG DIRECTORY & FILE PERMISSIONS
  * ====================================================== */
-$logDir = APP_ROOT . '/APP_LAYER/logs';
-$logFile = $logDir . '/swap_audit.log';
+$logDir = APP_ROOT . '/src/APP_LAYER/logs';
+$logFile = $logDir . '/src/swap_audit.log';
 
 if (!is_dir($logDir)) {
     mkdir($logDir, 0755, true);
@@ -368,6 +368,7 @@ $GLOBALS['CALLBACK_URL'] = getCallbackUrl();
 error_log("[BOOTSTRAP] System initialized successfully for " . SYSTEM_COUNTRY);
 error_log("[BOOTSTRAP] Callback URL: " . $GLOBALS['CALLBACK_URL']);
 error_log("[BOOTSTRAP] SwapService initialized: " . (isset($GLOBALS['swapService']) ? 'YES' : 'NO'));
+
 
 
 
