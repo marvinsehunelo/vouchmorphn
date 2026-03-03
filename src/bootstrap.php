@@ -52,7 +52,7 @@ use BUSINESS_LOGIC_LAYER\services\SwapService;
 /* ======================================================
  * 1️⃣ RESOLVE SYSTEM COUNTRY (SINGLE SOURCE OF TRUTH)
  * ====================================================== */
-$country = require APP_ROOT . 'src/CORE_CONFIG/system_country.php';
+$country = require APP_ROOT . '/src/CORE_CONFIG/system_country.php';
 
 if (!$country || !is_string($country)) {
     throw new RuntimeException('SYSTEM_COUNTRY not resolved');
@@ -368,6 +368,7 @@ $GLOBALS['CALLBACK_URL'] = getCallbackUrl();
 error_log("[BOOTSTRAP] System initialized successfully for " . SYSTEM_COUNTRY);
 error_log("[BOOTSTRAP] Callback URL: " . $GLOBALS['CALLBACK_URL']);
 error_log("[BOOTSTRAP] SwapService initialized: " . (isset($GLOBALS['swapService']) ? 'YES' : 'NO'));
+
 
 
 
