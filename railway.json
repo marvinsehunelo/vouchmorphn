@@ -4,8 +4,10 @@
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "sh -c 'php -S 0.0.0.0:${PORT:-8080} -t public'",
+    "startCommand": "php -S 0.0.0.0:$PORT -t public",
     "restartPolicyType": "ON_FAILURE",
-    "restartPolicyMaxRetries": 10
+    "restartPolicyMaxRetries": 10,
+    "preDeploy": "",
+    "healthcheckPath": "/regulationdemo.php"
   }
 }
