@@ -12,11 +12,20 @@ if (!defined('APP_ROOT')) {
 if (file_exists(APP_ROOT . '/vendor/autoload.php')) {
     require_once APP_ROOT . '/vendor/autoload.php';
 }
-
-// 3. LOAD DOTENV (Only if local, Railway uses Environment Variables directly)
-if (class_exists('\Dotenv\Dotenv') && file_exists(APP_ROOT . '/.env')) {
-    $dotenv = \Dotenv\Dotenv::createImmutable(APP_ROOT);
-    $dotenv->load();
+// 3. LOAD DOTENV - Check country-specific location too
+if (class_exists('\Dotenv\Dotenv')) {
+    // Check root .env first
+    if (file_exists(APP_ROOT . '/.env')) {
+        $dotenv = \Dotenv\Dotenv::createImmutable(APP_ROOT);
+        $dotenv->load();
+    }
+    
+    // Also check country-specific .env
+    $countryEnv = APP_ROOT . "/src/CORE_CONFIG/countries/{$countryCode}/.env_{$countryCode}";
+    if (file_exists($countryEnv)) {
+        $dotenv = \Dotenv\Dotenv::createImmutable(dirname($countryEnv), basename($countryEnv));
+        $dotenv->load();
+    }
 }
 
 // 4. LOAD CONFIG (Using require_once to prevent "Already Defined" crashes)
@@ -1954,6 +1963,7 @@ ob_clean();
     </script>
 </body>
 </html>
+
 
 
 
