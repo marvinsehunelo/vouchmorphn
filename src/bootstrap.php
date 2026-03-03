@@ -258,3 +258,4 @@ $GLOBALS['CALLBACK_URL'] = getCallbackUrl();
 error_log("[BOOTSTRAP] System ready for " . SYSTEM_COUNTRY);
 error_log("[BOOTSTRAP] Callback URL → " . $GLOBALS['CALLBACK_URL']);
 
+
