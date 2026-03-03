@@ -23,20 +23,12 @@ class DBConnection
         }
         
         $db = parse_url($database_url);
-        
-        // Parse query string for SSL parameters
-        $params = [];
-        if (isset($db['query'])) {
-            parse_str($db['query'], $params);
-        }
-        
         return [
             'host' => $db['host'] ?? 'localhost',
             'port' => $db['port'] ?? '5432',
             'dbname' => ltrim($db['path'] ?? '', '/'),
             'user' => $db['user'] ?? 'postgres',
-            'password' => $db['pass'] ?? '',
-            'sslmode' => $params['sslmode'] ?? 'require'
+            'password' => $db['pass'] ?? ''
         ];
     }
 
@@ -51,39 +43,19 @@ class DBConnection
             return $railwayConfig;
         }
         
-        // Get host to detect Railway
-        $host = getenv('PG_HOST') ?: 'localhost';
-        $isRailway = (strpos($host, 'railway') !== false || 
-                      strpos($host, 'rlwy.net') !== false ||
-                      $host === 'interchange.proxy.rlwy.net');
-        
-        // For Railway, force database name to 'railway'
-        if ($isRailway) {
-            return [
-                'host' => $host,
-                'port' => getenv('PG_PORT') ?: 5432,
-                'dbname' => 'railway', // FORCE railway database name
-                'user' => getenv('PG_USER') ?: 'postgres',
-                'password' => getenv('PG_PASS') ?: '',
-                'sslmode' => 'require'
-            ];
-        }
-        
-        // Local development - use environment or default
-        $dbname = getenv('PG_NAME') ?: (getenv('PG_DB_SWAP') ?: (getenv('PG_DB_CORE') ?: 'swap_system_bw'));
-        
+        // Fallback to individual environment variables
         return [
-            'host' => $host,
+            'host' => getenv('PG_HOST') ?: 'localhost',
             'port' => getenv('PG_PORT') ?: 5432,
-            'dbname' => $dbname,
+            'dbname' => getenv('PG_DB_SWAP') ?: getenv('PG_DB_CORE') ?: 'swap_system_bw',
             'user' => getenv('PG_USER') ?: 'postgres',
-            'password' => getenv('PG_PASS') ?: '',
-            'sslmode' => getenv('PG_SSL_MODE') ?: 'prefer'
+            'password' => getenv('PG_PASS') ?: ''
         ];
     }
 
     /**
-     * Get database connection
+     * Original method - maintains backward compatibility
+     * Now returns null on failure instead of dying
      */
     public static function getConnection(): ?PDO
     {
@@ -91,6 +63,7 @@ class DBConnection
             return self::$connection;
         }
 
+        // Prevent multiple connection attempts
         if (self::$connectionAttempted) {
             return null;
         }
@@ -99,41 +72,42 @@ class DBConnection
         $config = self::getDbConfig();
 
         try {
-            // Build DSN
             $dsn = "pgsql:host={$config['host']};port={$config['port']};dbname={$config['dbname']}";
             
-            // Add SSL mode if required - this is the correct way to enable SSL
-            if (isset($config['sslmode']) && $config['sslmode'] === 'require') {
-                $dsn .= ";sslmode=require";
-            }
-            
-            $options = [
+            self::$connection = new PDO($dsn, $config['user'], $config['password'], [
                 PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
                 PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
                 PDO::ATTR_EMULATE_PREPARES => false,
-                PDO::ATTR_TIMEOUT => 5
-            ];
-            
-            self::$connection = new PDO($dsn, $config['user'], $config['password'], $options);
+                PDO::ATTR_TIMEOUT => 5,
+                PDO::ATTR_PERSISTENT => false
+            ]);
             
             // Set search path
             self::$connection->exec("SET search_path TO public");
             
+            error_log("[DBConnection] Successfully connected to database: {$config['dbname']}");
             return self::$connection;
 
         } catch (PDOException $e) {
             error_log("[DBConnection] Connection failed: " . $e->getMessage());
             self::$connection = null;
-            return null;
+            return null; // Return null instead of dying
         }
     }
 
     /**
-     * Get database connection instance
+     * New method - matches what USSDController expects
+     * Returns null on failure instead of throwing
      */
     public static function getInstance(array $dbConfig = []): ?PDO
     {
-        return self::getConnection();
+        try {
+            $conn = self::getConnection();
+            return $conn;
+        } catch (\Throwable $e) {
+            error_log("[DBConnection] getInstance failed: " . $e->getMessage());
+            return null;
+        }
     }
 
     /**
@@ -141,7 +115,16 @@ class DBConnection
      */
     public function getConfig(): array
     {
-        return self::getDbConfig();
+        $config = self::getDbConfig();
+        
+        return [
+            'host' => $config['host'],
+            'port' => $config['port'],
+            'name' => $config['dbname'],
+            'user' => $config['user'],
+            'password' => $config['password'],
+            'driver' => 'pgsql'
+        ];
     }
 
     /**
@@ -162,7 +145,7 @@ class DBConnection
     }
 
     /**
-     * Get connection for a specific database
+     * Get connection for a specific database (for multi-db setups)
      */
     public static function getDatabaseConnection(string $dbName): ?PDO
     {
@@ -175,16 +158,12 @@ class DBConnection
             try {
                 $dsn = "pgsql:host={$config['host']};port={$config['port']};dbname={$config['dbname']}";
                 
-                if (isset($config['sslmode']) && $config['sslmode'] === 'require') {
-                    $dsn .= ";sslmode=require";
-                }
-                
-                $options = [
+                self::$instances[$key] = new PDO($dsn, $config['user'], $config['password'], [
                     PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
                     PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-                ];
+                ]);
                 
-                self::$instances[$key] = new PDO($dsn, $config['user'], $config['password'], $options);
+                error_log("[DBConnection] Connected to database: {$dbName}");
                 
             } catch (PDOException $e) {
                 error_log("[DBConnection] Failed to connect to {$dbName}: " . $e->getMessage());
@@ -196,12 +175,13 @@ class DBConnection
     }
 
     /**
-     * Execute a query and return results
+     * Execute a query and return results (safe version)
      */
     public static function query(string $sql, array $params = []): array
     {
         $conn = self::getConnection();
         if (!$conn) {
+            error_log("[DBConnection] No database connection for query");
             return [];
         }
         
@@ -216,12 +196,13 @@ class DBConnection
     }
 
     /**
-     * Execute a statement and return row count
+     * Execute a statement and return row count (safe version)
      */
     public static function execute(string $sql, array $params = []): int
     {
         $conn = self::getConnection();
         if (!$conn) {
+            error_log("[DBConnection] No database connection for execute");
             return 0;
         }
         
@@ -236,6 +217,42 @@ class DBConnection
     }
 
     /**
+     * Begin a transaction
+     */
+    public static function beginTransaction(): bool
+    {
+        $conn = self::getConnection();
+        return $conn ? $conn->beginTransaction() : false;
+    }
+
+    /**
+     * Commit a transaction
+     */
+    public static function commit(): bool
+    {
+        $conn = self::getConnection();
+        return $conn ? $conn->commit() : false;
+    }
+
+    /**
+     * Rollback a transaction
+     */
+    public static function rollback(): bool
+    {
+        $conn = self::getConnection();
+        return $conn ? $conn->rollBack() : false;
+    }
+
+    /**
+     * Get the last insert ID
+     */
+    public static function lastInsertId(?string $name = null)
+    {
+        $conn = self::getConnection();
+        return $conn ? $conn->lastInsertId($name) : null;
+    }
+
+    /**
      * Test connection and permissions
      */
     public static function testConnection(): array
@@ -244,7 +261,8 @@ class DBConnection
             'connection' => false,
             'user' => null,
             'database' => null,
-            'permissions' => []
+            'permissions' => [],
+            'railway_url_detected' => getenv('DATABASE_URL') ? true : false
         ];
         
         $conn = self::getConnection();
@@ -259,7 +277,7 @@ class DBConnection
             $results['database'] = $conn->query("SELECT current_database()")->fetchColumn();
             
             // Test permissions on key tables
-            $tables = ['admins', 'participants', 'ledger_accounts', 'kyc_documents'];
+            $tables = ['roles', 'users', 'participants', 'ledger_accounts'];
             foreach ($tables as $table) {
                 try {
                     $conn->query("SELECT 1 FROM $table LIMIT 0");
@@ -277,14 +295,11 @@ class DBConnection
     }
 
     /**
-     * Get connection status
+     * Fix permissions - In Railway, this is handled automatically
      */
-    public static function getConnectionStatus(): array
+    public static function fixPermissions(): bool
     {
-        $config = self::getDbConfig();
-        return [
-            'connected' => self::isConnected(),
-            'config' => $config
-        ];
+        error_log("[DBConnection] Permissions are managed by Railway - no action needed");
+        return true;
     }
 }

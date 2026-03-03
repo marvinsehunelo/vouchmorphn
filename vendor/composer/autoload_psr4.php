@@ -6,23 +6,19 @@ $vendorDir = dirname(__DIR__);
 $baseDir = dirname($vendorDir);
 
 return array(
-    'TESTS\\' => array($baseDir . '/src/TESTS'),
     'Symfony\\Polyfill\\Php80\\' => array($vendorDir . '/symfony/polyfill-php80'),
     'Symfony\\Polyfill\\Mbstring\\' => array($vendorDir . '/symfony/polyfill-mbstring'),
     'Symfony\\Polyfill\\Ctype\\' => array($vendorDir . '/symfony/polyfill-ctype'),
     'SYSTEM_DAEMONS\\' => array($baseDir . '/src/SYSTEM_DAEMONS'),
     'SECURITY_LAYER\\' => array($baseDir . '/src/SECURITY_LAYER'),
-    'PhpParser\\' => array($vendorDir . '/nikic/php-parser/lib/PhpParser'),
     'PhpOption\\' => array($vendorDir . '/phpoption/phpoption/src/PhpOption'),
     'INTEGRATION_LAYER\\' => array($baseDir . '/src/INTEGRATION_LAYER'),
     'GrahamCampbell\\ResultType\\' => array($vendorDir . '/graham-campbell/result-type/src'),
     'FACTORY_LAYER\\' => array($baseDir . '/src/FACTORY_LAYER'),
     'Dotenv\\' => array($vendorDir . '/vlucas/phpdotenv/src'),
-    'DeepCopy\\' => array($vendorDir . '/myclabs/deep-copy/src/DeepCopy'),
     'DFSP_ADAPTER_LAYER\\' => array($baseDir . '/src/DFSP_ADAPTER_LAYER'),
     'DATA_PERSISTENCE_LAYER\\' => array($baseDir . '/src/DATA_PERSISTENCE_LAYER'),
     'CORE_CONFIG\\' => array($baseDir . '/src/CORE_CONFIG'),
     'BUSINESS_LOGIC_LAYER\\' => array($baseDir . '/src/BUSINESS_LOGIC_LAYER'),
     'APP_LAYER\\' => array($baseDir . '/src/APP_LAYER'),
-    'ADMIN_LAYER\\' => array($baseDir . '/public/ADMIN_LAYER'),
 );
