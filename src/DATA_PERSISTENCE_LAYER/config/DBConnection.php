@@ -11,6 +11,48 @@ class DBConnection
     private static array $instances = [];
 
     /**
+     * Parse Railway DATABASE_URL
+     */
+    private static function parseRailwayUrl(): ?array
+    {
+        $database_url = getenv('DATABASE_URL');
+        
+        if (!$database_url) {
+            return null;
+        }
+        
+        $db = parse_url($database_url);
+        return [
+            'host' => $db['host'] ?? 'localhost',
+            'port' => $db['port'] ?? '5432',
+            'dbname' => ltrim($db['path'] ?? '', '/'),
+            'user' => $db['user'] ?? 'postgres',
+            'password' => $db['pass'] ?? ''
+        ];
+    }
+
+    /**
+     * Get database configuration from environment
+     */
+    private static function getDbConfig(): array
+    {
+        // First try Railway DATABASE_URL
+        $railwayConfig = self::parseRailwayUrl();
+        if ($railwayConfig) {
+            return $railwayConfig;
+        }
+        
+        // Fallback to individual environment variables
+        return [
+            'host' => getenv('PG_HOST') ?: 'localhost',
+            'port' => getenv('PG_PORT') ?: 5432,
+            'dbname' => getenv('PG_DB_SWAP') ?: getenv('PG_DB_CORE') ?: 'swap_system_bw',
+            'user' => getenv('PG_USER') ?: 'postgres',
+            'password' => getenv('PG_PASS') ?: ''
+        ];
+    }
+
+    /**
      * Original method - maintains backward compatibility
      */
     public static function getConnection(): PDO
@@ -19,30 +61,36 @@ class DBConnection
             return self::$connection;
         }
 
-        $host = getenv('PG_HOST') ?: '127.0.0.1';
-        $port = getenv('PG_PORT') ?: 5432;
-        $db   = getenv('PG_DB_SWAP') ?: getenv('PG_DB_CORE') ?: 'swap_system_bw';
-        $user = getenv('PG_USER') ?: 'vouchmorphn_user';
-        $pass = getenv('PG_PASS') ?: '';
+        $config = self::getDbConfig();
 
         try {
-            $dsn = "pgsql:host=$host;port=$port;dbname=$db";
-            self::$connection = new PDO($dsn, $user, $pass, [
+            $dsn = "pgsql:host={$config['host']};port={$config['port']};dbname={$config['dbname']}";
+            
+            self::$connection = new PDO($dsn, $config['user'], $config['password'], [
                 PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
                 PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
                 PDO::ATTR_EMULATE_PREPARES => false,
+                PDO::ATTR_TIMEOUT => 5,
+                PDO::ATTR_PERSISTENT => false
             ]);
             
             // Set search path
             self::$connection->exec("SET search_path TO public");
             
-            error_log("[DBConnection] Successfully connected to database: {$db} as user: {$user}");
+            error_log("[DBConnection] Successfully connected to database: {$config['dbname']}");
             return self::$connection;
 
         } catch (PDOException $e) {
             error_log("[DBConnection] Connection failed: " . $e->getMessage());
-            http_response_code(500);
-            die("DATABASE_CONNECTION_FAILED: " . $e->getMessage());
+            
+            // In production, don't expose details
+            if (getenv('APP_ENV') === 'production') {
+                http_response_code(500);
+                die("Database connection failed. Please check logs.");
+            } else {
+                http_response_code(500);
+                die("DATABASE_CONNECTION_FAILED: " . $e->getMessage());
+            }
         }
     }
 
@@ -51,7 +99,8 @@ class DBConnection
      */
     public static function getInstance(array $dbConfig = []): PDO
     {
-        $key = getenv('PG_DB_SWAP') ?: 'default';
+        $config = self::getDbConfig();
+        $key = $config['dbname'] ?? 'default';
         
         if (!isset(self::$instances[$key])) {
             self::$instances[$key] = self::getConnection();
@@ -65,13 +114,46 @@ class DBConnection
      */
     public function getConfig(): array
     {
+        $config = self::getDbConfig();
+        
         return [
-            'host' => getenv('PG_HOST') ?: '127.0.0.1',
-            'port' => getenv('PG_PORT') ?: 5432,
-            'name' => getenv('PG_DB_SWAP') ?: getenv('PG_DB_CORE') ?: 'swap_system_bw',
-            'user' => getenv('PG_USER') ?: 'vouchmorphn_user',
-            'password' => getenv('PG_PASS') ?: '',
+            'host' => $config['host'],
+            'port' => $config['port'],
+            'name' => $config['dbname'],
+            'user' => $config['user'],
+            'password' => $config['password'],
+            'driver' => 'pgsql'
         ];
+    }
+
+    /**
+     * Get connection for a specific database (for multi-db setups)
+     */
+    public static function getDatabaseConnection(string $dbName): PDO
+    {
+        $config = self::getDbConfig();
+        $config['dbname'] = $dbName;
+        
+        $key = $dbName;
+        
+        if (!isset(self::$instances[$key])) {
+            try {
+                $dsn = "pgsql:host={$config['host']};port={$config['port']};dbname={$config['dbname']}";
+                
+                self::$instances[$key] = new PDO($dsn, $config['user'], $config['password'], [
+                    PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                    PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+                ]);
+                
+                error_log("[DBConnection] Connected to database: {$dbName}");
+                
+            } catch (PDOException $e) {
+                error_log("[DBConnection] Failed to connect to {$dbName}: " . $e->getMessage());
+                throw $e;
+            }
+        }
+        
+        return self::$instances[$key];
     }
 
     /**
@@ -85,9 +167,7 @@ class DBConnection
             $stmt->execute($params);
             return $stmt->fetchAll();
         } catch (PDOException $e) {
-            if (strpos($e->getMessage(), 'permission denied') !== false) {
-                error_log("[DBConnection] Permission denied. Please run: GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO " . self::getConnection()->query("SELECT current_user")->fetchColumn());
-            }
+            error_log("[DBConnection] Query failed: " . $e->getMessage());
             throw $e;
         }
     }
@@ -145,7 +225,7 @@ class DBConnection
             'user' => null,
             'database' => null,
             'permissions' => [],
-            'permission_help' => null
+            'railway_url_detected' => getenv('DATABASE_URL') ? true : false
         ];
         
         try {
@@ -161,18 +241,8 @@ class DBConnection
                     $conn->query("SELECT 1 FROM $table LIMIT 0");
                     $results['permissions'][$table] = 'GRANTED';
                 } catch (Exception $e) {
-                    $results['permissions'][$table] = 'DENIED: ' . $e->getMessage();
+                    $results['permissions'][$table] = 'DENIED';
                 }
-            }
-            
-            // Provide help for permission issues
-            if (in_array('DENIED', array_map(function($p) { 
-                return strpos($p, 'DENIED') === 0 ? 'DENIED' : 'GRANTED'; 
-            }, $results['permissions']))) {
-                $results['permission_help'] = "Run these SQL commands as superuser:\n" .
-                    "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO " . $results['user'] . ";\n" .
-                    "GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO " . $results['user'] . ";\n" .
-                    "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON TABLES TO " . $results['user'] . ";";
             }
             
         } catch (Exception $e) {
@@ -183,61 +253,13 @@ class DBConnection
     }
 
     /**
-     * Create a superuser connection for maintenance tasks
-     */
-    public static function getSuperuserConnection(): ?PDO
-    {
-        $host = getenv('PG_HOST') ?: '127.0.0.1';
-        $port = getenv('PG_PORT') ?: 5432;
-        $db   = getenv('PG_DB_SWAP') ?: getenv('PG_DB_CORE') ?: 'swap_system_bw';
-        
-        // Try common superuser names
-        $superUsers = [
-            ['user' => 'postgres', 'pass' => getenv('PG_SUPER_PASS') ?: ''],
-            ['user' => 'root', 'pass' => ''],
-        ];
-        
-        foreach ($superUsers as $su) {
-            try {
-                $dsn = "pgsql:host=$host;port=$port;dbname=$db";
-                $conn = new PDO($dsn, $su['user'], $su['pass'], [
-                    PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-                    PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-                ]);
-                return $conn;
-            } catch (Exception $e) {
-                continue;
-            }
-        }
-        
-        return null;
-    }
-
-    /**
-     * Fix permissions automatically if we have superuser access
+     * Fix permissions - In Railway, this is handled automatically
+     * This method is kept for compatibility but does nothing in production
      */
     public static function fixPermissions(): bool
     {
-        $superConn = self::getSuperuserConnection();
-        if (!$superConn) {
-            error_log("[DBConnection] Cannot fix permissions - no superuser access");
-            return false;
-        }
-        
-        try {
-            $user = self::getConnection()->query("SELECT current_user")->fetchColumn();
-            
-            $superConn->exec("GRANT USAGE ON SCHEMA public TO $user");
-            $superConn->exec("GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO $user");
-            $superConn->exec("GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO $user");
-            $superConn->exec("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON TABLES TO $user");
-            
-            error_log("[DBConnection] Successfully granted permissions to $user");
-            return true;
-            
-        } catch (Exception $e) {
-            error_log("[DBConnection] Failed to fix permissions: " . $e->getMessage());
-            return false;
-        }
+        // In Railway, permissions are managed automatically
+        error_log("[DBConnection] Permissions are managed by Railway - no action needed");
+        return true;
     }
 }

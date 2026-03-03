@@ -1,7 +1,7 @@
 <?php
 /**
  * config_BW.php - Regulatory Compliant Sandbox 2026
- * Enforces Secret Management & Least Privilege
+ * UPDATED FOR RAILWAY DEPLOYMENT
  */
 
 // ======================================================
@@ -22,30 +22,73 @@ if (!defined('VM_HASH_ALGO')) {
     }
 }
 
+// ======================================================
+// DYNAMIC BASE URL DETECTION FOR RAILWAY
+// ======================================================
+function getBaseUrl() {
+    $protocol = isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' ? 'https://' : 'http://';
+    $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+    return $protocol . $host;
+}
+
+// ======================================================
+// PARSE RAILWAY DATABASE URL
+// ======================================================
+function getDatabaseConfig() {
+    $database_url = getenv('DATABASE_URL');
+    
+    if ($database_url) {
+        // Parse Railway's DATABASE_URL (postgresql://user:pass@host:port/dbname)
+        $db = parse_url($database_url);
+        return [
+            'host' => $db['host'] ?? 'localhost',
+            'port' => $db['port'] ?? '5432',
+            'name' => ltrim($db['path'] ?? '', '/'),
+            'user' => $db['user'] ?? 'postgres',
+            'pass' => $db['pass'] ?? '',
+            'password' => $db['pass'] ?? ''
+        ];
+    }
+    
+    // Fallback for local development
+    return [
+        'host' => getenv('PG_HOST') ?: 'localhost',
+        'port' => getenv('PG_PORT') ?: 5432,
+        'name' => getenv('PG_NAME') ?: 'swap_system_bw',
+        'user' => getenv('PG_USER') ?: 'postgres',
+        'pass' => getenv('PG_PASS') ?: '',
+        'password' => getenv('PG_PASS') ?: ''
+    ];
+}
+
+$dbConfig = getDatabaseConfig();
+$baseUrl = getBaseUrl();
+
 return [
     'metadata' => [
         'version' => '2.1.0',
         'standard' => 'ISO-20022-JSON / GSMA-MM',
         'region' => 'BW-EU-CROSSBORDER',
-        'governance' => 'CENTRAL_BANK_HUB'
+        'governance' => 'CENTRAL_BANK_HUB',
+        'deployment' => 'RAILWAY'
     ],
 
-    'env' => getenv('APP_ENV') ?: 'sandbox',
+    'env' => getenv('APP_ENV') ?: 'production',
 
     'db' => [
         'swap' => [
             'type' => 'pgsql',
-            'host' => getenv('PG_HOST') ?: 'localhost',
-            'port' => getenv('PG_PORT') ?: 5432,
-            'name' => getenv('PG_NAME') ?: 'swap_system_bw',
-            'user' => getenv('PG_USER') ?: 'postgres',
-            'pass' => getenv('PG_PASS') ?: '',
-            'password' => getenv('PG_PASS') ?: '',
+            'host' => $dbConfig['host'],
+            'port' => $dbConfig['port'],
+            'name' => $dbConfig['name'],
+            'user' => $dbConfig['user'],
+            'pass' => $dbConfig['pass'],
+            'password' => $dbConfig['password']
         ]
     ],
     
     'security' => [
-        'encryption_key' => getenv('APP_ENCRYPTION_KEY') ?: 'SANDBOX_PLACEHOLDER_KEY',
+        'encryption_key' => getenv('APP_ENCRYPTION_KEY') ?: 'PRODUCTION_KEY_MUST_BE_SET_IN_ENV',
         'cipher'         => 'AES-256-GCM',
         'hashing_algo'   => VM_HASH_ALGO,
         'hashing_opts'   => VM_HASH_OPTIONS,
@@ -57,7 +100,7 @@ return [
             'category' => 'BANK',
             'provider_code' => 'ZURUBWXX',
             'auth_type' => 'MTLS_OAUTH2',
-            'base_url' => 'http://localhost/zurubank/Backend',
+            'base_url' => 'https://zurubank-prod.up.railway.app',
             'security' => [
                 'api_key' => ['value_env' => 'API_KEY_ZURUBANK', 'header_name' => 'X-API-KEY'],
                 'oauth2' => [
@@ -81,16 +124,16 @@ return [
                 'wallet_types' => ['ACCOUNT', 'VOUCHER', 'ATM']
             ],
             "resource_endpoints" => [
-      "verify_asset"=> "/api/v1/verify_asset",
-      "place_hold"=> "/api/v1/place_hold",
-      "release_hold"=> "/api/v1/release_hold",
-      "credit_funds"=> "/api/v1/transaction/credit_funds",
-      "generate_token"=> "/api/v1/generate_token",
-      "verify_token"=> "/api/v1/verify-token/index.php",
-      "confirm_cashout"=> "/api/v1/confirm_cashout",
-      "process_deposit"=> "/api/v1/process_deposit",
-      "check_status"=> "/api/v1/status",
-      "reverse_transaction"=> "/api/v1/release_hold"
+                "verify_asset"=> "/api/v1/verify_asset",
+                "place_hold"=> "/api/v1/place_hold",
+                "release_hold"=> "/api/v1/release_hold",
+                "credit_funds"=> "/api/v1/transaction/credit_funds",
+                "generate_token"=> "/api/v1/generate_token",
+                "verify_token"=> "/api/v1/verify-token/index.php",
+                "confirm_cashout"=> "/api/v1/confirm_cashout",
+                "process_deposit"=> "/api/v1/process_deposit",
+                "check_status"=> "/api/v1/status",
+                "reverse_transaction"=> "/api/v1/release_hold"
             ],
             'status' => 'ACTIVE'
         ],
@@ -100,7 +143,7 @@ return [
             'category' => 'BANK',
             'provider_code' => 'SACCUSBWXX',
             'auth_type' => 'MTLS_OAUTH2',
-            'base_url' => 'http://localhost/SaccusSalisbank/backend',
+            'base_url' => 'https://saccussalis-prod.up.railway.app',
             'security' => [
                 'api_key' => ['value_env' => 'API_KEY_SACCUSSALIS', 'header_name' => 'X-API-KEY'],
                 'oauth2' => [
@@ -134,123 +177,24 @@ return [
             'status' => 'ACTIVE'
         ],
 
-        'TEST_BANK_A' => [
+        'CAZACOM' => [
             'type' => 'FINANCIAL_INSTITUTION',
             'category' => 'BANK',
-            'provider_code' => 'TEST_BIC_A',
+            'provider_code' => 'CAZABWXX',
             'auth_type' => 'MTLS_OAUTH2',
-            'base_url' => 'https://sandbox-bank.local',
+            'base_url' => 'https://cazacom-prod.up.railway.app',
             'identity' => [
-                'system_user_id' => 1,
-                'legal_entity_identifier' => 'TEST_LEI_001',
-                'license_number' => 'CB-BW-001'
+                'system_user_id' => 1003,
+                'legal_entity_identifier' => 'BW-CAZACOM-LEI-003',
+                'license_number' => 'CB-BW-037'
             ],
             'capabilities' => [
                 'supports_sca' => true,
-                'supports_realtime_settlement' => true,
-                'wallet_types' => ['ACCOUNT', 'VOUCHER']
-            ],
-            'status' => 'ACTIVE'
-        ],
-
-        'TEST_BANK_B' => [
-            'type' => 'FINANCIAL_INSTITUTION',
-            'category' => 'BANK',
-            'provider_code' => 'TEST_BIC_B',
-            'auth_type' => 'MTLS_OAUTH2',
-            'base_url' => 'https://sandbox-bank-b.local',
-            'identity' => [
-                'system_user_id' => 2,
-                'legal_entity_identifier' => 'TEST_LEI_002',
-                'license_number' => 'CB-BW-002'
-            ],
-            'capabilities' => [
-                'supports_sca' => true,
-                'supports_realtime_settlement' => true,
+                'supports_realtime_processing' => true,
                 'wallet_types' => ['ACCOUNT', 'VOUCHER']
             ],
             'resource_endpoints' => [
-                'identity_lookup' => '/api/v1/verify_account.php',
-                'voucher_request' => '/api/v1/atm/generate_code.php',
-                'credit_transfer' => '/api/v1/deposit/direct.php'
-            ],
-            'status' => 'ACTIVE'
-        ],
-
-        'TEST_MNO_A' => [
-            'type' => 'MOBILE_MONEY_OPERATOR',
-            'category' => 'MNO',
-            'provider_code' => 'TEST_MNC_A',
-            'auth_type' => 'OAUTH2_JWT',
-            'base_url' => 'https://sandbox-mno.local',
-            'capabilities' => [
-                'supports_sca' => true,
-                'supports_realtime_disbursement' => true,
-                'wallet_types' => ['WALLET']
-            ],
-            'status' => 'ACTIVE'
-        ],
-
-        'TEST_MNO_B' => [
-            'type' => 'MOBILE_MONEY_OPERATOR',
-            'category' => 'MNO',
-            'provider_code' => 'TEST_MNC_B',
-            'auth_type' => 'OAUTH2_JWT',
-            'base_url' => 'https://sandbox-mno-b.local',
-            'capabilities' => [
-                'supports_sca' => true,
-                'supports_realtime_disbursement' => true,
-                'wallet_types' => ['WALLET']
-            ],
-            'status' => 'ACTIVE'
-        ],
-
-        'TEST_DISTRIBUTOR_A' => [
-            'type' => 'CARD_DISTRIBUTOR',
-            'category' => 'EMI_CARD',
-            'provider_code' => 'TEST_EMV_A',
-            'auth_type' => 'MTLS_OAUTH2',
-            'base_url' => 'https://sandbox-distributor.local',
-            'capabilities' => [
-                'supports_card_issue' => true,
-                'supports_top_up' => true,
-                'wallet_types' => ['CARD']
-            ],
-            'status' => 'ACTIVE'
-        ],
-
-        'ALPHA' => [
-            'type' => 'FINANCIAL_INSTITUTION',
-            'category' => 'BANK',
-            'provider_code' => 'ALPHA_BIC',
-            'auth_type' => 'MTLS_OAUTH2',
-            'capabilities' => [
-                'supports_sca' => true,
-                'wallet_types' => ['ACCOUNT', 'E-WALLET']
-            ],
-            'status' => 'ACTIVE'
-        ],
-
-        'CARD' => [
-            'type' => 'CARD_DISTRIBUTOR',
-            'category' => 'EMI_CARD',
-            'provider_code' => 'CARD_EMV',
-            'auth_type' => 'MTLS_OAUTH2',
-            'capabilities' => [
-                'supports_card_issue' => true,
-                'wallet_types' => ['CARD']
-            ],
-            'status' => 'ACTIVE'
-        ],
-
-        'BANK A' => [
-            'type' => 'FINANCIAL_INSTITUTION',
-            'category' => 'BANK',
-            'provider_code' => 'BANK_BIC',
-            'auth_type' => 'MTLS_OAUTH2',
-            'capabilities' => [
-                'supports_sca' => true,
-                'wallet_types' => ['ACCOUNT', 'E-WALLET']
+                'sms_send' => '/backend/routes/api.php?path=sms/send'
             ],
             'status' => 'ACTIVE'
         ]
