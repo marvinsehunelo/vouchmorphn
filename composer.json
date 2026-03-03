@@ -17,7 +17,6 @@
       "FACTORY_LAYER\\": "src/FACTORY_LAYER/",
       "INTEGRATION_LAYER\\": "src/INTEGRATION_LAYER/",
       "SECURITY_LAYER\\": "src/SECURITY_LAYER/",
-      "ADMIN_LAYER\\": "public/ADMIN_LAYER/",
       "DFSP_ADAPTER_LAYER\\": "src/DFSP_ADAPTER_LAYER/",
       "SYSTEM_DAEMONS\\": "src/SYSTEM_DAEMONS/"
     }
@@ -30,3 +29,4 @@
   "minimum-stability": "stable",
   "prefer-stable": true
 }
+

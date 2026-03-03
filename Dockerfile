@@ -29,5 +29,9 @@ COPY public/ public/
 # Expose port (Railway will override $PORT anyway)
 EXPOSE 9000
 
+RUN composer dump-autoload --optimize
+
 # Start PHP built-in server
-CMD ["php", "-S", "0.0.0.0:$PORT", "-t", "public"]
+CMD php -S 0.0.0.0:${PORT} -t public/
+
+

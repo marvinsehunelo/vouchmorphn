@@ -3,11 +3,33 @@ declare(strict_types=1);
 
 namespace DASHBOARD;
 
-// CRITICAL: Load config FIRST
-require_once __DIR__ . '/../../src/CORE_CONFIG/countries/BW/config_BW.php';
+// 1. DYNAMIC ROOT DETECTION
+if (!defined('APP_ROOT')) {
+    define('APP_ROOT', realpath(__DIR__ . '/../../'));
+}
+
+// 2. LOAD COMPOSER AUTOLOADER
+if (file_exists(APP_ROOT . '/vendor/autoload.php')) {
+    require_once APP_ROOT . '/vendor/autoload.php';
+}
+
+// 3. LOAD DOTENV (Only if local, Railway uses Environment Variables directly)
+if (class_exists('\Dotenv\Dotenv') && file_exists(APP_ROOT . '/.env')) {
+    $dotenv = \Dotenv\Dotenv::createImmutable(APP_ROOT);
+    $dotenv->load();
+}
+
+// 4. LOAD CONFIG (Using require_once to prevent "Already Defined" crashes)
+$configPath = APP_ROOT . '/src/CORE_CONFIG/countries/BW/config_BW.php';
+if (file_exists($configPath)) {
+    require_once $configPath;
+} else {
+    // If this fails, we want to know why instead of a 502
+    die("Diagnosis: Config file missing at " . $configPath);
+}
 
 // ======================================================
-// RAILWAY COMPATIBILITY FIXES
+// RAILWAY COMPATIBILITY FIXES START HERE
 // ======================================================
 
 // Fix 1: Set correct error logging path for Railway
@@ -1932,6 +1954,9 @@ ob_clean();
     </script>
 </body>
 </html>
+
+
+
 
 
 
