@@ -12,80 +12,44 @@ class DBConnection
     private static bool $connectionAttempted = false;
 
     /**
-     * Parse Railway DATABASE_URL
-     */
-    private static function parseRailwayUrl(): ?array
-    {
-        $database_url = getenv('DATABASE_URL');
-        
-        if (!$database_url) {
-            return null;
-        }
-        
-        $db = parse_url($database_url);
-        
-        // Parse query string for SSL parameters
-        $params = [];
-        if (isset($db['query'])) {
-            parse_str($db['query'], $params);
-        }
-        
-        return [
-            'host' => $db['host'] ?? 'localhost',
-            'port' => $db['port'] ?? '5432',
-            'dbname' => ltrim($db['path'] ?? '', '/'),
-            'user' => $db['user'] ?? 'postgres',
-            'password' => $db['pass'] ?? '',
-            'sslmode' => $params['sslmode'] ?? 'require'
-        ];
-    }
-
-    /**
      * Get database configuration from environment
      */
     private static function getDbConfig(): array
     {
-        // First try Railway DATABASE_URL
-        $railwayConfig = self::parseRailwayUrl();
-        if ($railwayConfig) {
-            return $railwayConfig;
-        }
+        // For Railway - we know the exact credentials
+        $host = getenv('PG_HOST') ?: 'interchange.proxy.rlwy.net';
+        $port = getenv('PG_PORT') ?: 52371;
+        $user = getenv('PG_USER') ?: 'postgres';
+        $password = getenv('PG_PASS') ?: 'JcEMxRQuEImysxrAgeJPgJDXYfsnUxSB';
         
-        // Check if we're on Railway by looking at host
-        $isRailway = false;
-        $host = getenv('PG_HOST') ?: '';
-        if (strpos($host, 'railway') !== false || strpos($host, 'rlwy.net') !== false) {
-            $isRailway = true;
-        }
+        // CRITICAL: Always use 'railway' as database name for Railway
+        // Never fall back to swap_system_bw when connecting to Railway
+        $isRailway = (strpos($host, 'railway') !== false || 
+                      strpos($host, 'rlwy.net') !== false ||
+                      $host === 'interchange.proxy.rlwy.net');
         
-        // Determine database name - priority: PG_NAME > PG_DB_SWAP > PG_DB_CORE > default
-        $dbname = getenv('PG_NAME');
-        if (!$dbname) {
-            $dbname = getenv('PG_DB_SWAP');
+        if ($isRailway) {
+            // Force railway database name for any Railway connection
+            $dbname = 'railway';
+            $sslmode = 'require';
+        } else {
+            // Local development - use environment or default
+            $dbname = getenv('PG_NAME') ?: (getenv('PG_DB_SWAP') ?: (getenv('PG_DB_CORE') ?: 'swap_system_bw'));
+            $sslmode = getenv('PG_SSL_MODE') ?: 'prefer';
         }
-        if (!$dbname) {
-            $dbname = getenv('PG_DB_CORE');
-        }
-        if (!$dbname) {
-            $dbname = $isRailway ? 'railway' : 'swap_system_bw';
-        }
-        
-        // Determine SSL mode
-        $sslmode = getenv('PG_SSL_MODE') ?: ($isRailway ? 'require' : 'prefer');
         
         return [
-            'host' => $host ?: 'localhost',
-            'port' => getenv('PG_PORT') ?: 5432,
+            'host' => $host,
+            'port' => $port,
             'dbname' => $dbname,
-            'user' => getenv('PG_USER') ?: 'postgres',
-            'password' => getenv('PG_PASS') ?: '',
+            'user' => $user,
+            'password' => $password,
             'sslmode' => $sslmode
         ];
     }
 
     /**
      * Original method - maintains backward compatibility
-     * Now returns null on failure instead of dying
      */
     public static function getConnection(): ?PDO
     {
@@ -93,7 +57,6 @@ class DBConnection
             return self::$connection;
         }
 
-        // Prevent multiple connection attempts
         if (self::$connectionAttempted) {
             return null;
         }
@@ -105,12 +68,10 @@ class DBConnection
             // Build DSN with SSL parameters
             $dsn = "pgsql:host={$config['host']};port={$config['port']};dbname={$config['dbname']}";
             
-            // Add SSL mode if specified and not default
-            if (isset($config['sslmode']) && $config['sslmode'] !== 'prefer') {
-                $dsn .= ";sslmode={$config['sslmode']}";
+            if ($config['sslmode'] === 'require') {
+                $dsn .= ";sslmode=require";
             }
             
-            // For Railway, we need to handle SSL certificates
             $options = [
                 PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
                 PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
@@ -119,10 +80,8 @@ class DBConnection
                 PDO::ATTR_PERSISTENT => false
             ];
             
-            // Add SSL specific options for Railway
-            if (getenv('DATABASE_URL') || (isset($config['sslmode']) && $config['sslmode'] === 'require')) {
-                // For Railway's self-signed certificates, we need to allow self-signed certs
-                // This is equivalent to ?sslmode=require in the connection string
+            // Add SSL option for Railway
+            if ($config['sslmode'] === 'require') {
                 $options[PDO::PGSQL_ATTR_SSL_MODE] = 'require';
             }
             
@@ -131,28 +90,13 @@ class DBConnection
             // Set search path
             self::$connection->exec("SET search_path TO public");
             
-            error_log("[DBConnection] Successfully connected to database: {$config['dbname']} on {$config['host']}");
+            error_log("[DBConnection] Connected to database: {$config['dbname']} on {$config['host']}");
             return self::$connection;
 
         } catch (PDOException $e) {
             error_log("[DBConnection] Connection failed: " . $e->getMessage());
             error_log("[DBConnection] DSN used: " . $dsn);
             self::$connection = null;
-            return null; // Return null instead of dying
-        }
-    }
-
-    /**
-     * New method - matches what USSDController expects
-     * Returns null on failure instead of throwing
-     */
-    public static function getInstance(array $dbConfig = []): ?PDO
-    {
-        try {
-            $conn = self::getConnection();
-            return $conn;
-        } catch (\Throwable $e) {
-            error_log("[DBConnection] getInstance failed: " . $e->getMessage());
             return null;
         }
     }
@@ -162,17 +106,7 @@ class DBConnection
      */
     public function getConfig(): array
     {
-        $config = self::getDbConfig();
-        
-        return [
-            'host' => $config['host'],
-            'port' => $config['port'],
-            'name' => $config['dbname'],
-            'user' => $config['user'],
-            'password' => $config['password'],
-            'driver' => 'pgsql',
-            'sslmode' => $config['sslmode'] ?? 'prefer'
-        ];
+        return self::getDbConfig();
     }
 
     /**
@@ -193,7 +127,7 @@ class DBConnection
     }
 
     /**
-     * Get connection for a specific database (for multi-db setups)
+     * Get connection for a specific database
      */
     public static function getDatabaseConnection(string $dbName): ?PDO
     {
@@ -204,12 +138,10 @@ class DBConnection
         
         if (!isset(self::$instances[$key])) {
             try {
-                // Build DSN with SSL parameters
                 $dsn = "pgsql:host={$config['host']};port={$config['port']};dbname={$config['dbname']}";
                 
-                // Add SSL mode if specified and not default
-                if (isset($config['sslmode']) && $config['sslmode'] !== 'prefer') {
-                    $dsn .= ";sslmode={$config['sslmode']}";
+                if ($config['sslmode'] === 'require') {
+                    $dsn .= ";sslmode=require";
                 }
                 
                 $options = [
@@ -217,8 +149,7 @@ class DBConnection
                     PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
                 ];
                 
-                // Add SSL specific options for Railway
-                if (getenv('DATABASE_URL') || (isset($config['sslmode']) && $config['sslmode'] === 'require')) {
+                if ($config['sslmode'] === 'require') {
                     $options[PDO::PGSQL_ATTR_SSL_MODE] = 'require';
                 }
                 
@@ -236,13 +167,12 @@ class DBConnection
     }
 
     /**
-     * Execute a query and return results (safe version)
+     * Execute a query and return results
      */
     public static function query(string $sql, array $params = []): array
     {
         $conn = self::getConnection();
         if (!$conn) {
-            error_log("[DBConnection] No database connection for query");
             return [];
         }
         
@@ -257,13 +187,12 @@ class DBConnection
     }
 
     /**
-     * Execute a statement and return row count (safe version)
+     * Execute a statement and return row count
      */
     public static function execute(string $sql, array $params = []): int
     {
         $conn = self::getConnection();
         if (!$conn) {
-            error_log("[DBConnection] No database connection for execute");
             return 0;
         }
         
@@ -278,42 +207,6 @@ class DBConnection
     }
 
     /**
-     * Begin a transaction
-     */
-    public static function beginTransaction(): bool
-    {
-        $conn = self::getConnection();
-        return $conn ? $conn->beginTransaction() : false;
-    }
-
-    /**
-     * Commit a transaction
-     */
-    public static function commit(): bool
-    {
-        $conn = self::getConnection();
-        return $conn ? $conn->commit() : false;
-    }
-
-    /**
-     * Rollback a transaction
-     */
-    public static function rollback(): bool
-    {
-        $conn = self::getConnection();
-        return $conn ? $conn->rollBack() : false;
-    }
-
-    /**
-     * Get the last insert ID
-     */
-    public static function lastInsertId(?string $name = null)
-    {
-        $conn = self::getConnection();
-        return $conn ? $conn->lastInsertId($name) : null;
-    }
-
-    /**
      * Test connection and permissions
      */
     public static function testConnection(): array
@@ -323,8 +216,7 @@ class DBConnection
             'user' => null,
             'database' => null,
             'permissions' => [],
-            'railway_url_detected' => getenv('DATABASE_URL') ? true : false,
-            'ssl_mode' => null
+            'config' => self::getDbConfig()
         ];
         
         $conn = self::getConnection();
@@ -338,12 +230,8 @@ class DBConnection
             $results['user'] = $conn->query("SELECT current_user")->fetchColumn();
             $results['database'] = $conn->query("SELECT current_database()")->fetchColumn();
             
-            // Check SSL status
-            $sslStatus = $conn->query("SHOW ssl")->fetchColumn();
-            $results['ssl_mode'] = $sslStatus;
-            
             // Test permissions on key tables
-            $tables = ['roles', 'users', 'participants', 'ledger_accounts', 'admins'];
+            $tables = ['admins', 'participants', 'ledger_accounts'];
             foreach ($tables as $table) {
                 try {
                     $conn->query("SELECT 1 FROM $table LIMIT 0");
@@ -361,40 +249,14 @@ class DBConnection
     }
 
     /**
-     * Fix permissions - In Railway, this is handled automatically
-     */
-    public static function fixPermissions(): bool
-    {
-        error_log("[DBConnection] Permissions are managed by Railway - no action needed");
-        return true;
-    }
-
-    /**
-     * Get connection status with detailed info
+     * Get connection status
      */
     public static function getConnectionStatus(): array
     {
         $config = self::getDbConfig();
-        $status = [
+        return [
             'connected' => self::isConnected(),
-            'host' => $config['host'],
-            'port' => $config['port'],
-            'database' => $config['dbname'],
-            'user' => $config['user'],
-            'ssl_mode' => $config['sslmode'] ?? 'prefer',
-            'using_railway' => getenv('DATABASE_URL') ? true : false
+            'config' => $config
         ];
-        
-        if (self::$connection) {
-            try {
-                $status['server_version'] = self::$connection->getAttribute(PDO::ATTR_SERVER_VERSION);
-                $status['client_version'] = self::$connection->getAttribute(PDO::ATTR_CLIENT_VERSION);
-                $status['connection_status'] = self::$connection->getAttribute(PDO::ATTR_CONNECTION_STATUS);
-            } catch (\Throwable $e) {
-                $status['error'] = $e->getMessage();
-            }
-        }
-        
-        return $status;
     }
 }
