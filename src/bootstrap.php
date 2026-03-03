@@ -222,25 +222,53 @@ $eventDispatcher = null; // Initialize your event dispatcher if you have one
 // Get the primary database connection object
 $primaryDbConnection = $databases['primary'] ?? reset($databases);
 
-// Get the PDO instance from DBConnection
+// FIX: Check if connection exists and get PDO properly
+$pdo = null;
+
+if (!$primaryDbConnection) {
+    throw new RuntimeException("No primary database connection available");
+}
+
+// Try to get PDO using getConnection() method
 if (method_exists($primaryDbConnection, 'getConnection')) {
-    $pdo = $primaryDbConnection->getConnection();
-    error_log("[BOOTSTRAP] Got PDO via getConnection() method");
-} else {
-    // Fallback using reflection
-    $reflection = new ReflectionClass($primaryDbConnection);
-    if ($reflection->hasProperty('connection')) {
-        $property = $reflection->getProperty('connection');
-        $property->setAccessible(true);
-        $pdo = $property->getValue($primaryDbConnection);
-        error_log("[BOOTSTRAP] Got PDO via reflection");
-    } else {
-        throw new RuntimeException("Cannot access PDO from DBConnection");
+    try {
+        $pdo = $primaryDbConnection->getConnection();
+        error_log("[BOOTSTRAP] Got PDO via getConnection() method");
+    } catch (Exception $e) {
+        error_log("[BOOTSTRAP] getConnection() failed: " . $e->getMessage());
     }
 }
 
+// If that fails, try direct property access
+if (!$pdo && property_exists($primaryDbConnection, 'connection')) {
+    $pdo = $primaryDbConnection->connection;
+    error_log("[BOOTSTRAP] Got PDO via property access");
+}
+
+// If still no PDO, try reflection
+if (!$pdo) {
+    try {
+        $reflection = new ReflectionClass($primaryDbConnection);
+        if ($reflection->hasProperty('connection')) {
+            $property = $reflection->getProperty('connection');
+            $property->setAccessible(true);
+            $pdo = $property->getValue($primaryDbConnection);
+            error_log("[BOOTSTRAP] Got PDO via reflection");
+        }
+    } catch (Exception $e) {
+        error_log("[BOOTSTRAP] Reflection failed: " . $e->getMessage());
+    }
+}
+
+// Final check
+if (!$pdo) {
+    error_log("[BOOTSTRAP] CRITICAL: Could not obtain PDO from DBConnection");
+    throw new RuntimeException("Primary database must return a PDO instance, got: NULL");
+}
+
 if (!$pdo instanceof PDO) {
-    throw new RuntimeException("Primary database must return a PDO instance, got: " . gettype($pdo));
+    $type = is_object($pdo) ? get_class($pdo) : gettype($pdo);
+    throw new RuntimeException("Primary database must return a PDO instance, got: " . $type);
 }
 
 error_log("[BOOTSTRAP] PDO connection obtained successfully");
