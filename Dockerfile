@@ -1,5 +1,5 @@
-# Base image
-FROM php:8.2-fpm
+# Use PHP CLI so we can run the built-in server
+FROM php:8.2-cli
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
@@ -19,16 +19,15 @@ COPY composer.json ./
 # Install Composer
 RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
 
-# Install PHP dependencies (will generate composer.lock if not exists)
+# Install PHP dependencies
 RUN composer install --no-dev --optimize-autoloader || true
 
 # Copy application code
 COPY src/ src/
 COPY public/ public/
 
-# Expose port
+# Expose port (Railway will override $PORT anyway)
 EXPOSE 9000
 
-# Start PHP-FPM
-CMD ["php-fpm"]
-
+# Start PHP built-in server
+CMD ["php", "-S", "0.0.0.0:$PORT", "-t", "public"]
