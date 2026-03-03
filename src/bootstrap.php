@@ -7,11 +7,10 @@ declare(strict_types=1);
  */
 
 /* ======================================================
- * 0️⃣ INTERNAL AUTOLOADER (for layered architecture)
+ * 0️⃣ AUTOLOADER
  * ====================================================== */
 
-// Define project root (one level up from src/)
-$projectRoot = dirname(__DIR__); // This becomes /var/www/html/
+$projectRoot = dirname(__DIR__);
 
 spl_autoload_register(function ($class) use ($projectRoot) {
     $prefixes = [
@@ -25,10 +24,9 @@ spl_autoload_register(function ($class) use ($projectRoot) {
     ];
 
     foreach ($prefixes as $prefix => $baseDir) {
-        $len = strlen($prefix);
-        if (strncmp($prefix, $class, $len) !== 0) continue;
+        if (strncmp($prefix, $class, strlen($prefix)) !== 0) continue;
 
-        $relativeClass = substr($class, $len);
+        $relativeClass = substr($class, strlen($prefix));
         $file = $baseDir . str_replace('\\', '/', $relativeClass) . '.php';
 
         if (file_exists($file)) {
@@ -38,10 +36,9 @@ spl_autoload_register(function ($class) use ($projectRoot) {
     }
 });
 
-// Load Composer autoloader first
 require_once __DIR__ . '/../vendor/autoload.php';
 
-define('APP_ROOT', $projectRoot); // Use the same project root
+define('APP_ROOT', $projectRoot);
 
 use Dotenv\Dotenv;
 use Dotenv\Repository\RepositoryBuilder;
@@ -53,338 +50,210 @@ use SECURITY_LAYER\Encryption\TokenEncryptor;
 use BUSINESS_LOGIC_LAYER\services\SwapService;
 
 /* ======================================================
- * 1️⃣ RESOLVE SYSTEM COUNTRY (SINGLE SOURCE OF TRUTH)
+ * 1️⃣ RESOLVE COUNTRY
  * ====================================================== */
+
 $country = require APP_ROOT . '/src/CORE_CONFIG/system_country.php';
 
-if (!$country || !is_string($country)) {
+if (!$country || !defined('SYSTEM_COUNTRY')) {
     throw new RuntimeException('SYSTEM_COUNTRY not resolved');
 }
 
-if (!defined('SYSTEM_COUNTRY')) {
-    throw new RuntimeException('SYSTEM_COUNTRY not defined. system_country.php must define it.');
-}
-
 $GLOBALS['country'] = SYSTEM_COUNTRY;
-error_log("[BOOTSTRAP] Country resolved → " . SYSTEM_COUNTRY);
+error_log("[BOOTSTRAP] Country → " . SYSTEM_COUNTRY);
 
 /* ======================================================
- * 2️⃣ LOAD COUNTRY ENV (LOCAL ONLY, RAILWAY USES ENV)
+ * 2️⃣ LOAD ENV (LOCAL ONLY)
  * ====================================================== */
+
 if (!getenv('DATABASE_URL')) {
-    // Local development
+
     $envFile = ".env_" . SYSTEM_COUNTRY;
     $envPath = APP_ROOT . "/src/CORE_CONFIG/countries/" . SYSTEM_COUNTRY . "/" . $envFile;
 
     if (!file_exists($envPath)) {
-        throw new RuntimeException("Missing local env file: {$envPath}");
+        throw new RuntimeException("Missing env file: {$envPath}");
     }
 
-    $repository = Dotenv\Repository\RepositoryBuilder::createWithDefaultAdapters()
+    $repository = RepositoryBuilder::createWithDefaultAdapters()
         ->addAdapter(PutenvAdapter::class)
         ->make();
 
-    Dotenv::create($repository, dirname($envFile), basename($envFile))->load();
+    Dotenv::create($repository, dirname($envPath), basename($envPath))->load();
 
     error_log("[BOOTSTRAP] Loaded local env: {$envPath}");
-} else {
-    // Production (Railway) - no file needed
-    error_log("[BOOTSTRAP] Using Railway environment variables for " . SYSTEM_COUNTRY);
 }
 
 /* ======================================================
- * 3️⃣ LOAD COUNTRY CONFIG
+ * 3️⃣ LOAD COUNTRY CONFIG + PARTICIPANTS
  * ====================================================== */
+
 $configFile = APP_ROOT . "/src/CORE_CONFIG/countries/" . SYSTEM_COUNTRY . "/config_" . SYSTEM_COUNTRY . ".php";
 $participantsFile = APP_ROOT . "/src/CORE_CONFIG/countries/" . SYSTEM_COUNTRY . "/participants_" . SYSTEM_COUNTRY . ".json";
 
-if (!file_exists($configFile)) {
-    throw new RuntimeException("Missing config: {$configFile}");
-}
-
-if (!file_exists($participantsFile)) {
-    throw new RuntimeException("Missing participants file: {$participantsFile}");
+if (!file_exists($configFile) || !file_exists($participantsFile)) {
+    throw new RuntimeException("Missing country configuration files");
 }
 
 $countryConfig = require $configFile;
 
-// Load and validate participants JSON with better error handling
-$participantsJson = file_get_contents($participantsFile);
-if ($participantsJson === false) {
-    throw new RuntimeException("Failed to read participants file: {$participantsFile}");
-}
-
-$participantsRaw = json_decode($participantsJson, true);
+$participantsRaw = json_decode(file_get_contents($participantsFile), true);
 
 if (json_last_error() !== JSON_ERROR_NONE) {
-    throw new RuntimeException(
-        "Invalid participants JSON in {$participantsFile}: " . json_last_error_msg()
-    );
+    throw new RuntimeException("Invalid participants JSON");
 }
 
-if (!is_array($participantsRaw)) {
-    throw new RuntimeException(
-        "Participants data must be an array in {$participantsFile}, got: " . gettype($participantsRaw)
-    );
-}
-
-// Check if the expected structure exists
 if (!isset($participantsRaw['participants'])) {
-    error_log("[BOOTSTRAP] WARNING: No 'participants' key found in JSON. Using entire object as participants array.");
-    // If 'participants' key doesn't exist, assume the whole object is the participants array
     $participantsRaw = ['participants' => $participantsRaw];
 }
 
-error_log("[BOOTSTRAP] Successfully loaded participants JSON from {$participantsFile}");
-error_log("[BOOTSTRAP] Found " . count($participantsRaw['participants'] ?? []) . " participants");
+$participants = [];
+foreach ($participantsRaw['participants'] as $code => $participant) {
+    if (($participant['status'] ?? 'ACTIVE') !== 'ACTIVE') continue;
+    $participants[strtolower($code)] = $participant;
+}
+
+error_log("[BOOTSTRAP] Active participants: " . count($participants));
 
 /* ======================================================
- * 4️⃣ INITIALIZE SECURITY (CRITICAL)
+ * 4️⃣ SECURITY INITIALIZATION
  * ====================================================== */
-$appKey = getenv('APP_ENCRYPTION_KEY');
+
+$appKey = getenv('APP_ENCRYPTION_KEY') 
+          ?: ($countryConfig['security']['encryption_key'] ?? null);
 
 if (!$appKey || strlen($appKey) < 32) {
-    throw new RuntimeException(
-        'APP_ENCRYPTION_KEY missing or too weak for ' . SYSTEM_COUNTRY
-    );
+    throw new RuntimeException('APP_ENCRYPTION_KEY missing or weak');
 }
 
 $keyVault = new KeyVault(['default' => $appKey]);
 $tokenEncryptor = new TokenEncryptor($keyVault->getEncryptionKey());
 
 /* ======================================================
- * 5️⃣ START SESSION (SAFE)
+ * 5️⃣ SESSION START
  * ====================================================== */
-require_once APP_ROOT . '/src/APP_LAYER/utils/session_manager.php';
+
 SessionManager::start();
 
 /* ======================================================
- * 6️⃣ BUILD DATABASE CONFIGURATION ARRAY
+ * 6️⃣ DATABASE INITIALIZATION
  * ====================================================== */
-$dbConfig = [
-    'host' => getenv('PG_HOST') ?: ($countryConfig['db']['primary']['host'] ?? 'localhost'),
-    'port' => getenv('PG_PORT') ?: ($countryConfig['db']['primary']['port'] ?? 5432),
-    'name' => getenv('PG_NAME') ?: ($countryConfig['db']['primary']['database'] ?? 'swap_system_bw'),
-    'user' => getenv('PG_USER') ?: ($countryConfig['db']['primary']['username'] ?? 'postgres'),
-    'password' => getenv('PG_PASS') ?: ($countryConfig['db']['primary']['password'] ?? '')
-];
 
-/* ======================================================
- * 7️⃣ INITIALIZE DATABASES (NOW USING CONFIG ARRAY)
- * ====================================================== */
-if (empty($countryConfig['db'])) {
-    throw new RuntimeException("DB config missing");
-}
-
-$databases = [];
-foreach ($countryConfig['db'] as $name => $dbConf) {
-    // Convert the dbConf array to match what DBConnection expects
-    $connectionConfig = [
-        'host' => $dbConf['host'] ?? $dbConfig['host'],
-        'port' => $dbConf['port'] ?? $dbConfig['port'],
-        'name' => $dbConf['database'] ?? $dbConf['name'] ?? $dbConfig['name'],
-        'user' => $dbConf['username'] ?? $dbConf['user'] ?? $dbConfig['user'],
-        'password' => $dbConf['password'] ?? $dbConfig['password']
-    ];
-    $databases[$name] = new DBConnection($connectionConfig);
-}
-
-// Ensure primary database exists
-$primaryDb = $databases['primary'] ?? reset($databases);
-
-/* ======================================================
- * 8️⃣ LOAD ACTIVE PARTICIPANTS ONLY
- * ====================================================== */
-$participants = [];
-foreach (($participantsRaw['participants'] ?? []) as $code => $participant) {
-    if (($participant['status'] ?? 'ACTIVE') !== 'ACTIVE') continue;
-    $participants[strtolower($code)] = $participant;
-}
-
-/* ======================================================
- * 9️⃣ PREPARE SWAP SERVICE DEPENDENCIES
- * ====================================================== */
-// Load Mojaloop config
-$mojaloopConfig = [];
-$mojaloopConfigPath = APP_ROOT . '/CORE_CONFIG/mojaloop.php';
-if (file_exists($mojaloopConfigPath)) {
-    $mojaloopConfig = require $mojaloopConfigPath;
-}
-
-// Initialize optional services (extend these as needed)
-$logger = null; // Initialize your logger if you have one
-$cache = null;  // Initialize your cache if you have one
-$eventDispatcher = null; // Initialize your event dispatcher if you have one
-
-/* ======================================================
- * 🔟 INITIALIZE SWAP SERVICE WITH CORRECT ARGUMENTS
- * ====================================================== */
-// Get the primary database connection object
-$primaryDbConnection = $databases['primary'] ?? reset($databases);
-
-// FIX: Use the static method correctly since DBConnection uses static methods
-$pdo = null;
-
-if (!$primaryDbConnection) {
-    throw new RuntimeException("No primary database connection available");
-}
-
-// DBConnection uses static methods, not instance methods
-// Get the PDO connection using the static getConnection() method
-try {
-    $pdo = \DATA_PERSISTENCE_LAYER\config\DBConnection::getConnection();
-    error_log("[BOOTSTRAP] Got PDO via static getConnection()");
-} catch (Exception $e) {
-    error_log("[BOOTSTRAP] Static getConnection() failed: " . $e->getMessage());
-}
-
-// If that failed, try getInstance()
-if (!$pdo) {
-    try {
-        $pdo = \DATA_PERSISTENCE_LAYER\config\DBConnection::getInstance();
-        error_log("[BOOTSTRAP] Got PDO via static getInstance()");
-    } catch (Exception $e) {
-        error_log("[BOOTSTRAP] Static getInstance() failed: " . $e->getMessage());
-    }
-}
-
-// Final check
-if (!$pdo) {
-    error_log("[BOOTSTRAP] CRITICAL: Could not obtain PDO from DBConnection");
-    throw new RuntimeException("Primary database must return a PDO instance, got: NULL");
-}
+$pdo = DBConnection::getConnection();
 
 if (!$pdo instanceof PDO) {
-    $type = is_object($pdo) ? get_class($pdo) : gettype($pdo);
-    throw new RuntimeException("Primary database must return a PDO instance, got: " . $type);
+    throw new RuntimeException("Failed to obtain PDO instance");
 }
 
-error_log("[BOOTSTRAP] PDO connection obtained successfully");
+$databases = [
+    'primary' => $pdo
+];
 
-// Get the encryption key from environment (never hardcoded)
-$appKey = getenv('APP_ENCRYPTION_KEY');
-if (!$appKey) {
-    // Try to get from country config as fallback
-    $appKey = $countryConfig['security']['encryption_key'] ?? null;
-    
-    if (!$appKey) {
-        error_log("[CRITICAL] APP_ENCRYPTION_KEY not set in environment or config");
-        throw new RuntimeException('APP_ENCRYPTION_KEY missing for ' . SYSTEM_COUNTRY);
-    }
-    
-    error_log("[BOOTSTRAP] Using encryption key from country config for " . SYSTEM_COUNTRY);
-}
+$primaryDbConnection = $databases['primary']; // ✅ Corrected line
 
-// DEBUG: Log participants structure (without sensitive data)
-error_log("[BOOTSTRAP] Participants loaded for " . SYSTEM_COUNTRY . ": " . count($GLOBALS['participants'] ?? []));
+error_log("[BOOTSTRAP] Primary DB connected");
 
-// Initialize SwapService with dynamic configuration
+/* ======================================================
+ * 7️⃣ LOAD MOJALOOP CONFIG
+ * ====================================================== */
+
+$mojaloopConfigPath = APP_ROOT . '/src/CORE_CONFIG/mojaloop.php';
+$mojaloopConfig = file_exists($mojaloopConfigPath)
+    ? require $mojaloopConfigPath
+    : [];
+
+/* ======================================================
+ * 8️⃣ INITIALIZE SWAP SERVICE
+ * ====================================================== */
+
 $swapServiceConfig = [
-    'participants' => $GLOBALS['participants'] ?? [],  // Full participants data
-    'country_config' => $countryConfig ?? [],           // Country-specific config
-    'mojaloop' => $mojaloopConfig ?? [],                // Mojaloop config if available
-    'environment' => getenv('APP_ENV') ?: 'production'   // Current environment
+    'participants'   => $participants,
+    'country_config' => $countryConfig,
+    'mojaloop'       => $mojaloopConfig,
+    'environment'    => getenv('APP_ENV') ?: 'production'
 ];
 
 $swapService = new SwapService(
-    $pdo,                                      // Argument 1: PDO connection
-    $mojaloopConfig ?? [],                     // Argument 2: Mojaloop config
-    SYSTEM_COUNTRY,                             // Argument 3: Country code
-    $appKey,                                    // Argument 4: Encryption key
-    $swapServiceConfig                          // Argument 5: Complete config array
+    $primaryDbConnection,
+    $mojaloopConfig,
+    SYSTEM_COUNTRY,
+    $appKey,
+    $swapServiceConfig
 );
 
-$GLOBALS['swapService'] = $swapService;
+error_log("[BOOTSTRAP] SwapService initialized");
 
-// Log success (without exposing sensitive data)
-error_log("[BOOTSTRAP] SwapService initialized for " . SYSTEM_COUNTRY . 
-          " with " . count($GLOBALS['participants'] ?? []) . " participants");
-
-// Optional: Log which participants are available (for debugging)
-if (getenv('APP_DEBUG') === 'true') {
-    error_log("[BOOTSTRAP DEBUG] Available participants: " . 
-              json_encode(array_keys($GLOBALS['participants'] ?? [])));
-}
 /* ======================================================
- * 1️⃣1️⃣ GLOBAL CONTEXT (CONTROLLED EXPOSURE)
+ * 9️⃣ GLOBAL CONTEXT (CONTROLLED)
  * ====================================================== */
+
 unset($countryConfig['security']['encryption_key']);
 
 $GLOBALS['config'] = $countryConfig;
 $GLOBALS['participants'] = $participants;
 $GLOBALS['databases'] = $databases;
-$GLOBALS['dbConfig'] = $dbConfig;
-$GLOBALS['mojaloopConfig'] = $mojaloopConfig;
-$GLOBALS['logger'] = $logger;
-$GLOBALS['cache'] = $cache;
-$GLOBALS['eventDispatcher'] = $eventDispatcher;
 $GLOBALS['swapService'] = $swapService;
-
 $GLOBALS['security'] = [
     'encryptor' => $tokenEncryptor,
     'keyVault'  => $keyVault
 ];
 
 /* ======================================================
- * 1️⃣2️⃣ ENSURE LOG DIRECTORY & FILE PERMISSIONS
+ * 🔟 ENSURE LOG DIRECTORY
  * ====================================================== */
+
 $logDir = APP_ROOT . '/src/APP_LAYER/logs';
-$logFile = $logDir . '/src/swap_audit.log';
+$logFile = $logDir . '/swap_audit.log';
 
 if (!is_dir($logDir)) {
     mkdir($logDir, 0755, true);
-    error_log("[BOOTSTRAP] Logs directory created at {$logDir}");
 }
 
 if (!file_exists($logFile)) {
-    file_put_contents($logFile, "");
+    file_put_contents($logFile, '');
     chmod($logFile, 0644);
-    error_log("[BOOTSTRAP] swap_audit.log created at {$logFile}");
 }
 
 /* ======================================================
- * 1️⃣3️⃣ CALLBACK URL DETECTION
+ * 1️⃣1️⃣ CALLBACK URL DETECTION
  * ====================================================== */
-function getCallbackUrl() {
-    // Try different possible Docker host IPs
-    $possible_hosts = [
-        '172.17.0.1',     // Default Docker bridge
-        '172.18.0.1',     // Common Docker network
+
+function getCallbackUrl(): string
+{
+    $hosts = [
         'host.docker.internal',
+        '172.17.0.1',
         'localhost',
         '127.0.0.1'
     ];
-    
-    foreach ($possible_hosts as $host) {
-        $url = "http://$host:5050/callback/test";
+
+    foreach ($hosts as $host) {
+        $url = "http://{$host}:5050/callback/test";
+
         $ch = curl_init($url);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_TIMEOUT, 2);
-        curl_setopt($ch, CURLOPT_NOBODY, true);
-        curl_setopt($ch, CURLOPT_HEADER, true);
-        $response = curl_exec($ch);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => 2,
+            CURLOPT_NOBODY => true
+        ]);
+
+        curl_exec($ch);
         $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
-        
+
         if ($code > 0 && $code < 500) {
-            $baseUrl = "http://$host:5050/callback";
-            error_log("[BOOTSTRAP] Callback URL resolved to: $baseUrl (HTTP $code)");
-            return $baseUrl;
+            return "http://{$host}:5050/callback";
         }
     }
-    
-    // Default fallback
-    $default = 'http://172.17.0.1:5050/callback';
-    error_log("[BOOTSTRAP] Using default callback URL: $default");
-    return $default;
+
+    return 'http://localhost:5050/callback';
 }
 
 $GLOBALS['CALLBACK_URL'] = getCallbackUrl();
 
 /* ======================================================
- * 1️⃣4️⃣ VERIFICATION LOGS
+ * 1️⃣2️⃣ FINAL VERIFICATION
  * ====================================================== */
-error_log("[BOOTSTRAP] System initialized successfully for " . SYSTEM_COUNTRY);
-error_log("[BOOTSTRAP] Callback URL: " . $GLOBALS['CALLBACK_URL']);
-error_log("[BOOTSTRAP] SwapService initialized: " . (isset($GLOBALS['swapService']) ? 'YES' : 'NO'));
 
+error_log("[BOOTSTRAP] System ready for " . SYSTEM_COUNTRY);
+error_log("[BOOTSTRAP] Callback URL → " . $GLOBALS['CALLBACK_URL']);
