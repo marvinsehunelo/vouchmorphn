@@ -10,15 +10,18 @@ declare(strict_types=1);
  * 0️⃣ INTERNAL AUTOLOADER (for layered architecture)
  * ====================================================== */
 
-spl_autoload_register(function ($class) {
+// Define project root (one level up from src/)
+$projectRoot = dirname(__DIR__); // This becomes /var/www/html/
+
+spl_autoload_register(function ($class) use ($projectRoot) {
     $prefixes = [
-        'DFSP_ADAPTER_LAYER\\'     => __DIR__ . '/src/DFSP_ADAPTER_LAYER/',
-        'BUSINESS_LOGIC_LAYER\\'   => __DIR__ . '/src/BUSINESS_LOGIC_LAYER/',
-        'DATA_PERSISTENCE_LAYER\\' => __DIR__ . '/src/DATA_PERSISTENCE_LAYER/',
-        'INTEGRATION_LAYER\\'      => __DIR__ . '/src/INTEGRATION_LAYER/',
-        'SECURITY_LAYER\\'         => __DIR__ . '/src/SECURITY_LAYER/',
-        'CORE_CONFIG\\'            => __DIR__ . '/src/CORE_CONFIG/',
-        'APP_LAYER\\'              => __DIR__ . '/src/APP_LAYER/'
+        'DFSP_ADAPTER_LAYER\\'     => $projectRoot . '/src/DFSP_ADAPTER_LAYER/',
+        'BUSINESS_LOGIC_LAYER\\'   => $projectRoot . '/src/BUSINESS_LOGIC_LAYER/',
+        'DATA_PERSISTENCE_LAYER\\' => $projectRoot . '/src/DATA_PERSISTENCE_LAYER/',
+        'INTEGRATION_LAYER\\'      => $projectRoot . '/src/INTEGRATION_LAYER/',
+        'SECURITY_LAYER\\'         => $projectRoot . '/src/SECURITY_LAYER/',
+        'CORE_CONFIG\\'            => $projectRoot . '/src/CORE_CONFIG/',
+        'APP_LAYER\\'              => $projectRoot . '/src/APP_LAYER/'
     ];
 
     foreach ($prefixes as $prefix => $baseDir) {
@@ -38,7 +41,7 @@ spl_autoload_register(function ($class) {
 // Load Composer autoloader first
 require_once __DIR__ . '/../vendor/autoload.php';
 
-define('APP_ROOT', realpath(__DIR__ . '/../../')); 
+define('APP_ROOT', $projectRoot); // Use the same project root
 
 use Dotenv\Dotenv;
 use Dotenv\Repository\RepositoryBuilder;
@@ -368,10 +371,3 @@ $GLOBALS['CALLBACK_URL'] = getCallbackUrl();
 error_log("[BOOTSTRAP] System initialized successfully for " . SYSTEM_COUNTRY);
 error_log("[BOOTSTRAP] Callback URL: " . $GLOBALS['CALLBACK_URL']);
 error_log("[BOOTSTRAP] SwapService initialized: " . (isset($GLOBALS['swapService']) ? 'YES' : 'NO'));
-
-
-
-
-
-
-
