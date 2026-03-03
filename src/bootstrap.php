@@ -222,41 +222,29 @@ $eventDispatcher = null; // Initialize your event dispatcher if you have one
 // Get the primary database connection object
 $primaryDbConnection = $databases['primary'] ?? reset($databases);
 
-// FIX: Check if connection exists and get PDO properly
+// FIX: Use the static method correctly since DBConnection uses static methods
 $pdo = null;
 
 if (!$primaryDbConnection) {
     throw new RuntimeException("No primary database connection available");
 }
 
-// Try to get PDO using getConnection() method
-if (method_exists($primaryDbConnection, 'getConnection')) {
-    try {
-        $pdo = $primaryDbConnection->getConnection();
-        error_log("[BOOTSTRAP] Got PDO via getConnection() method");
-    } catch (Exception $e) {
-        error_log("[BOOTSTRAP] getConnection() failed: " . $e->getMessage());
-    }
+// DBConnection uses static methods, not instance methods
+// Get the PDO connection using the static getConnection() method
+try {
+    $pdo = \DATA_PERSISTENCE_LAYER\config\DBConnection::getConnection();
+    error_log("[BOOTSTRAP] Got PDO via static getConnection()");
+} catch (Exception $e) {
+    error_log("[BOOTSTRAP] Static getConnection() failed: " . $e->getMessage());
 }
 
-// If that fails, try direct property access
-if (!$pdo && property_exists($primaryDbConnection, 'connection')) {
-    $pdo = $primaryDbConnection->connection;
-    error_log("[BOOTSTRAP] Got PDO via property access");
-}
-
-// If still no PDO, try reflection
+// If that failed, try getInstance()
 if (!$pdo) {
     try {
-        $reflection = new ReflectionClass($primaryDbConnection);
-        if ($reflection->hasProperty('connection')) {
-            $property = $reflection->getProperty('connection');
-            $property->setAccessible(true);
-            $pdo = $property->getValue($primaryDbConnection);
-            error_log("[BOOTSTRAP] Got PDO via reflection");
-        }
+        $pdo = \DATA_PERSISTENCE_LAYER\config\DBConnection::getInstance();
+        error_log("[BOOTSTRAP] Got PDO via static getInstance()");
     } catch (Exception $e) {
-        error_log("[BOOTSTRAP] Reflection failed: " . $e->getMessage());
+        error_log("[BOOTSTRAP] Static getInstance() failed: " . $e->getMessage());
     }
 }
 
@@ -399,3 +387,4 @@ $GLOBALS['CALLBACK_URL'] = getCallbackUrl();
 error_log("[BOOTSTRAP] System initialized successfully for " . SYSTEM_COUNTRY);
 error_log("[BOOTSTRAP] Callback URL: " . $GLOBALS['CALLBACK_URL']);
 error_log("[BOOTSTRAP] SwapService initialized: " . (isset($GLOBALS['swapService']) ? 'YES' : 'NO'));
+
