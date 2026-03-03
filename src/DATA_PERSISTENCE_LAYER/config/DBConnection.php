@@ -22,7 +22,7 @@ class DBConnection
         }
         
         try {
-            // Parse Railway DATABASE_URL
+            // Parse the URL
             $db = parse_url($databaseUrl);
             $host = $db['host'] ?? 'localhost';
             $port = $db['port'] ?? '5432';
@@ -30,8 +30,7 @@ class DBConnection
             $user = $db['user'] ?? 'postgres';
             $password = $db['pass'] ?? '';
             
-            error_log("[DBConnection] Connecting to {$host}:{$port}/{$dbname}");
-            
+            // Simple DSN - no SSL for internal connections
             $dsn = "pgsql:host={$host};port={$port};dbname={$dbname}";
             
             self::$connection = new PDO($dsn, $user, $password, [
@@ -40,30 +39,11 @@ class DBConnection
                 PDO::ATTR_TIMEOUT => 5
             ]);
             
-            error_log("[DBConnection] Connected successfully");
             return self::$connection;
             
         } catch (PDOException $e) {
             error_log("[DBConnection] Failed: " . $e->getMessage());
             return null;
-        }
-    }
-    
-    public static function getInstance(): ?PDO
-    {
-        return self::getConnection();
-    }
-    
-    public static function isConnected(): bool
-    {
-        $conn = self::getConnection();
-        if (!$conn) return false;
-        
-        try {
-            $conn->query("SELECT 1")->fetch();
-            return true;
-        } catch (\Exception $e) {
-            return false;
         }
     }
 }
