@@ -43,7 +43,7 @@ define('APP_ROOT', $projectRoot);
 use Dotenv\Dotenv;
 use Dotenv\Repository\RepositoryBuilder;
 use Dotenv\Repository\Adapter\PutenvAdapter;
-use APP_LAYER\Utils\SessionManager;
+use APP_LAYER\utils\SessionManager;
 use DATA_PERSISTENCE_LAYER\config\DBConnection;
 use SECURITY_LAYER\Encryption\KeyVault;
 use SECURITY_LAYER\Encryption\TokenEncryptor;
@@ -257,5 +257,6 @@ $GLOBALS['CALLBACK_URL'] = getCallbackUrl();
 
 error_log("[BOOTSTRAP] System ready for " . SYSTEM_COUNTRY);
 error_log("[BOOTSTRAP] Callback URL → " . $GLOBALS['CALLBACK_URL']);
+
 
 
