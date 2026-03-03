@@ -1,4 +1,3 @@
-# Replace your DBConnection.php with the working version
 cat > src/DATA_PERSISTENCE_LAYER/config/DBConnection.php << 'EOF'
 <?php
 namespace DATA_PERSISTENCE_LAYER\config;
@@ -56,14 +55,15 @@ class DBConnection
         // Get host to detect Railway
         $host = getenv('PG_HOST') ?: 'localhost';
         $isRailway = (strpos($host, 'railway') !== false || 
-                      strpos($host, 'rlwy.net') !== false);
+                      strpos($host, 'rlwy.net') !== false ||
+                      $host === 'interchange.proxy.rlwy.net');
         
         // For Railway, force database name to 'railway'
         if ($isRailway) {
             return [
                 'host' => $host,
                 'port' => getenv('PG_PORT') ?: 5432,
-                'dbname' => 'railway', // Force railway database name
+                'dbname' => 'railway', // FORCE railway database name
                 'user' => getenv('PG_USER') ?: 'postgres',
                 'password' => getenv('PG_PASS') ?: '',
                 'sslmode' => 'require'
@@ -103,8 +103,8 @@ class DBConnection
             // Build DSN
             $dsn = "pgsql:host={$config['host']};port={$config['port']};dbname={$config['dbname']}";
             
-            // Add SSL mode if required
-            if ($config['sslmode'] === 'require') {
+            // Add SSL mode if required - this is the correct way to enable SSL
+            if (isset($config['sslmode']) && $config['sslmode'] === 'require') {
                 $dsn .= ";sslmode=require";
             }
             
@@ -114,11 +114,6 @@ class DBConnection
                 PDO::ATTR_EMULATE_PREPARES => false,
                 PDO::ATTR_TIMEOUT => 5
             ];
-            
-            // Add SSL option for Railway
-            if ($config['sslmode'] === 'require') {
-                $options[PDO::PGSQL_ATTR_SSL_MODE] = 'require';
-            }
             
             self::$connection = new PDO($dsn, $config['user'], $config['password'], $options);
             
@@ -181,7 +176,7 @@ class DBConnection
             try {
                 $dsn = "pgsql:host={$config['host']};port={$config['port']};dbname={$config['dbname']}";
                 
-                if ($config['sslmode'] === 'require') {
+                if (isset($config['sslmode']) && $config['sslmode'] === 'require') {
                     $dsn .= ";sslmode=require";
                 }
                 
@@ -189,10 +184,6 @@ class DBConnection
                     PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
                     PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
                 ];
-                
-                if ($config['sslmode'] === 'require') {
-                    $options[PDO::PGSQL_ATTR_SSL_MODE] = 'require';
-                }
                 
                 self::$instances[$key] = new PDO($dsn, $config['user'], $config['password'], $options);
                 
