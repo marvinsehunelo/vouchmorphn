@@ -287,4 +287,4 @@ class DBConnection
             'config' => $config
         ];
     }
-}}
+}
