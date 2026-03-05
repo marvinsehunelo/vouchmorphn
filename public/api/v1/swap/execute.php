@@ -113,40 +113,51 @@ if (!$providedKey || !in_array($providedKey, $validKeys, true)) {
 // ============================================
 try {
     $input = json_decode(file_get_contents('php://input'), true);
-    if (json_last_error() !== JSON_ERROR_NONE) {
-        throw new Exception('Invalid JSON payload');
-    }
+    if (!$input) throw new Exception('Invalid JSON payload');
 
     $pdo = DBConnection::getConnection();
-    if (!$pdo) throw new Exception('Database connection failed.');
+    
+    // 1. Path to your BW participants file
+    $pPath = ROOT_PATH . "/src/CORE_CONFIG/countries/{$country}/participants_{$country}.json";
+    if (!file_exists($pPath)) throw new Exception("Config missing: $pPath");
+    
+    $rawConfig = json_decode(file_get_contents($pPath), true);
 
-    $participantsPath = ROOT_PATH . "/src/CORE_CONFIG/countries/{$country}/participants_{$country}.json";
-    if (!file_exists($participantsPath)) {
-        throw new Exception("Participants config not found for {$country}");
-    }
-    $participantsConfig = json_decode(file_get_contents($participantsPath), true);
+    // 2. DATA NORMALIZATION
+    // If your JSON has "participants" at the root, use it directly.
+    // If not, we wrap it so the Service finds $config['participants']
+    $finalConfig = isset($rawConfig['participants']) ? $rawConfig : ['participants' => $rawConfig];
 
-    $encryptionKey = get_env_val('APP_ENCRYPTION_KEY') ?: 'fallback-32-char-key-replace-this!';
+    // 3. RESOLVE ENCRYPTION
+    // Since you have settlement accounts in all partner institutions, 
+    // we use the Sandbox key for AES-256-GCM
+    $encryptionKey = get_env_val('APP_ENCRYPTION_KEY');
 
-    // Initialize Service (Now includes SMS and Bank client dependencies)
+    // 4. INITIALIZE SWAP SERVICE
+    // We pass the normalized $finalConfig which contains the "SACCUSSALIS" key
     $swapService = new SwapService(
         $pdo, 
         [], 
         $country, 
         $encryptionKey, 
-        ['participants' => $participantsConfig]
+        $finalConfig 
     );
 
+    // 5. EXECUTION
     $result = $swapService->executeSwap($input);
 
-    http_response_code(200);
+    // 6. OUTPUT
     echo json_encode([
-        'success' => true,
+        'success' => true, 
         'data' => $result
     ], JSON_PRETTY_PRINT);
 
 } catch (Exception $e) {
-    error_log("Swap API Error: " . $e->getMessage());
     http_response_code(400);
-    echo json_encode(['success' => false, 'error' => $e->getMessage()]);
+    echo json_encode([
+        'success' => false, 
+        'error' => $e->getMessage(),
+        'trace' => 'API_EXECUTE_FAIL'
+    ]);
 }
+
