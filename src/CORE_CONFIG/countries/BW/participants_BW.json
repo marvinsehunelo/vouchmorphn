@@ -13,7 +13,7 @@
       "category": "BANK",
       "provider_code": "ZURUBWXX",
       "auth_type": "MTLS_OAUTH2",
-      "base_url": "http://zurubank-production.up.railway.app/Backend",
+      "base_url": "https://zurubank-production.up.railway.app/Backend",
 
       "security": {
   "api_key": {
@@ -80,7 +80,7 @@
       "category": "BANK",
       "provider_code": "SACCUSBWXX",
       "auth_type": "MTLS_OAUTH2",
-      "base_url": "http://saccussalis-production.up.railway.app//backend",
+      "base_url": "https://saccussalis-production.up.railway.app/backend",
 
       "security": {
   "api_key": {
@@ -381,4 +381,5 @@
     }
   }
 }
+
 
