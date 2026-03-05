@@ -20,7 +20,17 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     echo json_encode(['error' => 'Method not allowed. Use POST.']);
     exit();
 }
+// ============================================
+// LOAD COUNTRY CONFIG
+// ============================================
+require_once ROOT_PATH . '/src/CORE_CONFIG/system_country.php';
+require_once ROOT_PATH . '/src/CORE_CONFIG/loadcountry.php';
 
+// At this point:
+// - $country should be set
+// - .env_{country} loaded
+// - participants_{country}.json path available
+// - API keys are now available in getenv()
 // ============================================
 // BOOTSTRAP - Define paths and load dependencies
 // ============================================
