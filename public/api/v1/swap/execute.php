@@ -1,14 +1,21 @@
 <?php
 declare(strict_types=1);
 
-// Enable CORS if needed
+// ============================================
+// BOOTSTRAP - Define ROOT_PATH first
+// ============================================
+define('ROOT_PATH', dirname(__DIR__, 4)); // Goes up 4 levels from api/v1/swap/execute.php
+
+// ============================================
+// ENABLE CORS & JSON HEADERS
+// ============================================
 header("Access-Control-Allow-Origin: *");
 header("Content-Type: application/json; charset=UTF-8");
 header("Access-Control-Allow-Methods: POST, OPTIONS");
 header("Access-Control-Max-Age: 3600");
 header("Access-Control-Allow-Headers: Content-Type, Access-Control-Allow-Headers, X-API-Key, Authorization");
 
-// Handle preflight OPTIONS request
+// Preflight OPTIONS request
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
     exit();
@@ -20,50 +27,28 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     echo json_encode(['error' => 'Method not allowed. Use POST.']);
     exit();
 }
+
 // ============================================
 // LOAD COUNTRY CONFIG
 // ============================================
 require_once ROOT_PATH . '/src/CORE_CONFIG/system_country.php';
 require_once ROOT_PATH . '/src/CORE_CONFIG/loadcountry.php';
 
-// At this point:
-// - $country should be set
-// - .env_{country} loaded
-// - participants_{country}.json path available
-// - API keys are now available in getenv()
-// ============================================
-// BOOTSTRAP - Define paths and load dependencies
-// ============================================
-
-define('ROOT_PATH', dirname(__DIR__, 4)); // Goes up 4 levels from api/v1/swap/execute.php
-
-// Load required classes
-require_once ROOT_PATH . '/src/DATA_PERSISTENCE_LAYER/config/DBConnection.php';
-require_once ROOT_PATH . '/src/BUSINESS_LOGIC_LAYER/services/SwapService.php';
-require_once ROOT_PATH . '/src/INTEGRATION_LAYER/CLIENTS/BankClients/GenericBankClient.php';
-require_once ROOT_PATH . '/src/SECURITY_LAYER/Encryption/TokenEncryptor.php';
-
-use DATA_PERSISTENCE_LAYER\config\DBConnection;
-use BUSINESS_LOGIC_LAYER\services\SwapService;
+// system_country.php or loadcountry.php should set $country dynamically
+// fallback default
+if (empty($country)) {
+    $country = 'BW';
+}
 
 // ============================================
-// GET COUNTRY FROM INPUT FIRST (needed for env loading)
+// LOAD COUNTRY-SPECIFIC ENV FILE DYNAMICALLY
 // ============================================
-
-$input = json_decode(file_get_contents('php://input'), true);
-$country = strtoupper($input['country'] ?? 'BW'); // Default to Botswana
-
-// ============================================
-// LOAD ENVIRONMENT VARIABLES FROM COUNTRY-SPECIFIC .ENV FILE
-// ============================================
-
 $envFile = ROOT_PATH . "/src/CORE_CONFIG/countries/{$country}/.env.{$country}";
+
 if (file_exists($envFile)) {
     $lines = file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
     foreach ($lines as $line) {
-        if (strpos(trim($line), '#') === 0) {
-            continue;
-        }
+        if (strpos(trim($line), '#') === 0) continue;
         $parts = explode('=', $line, 2);
         if (count($parts) === 2) {
             $key = trim($parts[0]);
@@ -73,43 +58,26 @@ if (file_exists($envFile)) {
             $_SERVER[$key] = $value;
         }
     }
-    error_log("Loaded environment from: " . $envFile);
+    error_log("Loaded environment from: $envFile");
 } else {
-    error_log("Environment file not found: " . $envFile);
+    error_log("Environment file not found: $envFile");
 }
 
 // ============================================
-// AUTHENTICATION - Multi-key validation
+// LOAD REQUIRED CLASSES
 // ============================================
+require_once ROOT_PATH . '/src/DATA_PERSISTENCE_LAYER/config/DBConnection.php';
+require_once ROOT_PATH . '/src/BUSINESS_LOGIC_LAYER/services/SwapService.php';
+require_once ROOT_PATH . '/src/INTEGRATION_LAYER/CLIENTS/BankClients/GenericBankClient.php';
+require_once ROOT_PATH . '/src/SECURITY_LAYER/Encryption/TokenEncryptor.php';
 
-$headers = getallheaders();
-$apiKey = $headers['X-API-Key'] ?? $headers['x-api-key'] ?? null;
+use DATA_PERSISTENCE_LAYER\config\DBConnection;
+use BUSINESS_LOGIC_LAYER\services\SwapService;
 
-// ===== TEMPORARY DEBUGGING =====
-error_log("=== API KEY DEBUG ===");
-error_log("All headers: " . json_encode($headers));
-error_log("API Key extracted: " . ($apiKey ?? 'null'));
-error_log("API_KEY_SYSTEM from env: " . (getenv('API_KEY_SYSTEM') ? 'set' : 'not set'));
-error_log("API_KEY_ZURUBANK from env: " . (getenv('API_KEY_ZURUBANK') ? 'set' : 'not set'));
-error_log("ENCRYPTION_KEY from env: " . (getenv('ENCRYPTION_KEY') ? 'set' : 'not set'));
-error_log("APP_ENV: " . (getenv('APP_ENV') ?? 'not set'));
-// ==============================
-
-// Collect valid API keys from environment
-$validKeyMap = [
-    'SYSTEM'        => getenv('API_KEY_SYSTEM'),
-    'PARTNER_1'     => getenv('API_KEY_PARTNER_1'),
-    'PARTNER_2'     => getenv('API_KEY_PARTNER_2'),
-    'PARTNER_3'     => getenv('API_KEY_PARTNER_3'),
-    'PARTNER_4'     => getenv('API_KEY_PARTNER_4'),
-    'ZURUBANK'      => getenv('API_KEY_ZURUBANK'),
-    'SACCUSSALIS'   => getenv('API_KEY_SACCUSSALIS'),
-];
-
-error_log("Valid keys found in env: " . json_encode(array_keys(array_filter($validKeyMap))));
 // ============================================
-// VALIDATE INPUT PAYLOAD
+// PARSE INPUT
 // ============================================
+$input = json_decode(file_get_contents('php://input'), true);
 
 if (json_last_error() !== JSON_ERROR_NONE) {
     http_response_code(400);
@@ -117,68 +85,65 @@ if (json_last_error() !== JSON_ERROR_NONE) {
     exit();
 }
 
-// Basic validation
-if (empty($input['source']['institution'])) {
-    http_response_code(400);
-    echo json_encode(['error' => 'Missing required field: source.institution']);
-    exit();
-}
+// Basic required fields
+$requiredFields = [
+    'source' => ['institution', 'asset_type', 'amount'],
+    'destination' => ['institution', 'asset_type']
+];
 
-if (empty($input['destination']['institution'])) {
-    http_response_code(400);
-    echo json_encode(['error' => 'Missing required field: destination.institution']);
-    exit();
-}
-
-if (empty($input['source']['asset_type'])) {
-    http_response_code(400);
-    echo json_encode(['error' => 'Missing required field: source.asset_type']);
-    exit();
-}
-
-if (empty($input['destination']['asset_type'])) {
-    http_response_code(400);
-    echo json_encode(['error' => 'Missing required field: destination.asset_type']);
-    exit();
-}
-
-if (!isset($input['source']['amount']) || $input['source']['amount'] <= 0) {
-    http_response_code(400);
-    echo json_encode(['error' => 'Invalid source amount']);
-    exit();
+foreach ($requiredFields as $section => $fields) {
+    foreach ($fields as $field) {
+        if (!isset($input[$section][$field]) || ($field === 'amount' && $input[$section][$field] <= 0)) {
+            http_response_code(400);
+            echo json_encode(['error' => "Missing or invalid field: $section.$field"]);
+            exit();
+        }
+    }
 }
 
 // ============================================
-// GET DATABASE CONNECTION
+// AUTHENTICATION - MULTI-KEY VALIDATION
 // ============================================
+$headers = getallheaders();
+$apiKey = $headers['X-API-Key'] ?? $headers['x-api-key'] ?? null;
 
+// Collect valid API keys dynamically from environment
+$validKeyMap = array_filter([
+    'SYSTEM'        => getenv('API_KEY_SYSTEM'),
+    'PARTNER_1'     => getenv('API_KEY_PARTNER_1'),
+    'PARTNER_2'     => getenv('API_KEY_PARTNER_2'),
+    'PARTNER_3'     => getenv('API_KEY_PARTNER_3'),
+    'PARTNER_4'     => getenv('API_KEY_PARTNER_4'),
+    'ZURUBANK'      => getenv('API_KEY_ZURUBANK'),
+    'SACCUSSALIS'   => getenv('API_KEY_SACCUSSALIS'),
+]);
+
+if (!$apiKey || !in_array($apiKey, $validKeyMap, true)) {
+    error_log("API key validation failed. Provided: " . ($apiKey ?? 'none'));
+    http_response_code(401);
+    echo json_encode(['error' => 'Unauthorized: Invalid or missing API key']);
+    exit();
+}
+
+error_log("API key validated successfully");
+
+// ============================================
+// DATABASE CONNECTION
+// ============================================
 try {
     $pdo = DBConnection::getConnection();
-    
-    if (!$pdo) {
-        // Try to get connection status for debugging
-        $status = DBConnection::getConnectionStatus();
-        error_log("Database connection failed. Status: " . json_encode($status));
-        
-        http_response_code(500);
-        echo json_encode(['error' => 'Database connection failed']);
-        exit();
-    }
-    
-    error_log("Database connected successfully to: " . ($pdo->query("SELECT current_database()")->fetchColumn() ?? 'unknown'));
-    
+    if (!$pdo) throw new Exception('DB connection returned null');
+    error_log("Database connected successfully");
 } catch (Exception $e) {
     error_log("Database connection exception: " . $e->getMessage());
     http_response_code(500);
-    echo json_encode(['error' => 'Database connection error: ' . $e->getMessage()]);
+    echo json_encode(['error' => 'Database connection error']);
     exit();
 }
 
 // ============================================
-// LOAD PARTICIPANTS CONFIGURATION - participants_{country}.json
+// LOAD PARTICIPANTS CONFIGURATION
 // ============================================
-
-// Construct the participants file path correctly
 $participantsFile = ROOT_PATH . "/src/CORE_CONFIG/countries/{$country}/participants_{$country}.json";
 
 if (!file_exists($participantsFile)) {
@@ -193,69 +158,40 @@ $config = json_decode($configJson, true);
 
 if (json_last_error() !== JSON_ERROR_NONE) {
     http_response_code(500);
-    echo json_encode(['error' => "Server configuration error: Invalid JSON in participants config for {$country}"]);
+    echo json_encode(['error' => "Invalid JSON in participants config for {$country}"]);
     exit();
 }
 
-error_log("Loaded participants config for {$country} from: " . $participantsFile);
+error_log("Loaded participants config for {$country}");
 
 // ============================================
 // GET ENCRYPTION KEY
 // ============================================
-
-$encryptionKey = getenv('ENCRYPTION_KEY');
-if (!$encryptionKey) {
-    // Generate a default for testing (in production, this must be set)
-    $encryptionKey = 'default-test-key-32-chars-1234567890';
-    error_log("WARNING: Using default encryption key. Set ENCRYPTION_KEY in environment.");
+$encryptionKey = getenv('ENCRYPTION_KEY') ?: 'default-test-key-32-chars-1234567890';
+if ($encryptionKey === 'default-test-key-32-chars-1234567890') {
+    error_log("WARNING: Using default encryption key");
 }
 
 // ============================================
 // PREPARE CONFIG FOR SWAPSERVICE
 // ============================================
-
-// The SwapService expects the participants array - use empty settings array
-$settings = []; // Empty settings array as we don't have settings files
-
-// For the config, we need to pass it in the format SwapService expects
-// Looking at your SwapService constructor, it accepts $config which can contain participants
-$fullConfig = [
-    'participants' => $config // This is the content of participants_{country}.json
-];
+$settings = [];
+$fullConfig = ['participants' => $config];
 
 // ============================================
 // EXECUTE SWAP
 // ============================================
-
 try {
-    // Instantiate SwapService
-    $swapService = new SwapService(
-        $pdo,
-        $settings, // Empty settings array
-        $country,
-        $encryptionKey,
-        $fullConfig  // Pass the config with participants
-    );
-    
-    // Execute the swap
+    $swapService = new SwapService($pdo, $settings, $country, $encryptionKey, $fullConfig);
     $result = $swapService->executeSwap($input);
-    
-    // Return successful response
+
     http_response_code(200);
-    echo json_encode([
-        'success' => true,
-        'data' => $result
-    ], JSON_PRETTY_PRINT);
-    
+    echo json_encode(['success' => true, 'data' => $result], JSON_PRETTY_PRINT);
+
 } catch (Exception $e) {
-    // Log the error
     error_log("Swap API Error: " . $e->getMessage());
-    error_log("Stack trace: " . $e->getTraceAsString());
-    
-    // Return error response
+    error_log($e->getTraceAsString());
+
     http_response_code(400);
-    echo json_encode([
-        'success' => false,
-        'error' => $e->getMessage()
-    ]);
+    echo json_encode(['success' => false, 'error' => $e->getMessage()]);
 }
