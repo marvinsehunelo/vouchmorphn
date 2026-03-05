@@ -1048,9 +1048,14 @@ class SwapService
                 break;
             case 'E-WALLET':
                 // SACCUSSALIS uses 'phone' column in wallets table
-                $phone = $source['ewallet']['phone'] ?? 
-                         $source['phone'] ?? 
-                         $source['ewallet_phone'] ?? 
+                   $phone = $source['ewallet']['phone'] ??          // Nested under ewallet
+             $source['ewallet']['ewallet_phone'] ??  // Nested under ewallet with ewallet_phone
+             $source['phone'] ??                      // Direct phone field
+             $source['ewallet_phone'] ??              // Direct ewallet_phone field
+             $source['beneficiary_phone'] ??          // Beneficiary phone
+             $source['claimant_phone'] ??             // Claimant phone
+             $source['wallet_phone'] ??               // Wallet phone
+             $source['account_phone'] ??              // Account phone 
                          null;
                 
                 if (!$phone) {
@@ -1675,3 +1680,4 @@ class SwapService
         }
     }
 }
+
