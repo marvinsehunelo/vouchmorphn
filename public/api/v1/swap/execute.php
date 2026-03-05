@@ -25,13 +25,13 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 // BOOTSTRAP - Define paths and load dependencies
 // ============================================
 
-define('ROOT_PATH', dirname(__DIR__, 3)); // Goes up 3 levels from api/v1/swap/execute.php
+define('ROOT_PATH', dirname(__DIR__, 4); // Goes up 3 levels from api/v1/swap/execute.php
 
 // Load required classes
-require_once ROOT_PATH . '/DATA_PERSISTENCE_LAYER/config/DBConnection.php';
-require_once ROOT_PATH . '/BUSINESS_LOGIC_LAYER/services/SwapService.php';
-require_once ROOT_PATH . '/INTEGRATION_LAYER/CLIENTS/BankClients/GenericBankClient.php';
-require_once ROOT_PATH . '/SECURITY_LAYER/Encryption/TokenEncryptor.php';
+require_once ROOT_PATH . '/src/DATA_PERSISTENCE_LAYER/config/DBConnection.php';
+require_once ROOT_PATH . '/src/BUSINESS_LOGIC_LAYER/services/SwapService.php';
+require_once ROOT_PATH . '/src/INTEGRATION_LAYER/CLIENTS/BankClients/GenericBankClient.php';
+require_once ROOT_PATH . '/src/SECURITY_LAYER/Encryption/TokenEncryptor.php';
 
 use DATA_PERSISTENCE_LAYER\config\DBConnection;
 use BUSINESS_LOGIC_LAYER\services\SwapService;
@@ -135,7 +135,7 @@ $country = strtoupper($input['country'] ?? 'BW'); // Default to Botswana
 // ============================================
 
 // Construct the participants file path correctly
-$participantsFile = ROOT_PATH . "/CORE_CONFIG/countries/{$country}/participants_{$country}.json";
+$participantsFile = ROOT_PATH . "/src/CORE_CONFIG/countries/{$country}/participants_{$country}.json";
 
 if (!file_exists($participantsFile)) {
     error_log("Participants file not found: " . $participantsFile);
