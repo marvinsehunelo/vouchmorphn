@@ -30,6 +30,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 require_once ROOT_PATH . '/src/CORE_CONFIG/system_country.php';
 require_once ROOT_PATH . '/src/CORE_CONFIG/load_country.php';
 
+// ============================================
+// LOAD CORE CLASSES
+// ============================================
+require_once ROOT_PATH . '/src/DATA_PERSISTENCE_LAYER/config/DBConnection.php';
+require_once ROOT_PATH . '/src/BUSINESS_LOGIC_LAYER/services/SwapService.php';
+
+// ADD THESE LINES TO FIX THE SMS GATEWAY ERROR:
+require_once ROOT_PATH . '/src/BUSINESS_LOGIC_LAYER/services/SmsNotificationService.php';
+require_once ROOT_PATH . '/src/INTEGRATION_LAYER/CLIENTS/CommunicationClients/SmsGatewayClient.php';
+
+// Also load these to prevent similar errors with Bank integration:
+require_once ROOT_PATH . '/src/INTEGRATION_LAYER/CLIENTS/BankClients/GenericBankClient.php';
+require_once ROOT_PATH . '/src/SECURITY_LAYER/Encryption/TokenEncryptor.php';
+
+use DATA_PERSISTENCE_LAYER\config\DBConnection;
+use BUSINESS_LOGIC_LAYER\services\SwapService;
+
 $country = defined('SYSTEM_COUNTRY') ? SYSTEM_COUNTRY : 'BW';
 
 // ============================================
