@@ -69,24 +69,46 @@ if (file_exists($envFile)) {
 }
 
 // ============================================
-// AUTHENTICATION - API Key validation from environment
+// AUTHENTICATION - Multi-key validation
 // ============================================
 
 $headers = getallheaders();
 $apiKey = $headers['X-API-Key'] ?? $headers['x-api-key'] ?? null;
 
-// Get API key from environment (loaded from country-specific .env file)
-$validApiKey = getenv('API_KEY_PRODUCTION');
+// Collect valid API keys from environment
+$validKeyMap = [
+    'SYSTEM'        => getenv('API_KEY_SYSTEM'),
+    'PARTNER_1'     => getenv('API_KEY_PARTNER_1'),
+    'PARTNER_2'     => getenv('API_KEY_PARTNER_2'),
+    'PARTNER_3'     => getenv('API_KEY_PARTNER_3'),
+    'PARTNER_4'     => getenv('API_KEY_PARTNER_4'),
+    'ZURUBANK'      => getenv('API_KEY_ZURUBANK'),
+    'SACCUSSALIS'   => getenv('API_KEY_SACCUSSALIS'),
+];
 
-if (!$apiKey || !$validApiKey || $apiKey !== $validApiKey) {
-    error_log("API key validation failed. Provided: " . ($apiKey ?? 'none') . ", Expected: " . ($validApiKey ?? 'none'));
+// Remove empty values
+$validKeyMap = array_filter($validKeyMap);
+
+// Validate
+$authenticatedEntity = null;
+
+if ($apiKey) {
+    foreach ($validKeyMap as $entity => $key) {
+        if (hash_equals($key, $apiKey)) { // timing-safe comparison
+            $authenticatedEntity = $entity;
+            break;
+        }
+    }
+}
+
+if (!$authenticatedEntity) {
+    error_log("API key validation failed. Provided: " . ($apiKey ? '***provided***' : 'none'));
     http_response_code(401);
     echo json_encode(['error' => 'Unauthorized: Invalid or missing API key']);
     exit();
 }
 
-error_log("API key validated successfully");
-
+error_log("API key validated successfully for entity: " . $authenticatedEntity);
 // ============================================
 // VALIDATE INPUT PAYLOAD
 // ============================================
