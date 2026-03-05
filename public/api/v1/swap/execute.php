@@ -32,7 +32,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 // LOAD COUNTRY CONFIG
 // ============================================
 require_once ROOT_PATH . '/src/CORE_CONFIG/system_country.php';
-require_once ROOT_PATH . '/src/CORE_CONFIG/loadcountry.php';
+require_once ROOT_PATH . '/src/CORE_CONFIG/load_country.php';
 
 // system_country.php or loadcountry.php should set $country dynamically
 // fallback default
