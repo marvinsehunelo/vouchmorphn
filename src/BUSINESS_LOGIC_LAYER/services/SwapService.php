@@ -855,7 +855,7 @@ class SwapService
     }
 
     /**
-     * Verify source asset with institution
+     * Verify source asset with institution - FIXED VERSION
      */
     private function verifySourceAsset(string $swapRef, array $source, array $participant): array
     {
@@ -908,21 +908,14 @@ class SwapService
                 ]);
                 break;
 
-            $phone = $source['ewallet']['ewallet_phone'] ?? 
-             $source['ewallet']['phone'] ?? 
-             $source['phone'] ?? 
-             $source['ewallet_phone'] ?? 
-             null;
-    
-    $holdPayload['ewallet_phone'] = $this->formatPhoneForInstitution($phone, $participant);
-    
-    // Also set a generic phone field as backup
-    if (!isset($holdPayload['phone']) && $phone) {
-        $holdPayload['phone'] = $holdPayload['ewallet_phone'];
-    }
-    
-    error_log("[PLACE_HOLD] E-WALLET phone found: " . ($phone ?? 'NULL') . " → formatted: " . ($holdPayload['ewallet_phone'] ?? 'NULL'));
-    break;
+            case 'E-WALLET':
+                $ewallet = $source['ewallet'] ?? [];
+                $phone = $ewallet['ewallet_phone'] ?? $ewallet['phone'] ?? $source['phone'] ?? null;
+                $verificationPayload = array_merge($verificationPayload, [
+                    'ewallet_phone' => $this->formatPhoneForInstitution($phone, $participant)
+                ]);
+                error_log("[VERIFY_ASSET] E-WALLET phone: " . ($phone ?? 'NULL'));
+                break;
 
             case 'CARD':
                 $card = $source['card'] ?? [];
@@ -996,7 +989,7 @@ class SwapService
     }
 
     /**
-     * Unified hold placement with debugging
+     * Unified hold placement with debugging - FIXED VERSION
      */
     private function placeHoldOnSourceAsset(string $swapRef, array $source, array $verificationResult, array $participant, ?array $destination = null): array
     {
@@ -1044,9 +1037,19 @@ class SwapService
                 );
                 break;
             case 'E-WALLET':
-                $holdPayload['ewallet_phone'] = $this->formatPhoneForInstitution(
-                    $source['ewallet']['ewallet_phone'] ?? null, $participant
-                );
+                $phone = $source['ewallet']['ewallet_phone'] ?? 
+                         $source['ewallet']['phone'] ?? 
+                         $source['phone'] ?? 
+                         $source['ewallet_phone'] ?? 
+                         null;
+                $holdPayload['ewallet_phone'] = $this->formatPhoneForInstitution($phone, $participant);
+                
+                // Also set a generic phone field as backup
+                if (!isset($holdPayload['phone']) && $phone) {
+                    $holdPayload['phone'] = $holdPayload['ewallet_phone'];
+                }
+                
+                error_log("[PLACE_HOLD] E-WALLET phone found: " . ($phone ?? 'NULL') . " → formatted: " . ($holdPayload['ewallet_phone'] ?? 'NULL'));
                 break;
             case 'CARD':
                 $holdPayload['card_number'] = $source['card']['card_number'] ?? null;
@@ -1661,4 +1664,3 @@ class SwapService
         }
     }
 }
-
