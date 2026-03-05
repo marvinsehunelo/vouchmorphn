@@ -4,7 +4,7 @@ declare(strict_types=1);
 // ============================================
 // BOOTSTRAP - Define ROOT_PATH first
 // ============================================
-define('ROOT_PATH', dirname(__DIR__, 4)); // Goes up 4 levels from api/v1/swap/execute.php
+define('ROOT_PATH', dirname(__DIR__, 4)); // Adjust according to folder depth
 
 // ============================================
 // ENABLE CORS & JSON HEADERS
@@ -34,8 +34,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 require_once ROOT_PATH . '/src/CORE_CONFIG/system_country.php';
 require_once ROOT_PATH . '/src/CORE_CONFIG/load_country.php';
 
-// system_country.php or loadcountry.php should set $country dynamically
-// fallback default
+// Fallback
 if (empty($country)) {
     $country = 'BW';
 }
@@ -44,7 +43,6 @@ if (empty($country)) {
 // LOAD COUNTRY-SPECIFIC ENV FILE DYNAMICALLY
 // ============================================
 $envFile = ROOT_PATH . "/src/CORE_CONFIG/countries/{$country}/.env.{$country}";
-
 if (file_exists($envFile)) {
     $lines = file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
     foreach ($lines as $line) {
@@ -75,10 +73,48 @@ use DATA_PERSISTENCE_LAYER\config\DBConnection;
 use BUSINESS_LOGIC_LAYER\services\SwapService;
 
 // ============================================
+// SAFELY FIX DECIMAL AND RESOLVE FEES
+// ============================================
+if (!function_exists('decimal')) {
+    function decimal($value): string {
+        if (!is_numeric($value)) return (string)$value;
+        return number_format((float)$value, 6, '.', '');
+    }
+}
+
+if (!function_exists('resolveFees')) {
+    function resolveFees(array $feeConfig): array {
+        $resolved = [];
+        if (isset($feeConfig['fees'])) {
+            foreach ($feeConfig['fees'] as $key => $value) {
+                if (is_array($value)) {
+                    if (isset($value['amount'])) {
+                        $value['amount'] = decimal($value['amount']);
+                        $resolved[$key] = $value;
+                        continue;
+                    }
+                    foreach ($value as $k => $v) {
+                        $value[$k] = decimal($v);
+                    }
+                    $resolved[$key] = $value;
+                } else {
+                    $resolved[$key] = decimal($value);
+                }
+            }
+        }
+        foreach (['metadata','regulatory','limits','currency','aliases','rules'] as $section) {
+            if (isset($feeConfig[$section])) {
+                $resolved[$section] = $feeConfig[$section];
+            }
+        }
+        return $resolved;
+    }
+}
+
+// ============================================
 // PARSE INPUT
 // ============================================
 $input = json_decode(file_get_contents('php://input'), true);
-
 if (json_last_error() !== JSON_ERROR_NONE) {
     http_response_code(400);
     echo json_encode(['error' => 'Invalid JSON payload: ' . json_last_error_msg()]);
