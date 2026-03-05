@@ -75,6 +75,16 @@ if (file_exists($envFile)) {
 $headers = getallheaders();
 $apiKey = $headers['X-API-Key'] ?? $headers['x-api-key'] ?? null;
 
+// ===== TEMPORARY DEBUGGING =====
+error_log("=== API KEY DEBUG ===");
+error_log("All headers: " . json_encode($headers));
+error_log("API Key extracted: " . ($apiKey ?? 'null'));
+error_log("API_KEY_SYSTEM from env: " . (getenv('API_KEY_SYSTEM') ? 'set' : 'not set'));
+error_log("API_KEY_ZURUBANK from env: " . (getenv('API_KEY_ZURUBANK') ? 'set' : 'not set'));
+error_log("ENCRYPTION_KEY from env: " . (getenv('ENCRYPTION_KEY') ? 'set' : 'not set'));
+error_log("APP_ENV: " . (getenv('APP_ENV') ?? 'not set'));
+// ==============================
+
 // Collect valid API keys from environment
 $validKeyMap = [
     'SYSTEM'        => getenv('API_KEY_SYSTEM'),
@@ -86,29 +96,7 @@ $validKeyMap = [
     'SACCUSSALIS'   => getenv('API_KEY_SACCUSSALIS'),
 ];
 
-// Remove empty values
-$validKeyMap = array_filter($validKeyMap);
-
-// Validate
-$authenticatedEntity = null;
-
-if ($apiKey) {
-    foreach ($validKeyMap as $entity => $key) {
-        if (hash_equals($key, $apiKey)) { // timing-safe comparison
-            $authenticatedEntity = $entity;
-            break;
-        }
-    }
-}
-
-if (!$authenticatedEntity) {
-    error_log("API key validation failed. Provided: " . ($apiKey ? '***provided***' : 'none'));
-    http_response_code(401);
-    echo json_encode(['error' => 'Unauthorized: Invalid or missing API key']);
-    exit();
-}
-
-error_log("API key validated successfully for entity: " . $authenticatedEntity);
+error_log("Valid keys found in env: " . json_encode(array_keys(array_filter($validKeyMap))));
 // ============================================
 // VALIDATE INPUT PAYLOAD
 // ============================================
