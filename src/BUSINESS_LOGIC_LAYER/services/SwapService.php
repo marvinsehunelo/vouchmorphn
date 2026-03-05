@@ -909,13 +909,21 @@ class SwapService
                 break;
 
             case 'E-WALLET':
-                $ewallet = $source['ewallet'] ?? [];
-                $phone = $ewallet['ewallet_phone'] ?? $ewallet['phone'] ?? $source['phone'] ?? null;
-                $verificationPayload = array_merge($verificationPayload, [
-                    'ewallet_phone' => $this->formatPhoneForInstitution($phone, $participant)
-                ]);
-                error_log("[VERIFY_ASSET] E-WALLET phone: " . ($phone ?? 'NULL'));
-                break;
+                 $phone = $source['ewallet']['ewallet_phone'] ?? 
+             $source['ewallet']['phone'] ?? 
+             $source['phone'] ?? 
+             $source['ewallet_phone'] ?? 
+             null;
+    
+    $holdPayload['ewallet_phone'] = $this->formatPhoneForInstitution($phone, $participant);
+    
+    // Also set a generic phone field as backup
+    if (!isset($holdPayload['phone']) && $phone) {
+        $holdPayload['phone'] = $holdPayload['ewallet_phone'];
+    }
+    
+    error_log("[PLACE_HOLD] E-WALLET phone found: " . ($phone ?? 'NULL') . " → formatted: " . ($holdPayload['ewallet_phone'] ?? 'NULL'));
+    break; 
 
             case 'CARD':
                 $card = $source['card'] ?? [];
@@ -1664,3 +1672,4 @@ class SwapService
         }
     }
 }
+
