@@ -52,49 +52,41 @@ if (json_last_error() !== JSON_ERROR_NONE) {
 }
 
 /* -------------------------------------------------------
-   Resolve Fees Safely (NO FLOAT CORRUPTION)
+   Resolve Fees Safely (NO FLOAT CORRUPTION & TYPE SAFE)
 ------------------------------------------------------- */
 if (!function_exists('resolveFees')) {
     function decimal($value): string
     {
-        if (!is_numeric($value)) return $value;
+        // Fix for Fatal Error: cast non-numeric (like 'taxable' => true) to string
+        if (!is_numeric($value)) {
+            return is_bool($value) ? ($value ? 'true' : 'false') : (string)$value;
+        }
         return number_format((float)$value, 6, '.', '');
     }
 
     function resolveFees(array $feeConfig): array
     {
         $resolved = [];
-
         if (isset($feeConfig['fees'])) {
             foreach ($feeConfig['fees'] as $key => $value) {
-
                 if (is_array($value)) {
-
-                    if (isset($value['amount'])) {
-                        $value['amount'] = decimal($value['amount']);
-                        $resolved[$key] = $value;
-                        continue;
+                    foreach ($value as $subKey => $subValue) {
+                        // Only format numbers to 6 decimals, leave metadata/booleans alone
+                        if (is_numeric($subValue) && !is_string($subValue)) {
+                            $value[$subKey] = decimal($subValue);
+                        }
                     }
-
-                    foreach ($value as $k => $v) {
-                        $value[$k] = decimal($v);
-                    }
-
                     $resolved[$key] = $value;
-
                 } else {
-                    $resolved[$key] = decimal($value);
+                    $resolved[$key] = is_numeric($value) ? decimal($value) : $value;
                 }
             }
         }
-
-        // preserve metadata
         foreach (['metadata','regulatory','limits','currency','aliases','rules'] as $section) {
             if (isset($feeConfig[$section])) {
                 $resolved[$section] = $feeConfig[$section];
             }
         }
-
         return $resolved;
     }
 }
@@ -102,12 +94,10 @@ if (!function_exists('resolveFees')) {
 $countryConfig['fees'] = resolveFees($feesConfig);
 
 /* -------------------------------------------------------
-   Database Configuration (CRITICAL FIX)
+   Database Configuration (RAILWAY OPTIMIZED)
 ------------------------------------------------------- */
-$dbName =
-    getenv('PG_DB_CORE') ?:
-    getenv('DB_DATABASE') ?:
-    ("swap_system_" . strtolower($country));
+// Priority: 1. PG_NAME (Railway) -> 2. PG_DB_CORE -> 3. Local fallback
+$dbName = getenv('PG_NAME') ?: getenv('PG_DB_CORE') ?: ("swap_system_" . strtolower($country));
 
 $countryConfig['db']['swap'] = [
     'name'     => $dbName,
@@ -122,21 +112,12 @@ $countryConfig['db']['swap'] = [
    Financial Settings Safety
 ------------------------------------------------------- */
 if (isset($countryConfig['settings']['swap_fee'])) {
-    $countryConfig['settings']['swap_fee'] = number_format(
-        (float)$countryConfig['settings']['swap_fee'], 6, '.', ''
-    );
+    $countryConfig['settings']['swap_fee'] = decimal($countryConfig['settings']['swap_fee']);
 }
 
-if (isset($countryConfig['fees']['vat_rate'])) {
-    $countryConfig['fees']['vat_rate'] = number_format(
-        (float)$countryConfig['fees']['vat_rate'], 6, '.', ''
-    );
-}
-
-if (isset($countryConfig['fees']['markup_limit'])) {
-    $countryConfig['fees']['markup_limit'] = number_format(
-        (float)$countryConfig['fees']['markup_limit'], 6, '.', ''
-    );
+// Adjust VAT from regulatory section if exists
+if (isset($countryConfig['fees']['regulatory']['vat_rate'])) {
+    $countryConfig['fees']['regulatory']['vat_rate'] = decimal($countryConfig['fees']['regulatory']['vat_rate']);
 }
 
 /* -------------------------------------------------------
@@ -149,4 +130,3 @@ if (!defined('COUNTRY_CONFIG')) {
 }
 
 return $countryConfig;
-
