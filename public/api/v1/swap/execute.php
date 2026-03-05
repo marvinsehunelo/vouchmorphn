@@ -25,7 +25,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 // BOOTSTRAP - Define paths and load dependencies
 // ============================================
 
-define('ROOT_PATH', dirname(__DIR__, 4); // Goes up 3 levels from api/v1/swap/execute.php
+define('ROOT_PATH', dirname(__DIR__, 4)); // Goes up 3 levels from api/v1/swap/execute.php
 
 // Load required classes
 require_once ROOT_PATH . '/src/DATA_PERSISTENCE_LAYER/config/DBConnection.php';
