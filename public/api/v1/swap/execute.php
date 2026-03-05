@@ -25,7 +25,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 // BOOTSTRAP - Define paths and load dependencies
 // ============================================
 
-define('ROOT_PATH', dirname(__DIR__, 4)); // Goes up 3 levels from api/v1/swap/execute.php
+define('ROOT_PATH', dirname(__DIR__, 4)); // Goes up 4 levels from api/v1/swap/execute.php
 
 // Load required classes
 require_once ROOT_PATH . '/src/DATA_PERSISTENCE_LAYER/config/DBConnection.php';
@@ -37,29 +37,59 @@ use DATA_PERSISTENCE_LAYER\config\DBConnection;
 use BUSINESS_LOGIC_LAYER\services\SwapService;
 
 // ============================================
-// AUTHENTICATION - Simple API Key validation
+// GET COUNTRY FROM INPUT FIRST (needed for env loading)
+// ============================================
+
+$input = json_decode(file_get_contents('php://input'), true);
+$country = strtoupper($input['country'] ?? 'BW'); // Default to Botswana
+
+// ============================================
+// LOAD ENVIRONMENT VARIABLES FROM COUNTRY-SPECIFIC .ENV FILE
+// ============================================
+
+$envFile = ROOT_PATH . "/src/CORE_CONFIG/countries/{$country}/.env.{$country}";
+if (file_exists($envFile)) {
+    $lines = file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    foreach ($lines as $line) {
+        if (strpos(trim($line), '#') === 0) {
+            continue;
+        }
+        $parts = explode('=', $line, 2);
+        if (count($parts) === 2) {
+            $key = trim($parts[0]);
+            $value = trim($parts[1]);
+            putenv("$key=$value");
+            $_ENV[$key] = $value;
+            $_SERVER[$key] = $value;
+        }
+    }
+    error_log("Loaded environment from: " . $envFile);
+} else {
+    error_log("Environment file not found: " . $envFile);
+}
+
+// ============================================
+// AUTHENTICATION - API Key validation from environment
 // ============================================
 
 $headers = getallheaders();
 $apiKey = $headers['X-API-Key'] ?? $headers['x-api-key'] ?? null;
 
-// You can store valid API keys in database or environment
-$validApiKeys = [
-    'test_key_123' => 'TEST_CLIENT',
-    getenv('API_KEY_PRODUCTION') ?: 'prod_key_456' => 'PRODUCTION_CLIENT'
-];
+// Get API key from environment (loaded from country-specific .env file)
+$validApiKey = getenv('API_KEY_PRODUCTION');
 
-if (!$apiKey || !isset($validApiKeys[$apiKey])) {
+if (!$apiKey || !$validApiKey || $apiKey !== $validApiKey) {
+    error_log("API key validation failed. Provided: " . ($apiKey ?? 'none') . ", Expected: " . ($validApiKey ?? 'none'));
     http_response_code(401);
     echo json_encode(['error' => 'Unauthorized: Invalid or missing API key']);
     exit();
 }
 
+error_log("API key validated successfully");
+
 // ============================================
 // VALIDATE INPUT PAYLOAD
 // ============================================
-
-$input = json_decode(file_get_contents('php://input'), true);
 
 if (json_last_error() !== JSON_ERROR_NONE) {
     http_response_code(400);
@@ -123,12 +153,6 @@ try {
     echo json_encode(['error' => 'Database connection error: ' . $e->getMessage()]);
     exit();
 }
-
-// ============================================
-// GET COUNTRY FROM INPUT
-// ============================================
-
-$country = strtoupper($input['country'] ?? 'BW'); // Default to Botswana
 
 // ============================================
 // LOAD PARTICIPANTS CONFIGURATION - participants_{country}.json
