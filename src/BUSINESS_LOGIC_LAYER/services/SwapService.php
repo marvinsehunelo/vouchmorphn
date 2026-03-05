@@ -855,7 +855,7 @@ class SwapService
     }
 
     /**
-     * Verify source asset with institution - FIXED VERSION
+     * Verify source asset with institution - FIXED VERSION with phone field for SACCUSSALIS
      */
     private function verifySourceAsset(string $swapRef, array $source, array $participant): array
     {
@@ -909,21 +909,23 @@ class SwapService
                 break;
 
             case 'E-WALLET':
-                 $phone = $source['ewallet']['ewallet_phone'] ?? 
-             $source['ewallet']['phone'] ?? 
-             $source['phone'] ?? 
-             $source['ewallet_phone'] ?? 
-             null;
-    
-    $holdPayload['ewallet_phone'] = $this->formatPhoneForInstitution($phone, $participant);
-    
-    // Also set a generic phone field as backup
-    if (!isset($holdPayload['phone']) && $phone) {
-        $holdPayload['phone'] = $holdPayload['ewallet_phone'];
-    }
-    
-    error_log("[PLACE_HOLD] E-WALLET phone found: " . ($phone ?? 'NULL') . " → formatted: " . ($holdPayload['ewallet_phone'] ?? 'NULL'));
-    break; 
+                // SACCUSSALIS uses 'phone' column in wallets table
+                $phone = $source['ewallet']['phone'] ?? 
+                         $source['phone'] ?? 
+                         $source['ewallet_phone'] ?? 
+                         null;
+                
+                if (!$phone) {
+                    error_log("[VERIFY_ASSET] CRITICAL: No phone number found for E-WALLET verification");
+                    throw new RuntimeException("Phone number required for E-WALLET verification");
+                }
+                
+                $verificationPayload = array_merge($verificationPayload, [
+                    'phone' => $this->formatPhoneForInstitution($phone, $participant)  // Changed from ewallet_phone to phone
+                ]);
+                
+                error_log("[VERIFY_ASSET] E-WALLET phone: " . $phone . " → formatted: " . $verificationPayload['phone']);
+                break;
 
             case 'CARD':
                 $card = $source['card'] ?? [];
@@ -997,7 +999,7 @@ class SwapService
     }
 
     /**
-     * Unified hold placement with debugging - FIXED VERSION
+     * Unified hold placement with debugging - FIXED VERSION with phone field for SACCUSSALIS
      */
     private function placeHoldOnSourceAsset(string $swapRef, array $source, array $verificationResult, array $participant, ?array $destination = null): array
     {
@@ -1045,19 +1047,20 @@ class SwapService
                 );
                 break;
             case 'E-WALLET':
-                $phone = $source['ewallet']['ewallet_phone'] ?? 
-                         $source['ewallet']['phone'] ?? 
+                // SACCUSSALIS uses 'phone' column in wallets table
+                $phone = $source['ewallet']['phone'] ?? 
                          $source['phone'] ?? 
                          $source['ewallet_phone'] ?? 
                          null;
-                $holdPayload['ewallet_phone'] = $this->formatPhoneForInstitution($phone, $participant);
                 
-                // Also set a generic phone field as backup
-                if (!isset($holdPayload['phone']) && $phone) {
-                    $holdPayload['phone'] = $holdPayload['ewallet_phone'];
+                if (!$phone) {
+                    error_log("[PLACE_HOLD] CRITICAL: No phone number found for E-WALLET hold placement");
+                    throw new RuntimeException("Phone number required for E-WALLET hold placement");
                 }
                 
-                error_log("[PLACE_HOLD] E-WALLET phone found: " . ($phone ?? 'NULL') . " → formatted: " . ($holdPayload['ewallet_phone'] ?? 'NULL'));
+                $holdPayload['phone'] = $this->formatPhoneForInstitution($phone, $participant);  // Changed from ewallet_phone to phone
+                
+                error_log("[PLACE_HOLD] E-WALLET phone found: " . $phone . " → formatted: " . $holdPayload['phone']);
                 break;
             case 'CARD':
                 $holdPayload['card_number'] = $source['card']['card_number'] ?? null;
@@ -1672,4 +1675,3 @@ class SwapService
         }
     }
 }
-
