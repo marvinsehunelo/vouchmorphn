@@ -144,6 +144,14 @@ class GenericBankClient implements BankAPIInterface
         error_log("=== GENERIC BANK CLIENT SEND ===");
         error_log("Bank: " . ($this->config['provider_code'] ?? 'unknown'));
         error_log("Action: " . $action);
+
+         // ADD THIS CRITICAL DEBUG
+    error_log("🚨 FULL PAYLOAD BEING SENT TO BANK: " . json_encode($payload));
+    error_log("🚨 PHONE FIELDS IN PAYLOAD: " . 
+              (isset($payload['ewallet_phone']) ? 'ewallet_phone=' . $payload['ewallet_phone'] : '') . ' ' .
+              (isset($payload['wallet_phone']) ? 'wallet_phone=' . $payload['wallet_phone'] : '') . ' ' .
+              (isset($payload['phone']) ? 'phone=' . $payload['phone'] : '') . ' ' .
+              (isset($payload['claimant_phone']) ? 'claimant_phone=' . $payload['claimant_phone'] : ''));
         
         if (!$endpoint) {
             error_log("ERROR: No endpoint found for action: " . $action);
