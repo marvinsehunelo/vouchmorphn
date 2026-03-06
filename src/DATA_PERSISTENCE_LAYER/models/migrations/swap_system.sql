@@ -884,4 +884,6 @@ CREATE INDEX IF NOT EXISTS idx_message_outbox_created ON message_outbox(created_
 CREATE INDEX IF NOT EXISTS idx_swap_vouchers_code_hash ON swap_vouchers(code_hash);
 CREATE INDEX IF NOT EXISTS idx_swap_vouchers_status ON swap_vouchers(status);
 
+ALTER TABLE swap_requests 
+ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::jsonb;
 
