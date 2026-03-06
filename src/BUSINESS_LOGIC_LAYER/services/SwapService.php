@@ -878,23 +878,41 @@ class SwapService
                 break;
 
             case 'E-WALLET':
-                $phone = $source['ewallet']['phone'] ?? 
-                         $source['phone'] ?? 
-                         $source['ewallet_phone'] ?? 
-                         null;
-                
-                if (!$phone) {
-                    error_log("[VERIFY_ASSET] CRITICAL: No phone number found for E-WALLET verification");
-                    throw new RuntimeException("Phone number required for E-WALLET verification");
-                }
-                
-                $verificationPayload = array_merge($verificationPayload, [
-                    'phone' => $this->formatPhoneForInstitution($phone, $participant)
-                ]);
-                
-                error_log("[VERIFY_ASSET] E-WALLET phone: " . $phone . " → formatted: " . $verificationPayload['phone']);
-                break;
-
+    // Try ALL possible phone locations - comprehensive extraction
+    $phone = $source['ewallet']['ewallet_phone'] ?? 
+             $source['ewallet']['phone'] ?? 
+             $source['ewallet_phone'] ?? 
+             $source['phone'] ?? 
+             $source['beneficiary_phone'] ??
+             $source['claimant_phone'] ??
+             $source['wallet_phone'] ??
+             $source['account_phone'] ??
+             null;
+    
+    // Detailed debug logging
+    error_log("[VERIFY_ASSET] E-WALLET phone extraction:");
+    error_log("  - ewallet.ewallet_phone: " . ($source['ewallet']['ewallet_phone'] ?? 'null'));
+    error_log("  - ewallet.phone: " . ($source['ewallet']['phone'] ?? 'null'));
+    error_log("  - source.ewallet_phone: " . ($source['ewallet_phone'] ?? 'null'));
+    error_log("  - source.phone: " . ($source['phone'] ?? 'null'));
+    error_log("  - source.beneficiary_phone: " . ($source['beneficiary_phone'] ?? 'null'));
+    error_log("  - source.claimant_phone: " . ($source['claimant_phone'] ?? 'null'));
+    error_log("  - source.wallet_phone: " . ($source['wallet_phone'] ?? 'null'));
+    error_log("  - source.account_phone: " . ($source['account_phone'] ?? 'null'));
+    error_log("  - FINAL extracted phone: " . ($phone ?? 'null'));
+    
+    if (!$phone) {
+        error_log("[VERIFY_ASSET] CRITICAL: No phone number found for E-WALLET verification");
+        error_log("[VERIFY_ASSET] Full source: " . json_encode($source));
+        throw new RuntimeException("Phone number required for E-WALLET verification");
+    }
+    
+    $verificationPayload = array_merge($verificationPayload, [
+        'phone' => $this->formatPhoneForInstitution($phone, $participant)
+    ]);
+    
+    error_log("[VERIFY_ASSET] E-WALLET phone: " . $phone . " → formatted: " . $verificationPayload['phone']);
+    break;
             case 'CARD':
                 $card = $source['card'] ?? [];
                 $verificationPayload = array_merge($verificationPayload, [
@@ -1687,4 +1705,5 @@ private function requestAtmToken(string $swapRef, array $source, array $destinat
         }
     }
 }
+
 
