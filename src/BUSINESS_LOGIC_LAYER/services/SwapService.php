@@ -6,8 +6,6 @@ namespace BUSINESS_LOGIC_LAYER\services;
 require_once __DIR__ . '/settlement/HybridSettlementStrategy.php';
 require_once __DIR__ . '/../Helpers/SwapStatusResolver.php';
 require_once __DIR__ . '/../../INTEGRATION_LAYER/CLIENTS/BankClients/GenericBankClient.php';
-
-// ADD THIS: Include the SMS Service
 require_once __DIR__ . '/SmsNotificationService.php';
 
 use PDO;
@@ -16,7 +14,7 @@ use DateTimeImmutable;
 use SECURITY_LAYER\Encryption\TokenEncryptor;
 use BUSINESS_LOGIC_LAYER\Helpers\SwapStatusResolver;
 use BUSINESS_LOGIC_LAYER\services\settlement\HybridSettlementStrategy;
-use BUSINESS_LOGIC_LAYER\services\SmsNotificationService; // ADD THIS
+use BUSINESS_LOGIC_LAYER\services\SmsNotificationService;
 use RuntimeException;
 use INTEGRATION_LAYER\CLIENTS\BankClients\GenericBankClient;
 
@@ -38,8 +36,6 @@ class SwapService
     private array $flowsConfig = [];
     private array $atmNotes = [];
     private HybridSettlementStrategy $settlement;
-    
-    // ADD THIS: SMS Service property
     private ?SmsNotificationService $smsService = null;
 
     private const LOG_FILE = '/tmp/vouchmorphn_swap_audit.log';
@@ -62,7 +58,6 @@ class SwapService
         $this->countryCode = strtoupper($country);
         $this->config = $config;
         
-        // Handle different possible structures of $config
         if (isset($config['participants']) && is_array($config['participants'])) {
             $this->participants = $config['participants'];
             error_log("[SwapService] Using new config structure with 'participants' key");
@@ -124,21 +119,16 @@ class SwapService
             throw new RuntimeException("Failed to initialize settlement strategy: " . $e->getMessage());
         }
         
-        // ADD THIS: Initialize SMS Service
         try {
             $this->initSmsService();
             error_log("[SwapService] SMS Service initialized successfully");
         } catch (\Exception $e) {
             error_log("[SwapService] WARNING: SMS Service initialization failed: " . $e->getMessage());
-            // Don't throw - SMS is non-critical
         }
         
         error_log("=== SWAPSERVICE CONSTRUCTOR COMPLETE ===");
     }
 
-    /**
-     * Load country-specific configuration including fees and ATM notes
-     */
     private function loadCountryFees(): void
     {
         $basePath = __DIR__ . "/../../CORE_CONFIG/countries/{$this->countryCode}";
@@ -170,12 +160,8 @@ class SwapService
         }
     }
 
-    /**
-     * ADD THIS: Initialize SMS Service with country configuration
-     */
     private function initSmsService(): void
     {
-        // Load communication config for the country
         $configPath = __DIR__ . "/../../CORE_CONFIG/countries/{$this->countryCode}/communication_config_{$this->countryCode}.json";
         
         $smsConfig = [];
@@ -184,7 +170,6 @@ class SwapService
             $smsConfig = $fullConfig['sms_gateway'] ?? [];
             error_log("[SwapService] Loaded SMS config for {$this->countryCode}");
         } else {
-            // Default config for Botswana
             $smsConfig = [
                 'base_url' => 'http://localhost/CazaCOm',
                 'api_key' => 'SACCUS_INTERNAL_KEY_2025',
@@ -198,9 +183,6 @@ class SwapService
         $this->smsService = new SmsNotificationService($this->swapDB, $smsConfig);
     }
 
-    /**
-     * ATM Note Calculation with Floating Point Protection
-     */
     private function getDispensableAmount(float $amount, string $currency): array
     {
         $denominations = $this->atmNotes[$currency] ?? throw new RuntimeException("No ATM denominations for currency $currency");
@@ -315,9 +297,6 @@ class SwapService
         return $errors;
     }
     
-    /**
-     * Format phone number according to institution's configuration
-     */
     private function formatPhoneForInstitution(?string $phone, array $participant): ?string
     {
         if ($phone === null) {
@@ -366,9 +345,6 @@ class SwapService
         return $formatted;
     }
 
-    /**
-     * Sanitize all phone numbers in payload based on institution configs
-     */
     private function sanitizePhones(array $payload, ?array $participant = null): array
     {
         foreach (self::PHONE_FIELDS as $field) {
@@ -386,20 +362,14 @@ class SwapService
         return $payload;
     }
 
-    /**
-     * Find institution key case-insensitive
-     * Returns the institution key (string) or null
-     */
     private function findInstitutionKey(string $search): ?string
     {
         $searchLower = strtolower($search);
         
-        // First try: direct match on array key (institution name)
         if (isset($this->participants[$searchLower])) {
             return $searchLower;
         }
         
-        // Second try: search by provider_code
         foreach ($this->participants as $key => $participant) {
             if (isset($participant['provider_code']) && 
                 strtolower($participant['provider_code']) === $searchLower) {
@@ -407,7 +377,6 @@ class SwapService
             }
         }
         
-        // Third try: check if any key matches (case-insensitive)
         foreach (array_keys($this->participants) as $key) {
             if (strtolower($key) === $searchLower) {
                 return $key;
@@ -417,9 +386,6 @@ class SwapService
         return null;
     }
 
-    /**
-     * Debug API call
-     */
     private function debugApiCall(string $type, array $payload, array $result): void
     {
         $debugData = [
@@ -439,9 +405,6 @@ class SwapService
         error_log("=== DEBUG WRITTEN TO " . self::DEBUG_FILE . " ===");
     }
 
-    /**
-     * NEW: Log API message to database
-     */
     private function logApiMessage(
         string $messageId,
         string $messageType,
@@ -484,14 +447,10 @@ class SwapService
                 $durationMs
             ]);
         } catch (Exception $e) {
-            // Log but don't fail the main transaction
             error_log("Failed to log API message: " . $e->getMessage());
         }
     }
 
-    /**
-     * NEW: Record hold transaction in database
-     */
     private function recordHoldTransaction(
         string $swapRef,
         array $holdResult,
@@ -505,7 +464,6 @@ class SwapService
             
             $destinationParticipantId = null;
             if ($destination && isset($destination['institution'])) {
-                // Try to find participant ID by institution name or provider code
                 $stmt = $this->swapDB->prepare("
                     SELECT participant_id FROM participants 
                     WHERE name = ? OR provider_code = ?
@@ -542,7 +500,6 @@ class SwapService
                     'source_institution' => $source['institution'],
                     'source_asset_type' => $source['asset_type'],
                     'destination_institution' => $destination['institution'] ?? null,
-
                 ])
             ]);
         } catch (Exception $e) {
@@ -550,9 +507,6 @@ class SwapService
         }
     }
 
-    /**
-     * NEW: Update hold status when debited/released
-     */
     private function updateHoldStatus(string $holdReference, string $status): void
     {
         try {
@@ -568,23 +522,17 @@ class SwapService
         }
     }
 
-    /**
-     * NEW: Calculate and deduct fee from swap amount
-     * Stores fee info for settlement processing later
-     */
     private function deductSwapFee(
         string $swapRef,
-        string $transactionType, // 'CASHOUT' or 'DEPOSIT'
+        string $transactionType,
         float $grossAmount,
         string $sourceInstitution,
         string $destinationInstitution
     ): array {
         
-        // Get fee configuration from loaded feesConfig
         $feeKey = $transactionType === 'CASHOUT' ? 'CASHOUT_SWAP_FEE' : 'DEPOSIT_SWAP_FEE';
         $feeConfig = $this->feesConfig['fees'][$feeKey] ?? null;
         
-        // Fallback to defaults if config missing
         if (!$feeConfig) {
             $totalFee = $transactionType === 'CASHOUT' ? 10.00 : 6.00;
             $split = $transactionType === 'CASHOUT' 
@@ -597,18 +545,15 @@ class SwapService
             $split = $feeConfig['split'];
         }
         
-        // Calculate VAT if needed for reporting
         $vatRate = $this->feesConfig['regulatory']['vat_rate'] ?? 0.14;
         $vatAmount = $totalFee * $vatRate;
         
-        // Net amount after fee deduction
         $netAmount = $grossAmount - $totalFee;
         
         if ($netAmount <= 0) {
             throw new RuntimeException("Amount after fee deduction must be positive. Gross: $grossAmount, Fee: $totalFee");
         }
         
-        // Store fee collection with split info (for settlement later)
         $stmt = $this->swapDB->prepare("
             INSERT INTO swap_fee_collections
             (swap_reference, fee_type, total_amount, currency, 
@@ -631,7 +576,6 @@ class SwapService
         
         $feeId = $stmt->fetchColumn();
         
-        // Update swap_ledgers with total fee amount
         $stmt = $this->swapDB->prepare("
             UPDATE swap_ledgers 
             SET swap_fee = :fee
@@ -673,7 +617,6 @@ class SwapService
         $swapRef = bin2hex(random_bytes(16));
         $atmResult = null;
         
-        // DEBUG: Create a debug log array to track each step
         $debugSteps = [];
         $debugSteps[] = ['time' => microtime(true), 'step' => 'START', 'swap_ref' => $swapRef];
         
@@ -692,7 +635,6 @@ class SwapService
             
             $debugSteps[] = ['time' => microtime(true), 'step' => 'PAYLOAD_VALIDATED', 'source' => $source['institution'], 'dest' => $destination['institution']];
 
-            // Find source institution
             $sourceInstitutionKey = $this->findInstitutionKey($source['institution']);
             if (!$sourceInstitutionKey) {
                 throw new RuntimeException("Source institution not found: {$source['institution']}");
@@ -701,10 +643,8 @@ class SwapService
             
             $debugSteps[] = ['time' => microtime(true), 'step' => 'SOURCE_FOUND', 'participant' => $sourceParticipant['provider_code'] ?? $sourceInstitutionKey];
             
-            // Sanitize phones with source institution config
             $source = $this->sanitizePhones($source, $sourceParticipant);
 
-            // Validate cashout amount if applicable
             if (isset($destination['delivery_mode']) && $destination['delivery_mode'] === 'cashout') {
                 $errors = $this->validateCashoutAmount((float)$destination['amount'], $currency);
                 if (!empty($errors)) {
@@ -714,7 +654,6 @@ class SwapService
                 $debugSteps[] = ['time' => microtime(true), 'step' => 'CASHOUT_VALIDATED', 'dispensable' => $atmResult['dispensable_amount']];
             }
 
-            // STEP 1: VERIFY SOURCE ASSET
             $debugSteps[] = ['time' => microtime(true), 'step' => 'START_VERIFY_ASSET'];
             $verificationResult = $this->verifySourceAsset($swapRef, $source, $sourceParticipant);
             $debugSteps[] = ['time' => microtime(true), 'step' => 'VERIFY_ASSET_COMPLETE', 'verified' => $verificationResult['verified']];
@@ -726,7 +665,6 @@ class SwapService
                 );
             }
             
-            // STEP 2: LOCK THE FUNDS
             $debugSteps[] = ['time' => microtime(true), 'step' => 'START_PLACE_HOLD'];
             $holdResult = $this->placeHoldOnSourceAsset($swapRef, $source, $verificationResult, $sourceParticipant, $destination);
             $bankClient = new GenericBankClient($sourceParticipant);
@@ -739,7 +677,6 @@ class SwapService
                 throw new RuntimeException("Failed to place hold: " . ($holdResult['message'] ?? 'Unknown error'));
             }
 
-            // STEP 3: RECORD MASTER SWAP
             $debugSteps[] = ['time' => microtime(true), 'step' => 'START_RECORD_SWAP'];
             $swapId = $this->recordMasterSwap(
                 $swapRef,
@@ -750,43 +687,23 @@ class SwapService
             );
             $debugSteps[] = ['time' => microtime(true), 'step' => 'RECORD_SWAP_COMPLETE', 'swap_id' => $swapId];
 
-            // ============================================================
-            // CRITICAL SECTION - AFTER HOLD, BEFORE DEBIT
-            // ============================================================
             $debugSteps[] = ['time' => microtime(true), 'step' => 'BEFORE_PROCESS_DESTINATION', 
                             'delivery_mode' => $destination['delivery_mode'] ?? 'deposit'];
 
-            // STEP 4: PROCESS DESTINATION (with fee deduction)
-            try {
-                if (isset($destination['delivery_mode']) && $destination['delivery_mode'] === 'cashout') {
-                    $debugSteps[] = ['time' => microtime(true), 'step' => 'START_PROCESS_CASHOUT'];
-                    $this->processCashout($swapId, $swapRef, $source, $destination, $currency, $holdResult);
-                    $debugSteps[] = ['time' => microtime(true), 'step' => 'PROCESS_CASHOUT_COMPLETE'];
-                } else {
-                    $debugSteps[] = ['time' => microtime(true), 'step' => 'START_PROCESS_DEPOSIT'];
-                    $this->processDeposit($swapId, $swapRef, $source, $destination, $currency, $holdResult);
-                    $debugSteps[] = ['time' => microtime(true), 'step' => 'PROCESS_DEPOSIT_COMPLETE'];
-                }
-            } catch (Exception $e) {
-                $debugSteps[] = ['time' => microtime(true), 'step' => 'PROCESS_DESTINATION_FAILED', 
-                                'error' => $e->getMessage(), 
-                                'trace' => $e->getTraceAsString()];
-                throw $e; // Re-throw to be caught by outer catch
+            if (isset($destination['delivery_mode']) && $destination['delivery_mode'] === 'cashout') {
+                $debugSteps[] = ['time' => microtime(true), 'step' => 'START_PROCESS_CASHOUT'];
+                $this->processCashout($swapId, $swapRef, $source, $destination, $currency, $holdResult);
+                $debugSteps[] = ['time' => microtime(true), 'step' => 'PROCESS_CASHOUT_COMPLETE'];
+            } else {
+                $debugSteps[] = ['time' => microtime(true), 'step' => 'START_PROCESS_DEPOSIT'];
+                $this->processDeposit($swapId, $swapRef, $source, $destination, $currency, $holdResult);
+                $debugSteps[] = ['time' => microtime(true), 'step' => 'PROCESS_DEPOSIT_COMPLETE'];
             }
 
-            // STEP 5: DEBIT THE FUNDS
             $debugSteps[] = ['time' => microtime(true), 'step' => 'START_DEBIT_FUNDS'];
-            try {
-                $this->debitSourceFunds($swapRef, $source, $holdResult, $sourceParticipant);
-                $debugSteps[] = ['time' => microtime(true), 'step' => 'DEBIT_FUNDS_COMPLETE'];
-            } catch (Exception $e) {
-                $debugSteps[] = ['time' => microtime(true), 'step' => 'DEBIT_FUNDS_FAILED', 
-                                'error' => $e->getMessage(), 
-                                'trace' => $e->getTraceAsString()];
-                throw $e;
-            }
+            $this->debitSourceFunds($swapRef, $source, $holdResult, $sourceParticipant);
+            $debugSteps[] = ['time' => microtime(true), 'step' => 'DEBIT_FUNDS_COMPLETE'];
 
-            // STEP 6: HANDLE ANY UNDISPENSED AMOUNT
             if ($atmResult && $atmResult['undispensed_amount'] > 0.01) {
                 $debugSteps[] = ['time' => microtime(true), 'step' => 'HANDLE_UNDISPENSED', 
                                 'amount' => $atmResult['undispensed_amount']];
@@ -814,7 +731,7 @@ class SwapService
                 'message' => 'Swap initiated successfully',
                 'hold_reference' => $holdResult['hold_reference'] ?? null,
                 'dispensed_notes' => $atmResult['notes'] ?? [],
-                'debug' => $debugSteps // Return debug steps in response
+                'debug' => $debugSteps
             ];
 
         } catch (Exception $e) {
@@ -830,7 +747,6 @@ class SwapService
                         'reason' => 'Transaction failed: ' . $e->getMessage()
                     ]);
                     $this->logEvent($swapRef, 'HOLD_RELEASED', ['reason' => $e->getMessage()]);
-                    // Update hold status to RELEASED
                     if (isset($holdResult['hold_reference'])) {
                         $this->updateHoldStatus($holdResult['hold_reference'], 'RELEASED');
                     }
@@ -855,14 +771,11 @@ class SwapService
             return [
                 'status' => 'error',
                 'message' => $e->getMessage(),
-                'debug' => $debugSteps // Return debug steps even on error
+                'debug' => $debugSteps
             ];
         }
     }
 
-    /**
-     * Debit source funds after successful transaction
-     */
     private function debitSourceFunds(string $swapRef, array $source, array $holdResult, array $participant): void
     {
         $bankClient = new GenericBankClient($participant);
@@ -876,7 +789,6 @@ class SwapService
         
         $this->debugApiCall('debit_funds', ['hold_reference' => $holdResult['hold_reference']], $result);
 
-        // NEW: Log the API call
         $this->logApiMessage(
             $swapRef,
             'debit_funds',
@@ -888,7 +800,6 @@ class SwapService
             null
         );
 
-        // Check if HTTP request was successful
         if (!isset($result['success']) || $result['success'] !== true) {
             $errorMsg = 'Bank communication failed';
             if (isset($result['curl_error']) && !empty($result['curl_error'])) {
@@ -899,14 +810,12 @@ class SwapService
             throw new RuntimeException("Failed to debit funds: " . $errorMsg);
         }
 
-        // Extract bank response
         $bankResponse = $result['data'] ?? [];
 
         if (!isset($bankResponse['debited']) || $bankResponse['debited'] !== true) {
             throw new RuntimeException("Failed to debit funds: " . ($bankResponse['message'] ?? 'Unknown error'));
         }
         
-        // NEW: Update hold status to DEBITED
         if (isset($holdResult['hold_reference'])) {
             $this->updateHoldStatus($holdResult['hold_reference'], 'DEBITED');
         }
@@ -917,9 +826,6 @@ class SwapService
         ]);
     }
 
-    /**
-     * Verify source asset with institution - FIXED VERSION with phone field for SACCUSSALIS
-     */
     private function verifySourceAsset(string $swapRef, array $source, array $participant): array
     {
         $assetType = strtoupper($source['asset_type'] ?? 'UNKNOWN');
@@ -972,7 +878,6 @@ class SwapService
                 break;
 
             case 'E-WALLET':
-                // SACCUSSALIS uses 'phone' column in wallets table
                 $phone = $source['ewallet']['phone'] ?? 
                          $source['phone'] ?? 
                          $source['ewallet_phone'] ?? 
@@ -984,7 +889,7 @@ class SwapService
                 }
                 
                 $verificationPayload = array_merge($verificationPayload, [
-                    'phone' => $this->formatPhoneForInstitution($phone, $participant)  // Changed from ewallet_phone to phone
+                    'phone' => $this->formatPhoneForInstitution($phone, $participant)
                 ]);
                 
                 error_log("[VERIFY_ASSET] E-WALLET phone: " . $phone . " → formatted: " . $verificationPayload['phone']);
@@ -1011,7 +916,6 @@ class SwapService
             $result = $bankClient->verifyAsset($verificationPayload);
             $this->debugApiCall('verify_asset', $verificationPayload, $result);
             
-            // NEW: Log the API call
             $this->logApiMessage(
                 $swapRef,
                 'verify_asset',
@@ -1061,9 +965,6 @@ class SwapService
         }
     }
 
-    /**
-     * Unified hold placement with debugging - FIXED VERSION with phone field for SACCUSSALIS
-     */
     private function placeHoldOnSourceAsset(string $swapRef, array $source, array $verificationResult, array $participant, ?array $destination = null): array
     {
         $assetType = strtoupper($source['asset_type']);
@@ -1110,23 +1011,22 @@ class SwapService
                 );
                 break;
             case 'E-WALLET':
-                // SACCUSSALIS uses 'phone' column in wallets table
-                   $phone = $source['ewallet']['phone'] ??          // Nested under ewallet
-             $source['ewallet']['ewallet_phone'] ??  // Nested under ewallet with ewallet_phone
-             $source['phone'] ??                      // Direct phone field
-             $source['ewallet_phone'] ??              // Direct ewallet_phone field
-             $source['beneficiary_phone'] ??          // Beneficiary phone
-             $source['claimant_phone'] ??             // Claimant phone
-             $source['wallet_phone'] ??               // Wallet phone
-             $source['account_phone'] ??              // Account phone 
-                         null;
+                   $phone = $source['ewallet']['phone'] ??          
+                            $source['ewallet']['ewallet_phone'] ??  
+                            $source['phone'] ??                      
+                            $source['ewallet_phone'] ??              
+                            $source['beneficiary_phone'] ??          
+                            $source['claimant_phone'] ??             
+                            $source['wallet_phone'] ??               
+                            $source['account_phone'] ??             
+                            null;
                 
                 if (!$phone) {
                     error_log("[PLACE_HOLD] CRITICAL: No phone number found for E-WALLET hold placement");
                     throw new RuntimeException("Phone number required for E-WALLET hold placement");
                 }
                 
-                $holdPayload['phone'] = $this->formatPhoneForInstitution($phone, $participant);  // Changed from ewallet_phone to phone
+                $holdPayload['phone'] = $this->formatPhoneForInstitution($phone, $participant);
                 
                 error_log("[PLACE_HOLD] E-WALLET phone found: " . $phone . " → formatted: " . $holdPayload['phone']);
                 break;
@@ -1143,7 +1043,6 @@ class SwapService
         $result = $bankClient->authorize($holdPayload);
         $this->debugApiCall('place_hold', $holdPayload, $result);
         
-        // NEW: Log the API call
         $this->logApiMessage(
             $swapRef,
             'hold_placement',
@@ -1201,7 +1100,6 @@ class SwapService
             'hold_expiry' => $holdExpiry
         ]);
 
-        // NEW: Record the hold in hold_transactions table
         if ($holdReference) {
             $this->recordHoldTransaction($swapRef, [
                 'hold_reference' => $holdReference,
@@ -1217,9 +1115,6 @@ class SwapService
         ];
     }
 
-    /**
-     * Process cashout to ATM/Agent (with fee deduction) - ENHANCED WITH DEBUGGING
-     */
     private function processCashout(int $swapId, string $swapRef, array $source, array $destination, string $currency, array $holdResult): void
     {
         $debug = [];
@@ -1229,7 +1124,6 @@ class SwapService
             $grossAmount = (float)$destination['amount'];
             $debug[] = ['time' => microtime(true), 'step' => 'GROSS_AMOUNT', 'amount' => $grossAmount];
             
-            // Deduct TOTAL fee only - split handled at settlement
             $feeDetails = $this->deductSwapFee(
                 $swapRef,
                 'CASHOUT',
@@ -1239,7 +1133,6 @@ class SwapService
             );
             $debug[] = ['time' => microtime(true), 'step' => 'FEE_DEDUCTED', 'fee' => $feeDetails['fee_amount'], 'net' => $feeDetails['net_amount']];
             
-            // Use net amount for the actual cashout
             $netAmount = $feeDetails['net_amount'];
             $cashoutData = $destination['cashout'];
             
@@ -1262,32 +1155,26 @@ class SwapService
             $codeHash = password_hash($rawCode, PASSWORD_BCRYPT);
             $debug[] = ['time' => microtime(true), 'step' => 'CODE_GENERATED', 'raw_length' => strlen($rawCode), 'hash_length' => strlen($codeHash)];
 
-            // CREATE VOUCHER
             $debug[] = ['time' => microtime(true), 'step' => 'CREATING_VOUCHER'];
             $this->createCashoutVoucher($swapId, $codeHash, $destination, $rawCode, $cashoutData);
             $debug[] = ['time' => microtime(true), 'step' => 'VOUCHER_CREATED'];
             
-            // REQUEST ATM TOKEN
             $debug[] = ['time' => microtime(true), 'step' => 'REQUESTING_ATM_TOKEN'];
             $atmToken = $this->requestAtmToken($swapRef, $source, $destination, $codeHash, $holdResult, $destParticipant, $netAmount);
             $debug[] = ['time' => microtime(true), 'step' => 'ATM_TOKEN_RECEIVED', 'token_reference' => $atmToken['token_reference'] ?? null];
 
-            // SEND SMS
             $debug[] = ['time' => microtime(true), 'step' => 'SENDING_SMS'];
             $this->sendWithdrawalSms($cashoutData['beneficiary_phone'], $rawCode, $atmToken, $netAmount, $currency);
             $debug[] = ['time' => microtime(true), 'step' => 'SMS_SENT'];
             
-            // QUEUE SETTLEMENT
             $debug[] = ['time' => microtime(true), 'step' => 'QUEUEING_SETTLEMENT'];
             $this->queueSettlementMessage($swapRef, $source, $destination, $grossAmount, $holdResult, $feeDetails);
             $debug[] = ['time' => microtime(true), 'step' => 'SETTLEMENT_QUEUED'];
 
-            // UPDATE NET POSITION
             $debug[] = ['time' => microtime(true), 'step' => 'UPDATING_NET_POSITION'];
             $this->settlement->updateNetPosition($source['institution'], $destination['institution'], $netAmount, 'cashout');
             $debug[] = ['time' => microtime(true), 'step' => 'NET_POSITION_UPDATED'];
             
-            // UPDATE SWAP LEDGER
             $debug[] = ['time' => microtime(true), 'step' => 'UPDATING_SWAP_LEDGER'];
             $this->updateSwapLedgerFees($swapRef, $source['institution'], $destination['institution'], $grossAmount, $currency);
             $debug[] = ['time' => microtime(true), 'step' => 'SWAP_LEDGER_UPDATED'];
@@ -1298,7 +1185,6 @@ class SwapService
             throw $e;
         }
         
-        // Log all debug steps
         error_log("CASHOUT DEBUG: " . json_encode($debug));
     }
 
@@ -1331,9 +1217,6 @@ class SwapService
         ]);
     }
 
-    /**
-     * Request ATM token from destination institution - ENHANCED WITH DEBUGGING
-     */
     private function requestAtmToken(string $swapRef, array $source, array $destination, string $codeHash, array $holdResult, array $participant, ?float $netAmount = null): array
     {
         $debug = [];
@@ -1347,7 +1230,7 @@ class SwapService
             'source_hold_reference' => $holdResult['hold_reference'] ?? null,
             'source_asset_type' => $source['asset_type'],
             'beneficiary_phone' => $destination['cashout']['beneficiary_phone'],
-            'amount' => $netAmount ?? $destination['amount'], // Use net amount if provided
+            'amount' => $netAmount ?? $destination['amount'],
             'code_hash' => $codeHash,
             'action' => 'GENERATE_ATM_TOKEN'
         ];
@@ -1360,7 +1243,6 @@ class SwapService
 
             $this->debugApiCall('generate_token', ['reference' => $swapRef], $result);
 
-            // NEW: Log the API call
             $this->logApiMessage(
                 $swapRef,
                 'generate_token',
@@ -1372,7 +1254,6 @@ class SwapService
                 null
             );
 
-            // Check if HTTP request was successful
             if (!isset($result['success']) || $result['success'] !== true) {
                 $errorMsg = 'Bank communication failed';
                 if (isset($result['curl_error']) && !empty($result['curl_error'])) {
@@ -1385,7 +1266,6 @@ class SwapService
                 throw new RuntimeException("Failed to generate ATM token: " . $errorMsg);
             }
 
-            // Extract the actual bank response from the 'data' field
             $bankResponse = $result['data'] ?? [];
             $debug[] = ['time' => microtime(true), 'step' => 'BANK_RESPONSE_RECEIVED', 'bank_response' => $bankResponse];
 
@@ -1393,7 +1273,6 @@ class SwapService
                 'bank_response' => $bankResponse
             ]);
 
-            // Check if token was generated successfully
             if (!isset($bankResponse['token_generated']) || $bankResponse['token_generated'] !== true) {
                 $errorMsg = $bankResponse['message'] ?? $bankResponse['error'] ?? 'Unknown error';
                 $debug[] = ['time' => microtime(true), 'step' => 'TOKEN_NOT_GENERATED', 'error' => $errorMsg];
@@ -1413,7 +1292,6 @@ class SwapService
             throw $e;
         }
 
-        // Return the unwrapped bank response
         return $bankResponse;
     }
 
@@ -1431,94 +1309,34 @@ class SwapService
         ], 'authorize');
     }
 
-   /**
- * UPDATED: Send withdrawal SMS using the SMS service - DISABLED FOR TESTING
- */
-private function sendWithdrawalSms(string $phone, string $code, array $atmInfo, float $amount, string $currency): void
-{
-    // TEMPORARILY DISABLED - Just log and return
-    error_log("=== SMS DISABLED FOR TESTING ===");
-    error_log("Would send SMS to: " . $phone);
-    error_log("Withdrawal code: " . $code);
-    error_log("Amount: " . $amount . " " . $currency);
-    error_log("ATM Info: " . json_encode($atmInfo));
-    
-    // Return without doing anything - this allows the swap to complete
-    return;
-    
-    /* ORIGINAL CODE - COMMENTED OUT
-    // Try to send via SMS service if available
-    if ($this->smsService) {
-        try {
-            $result = $this->smsService->sendWithdrawalCode(
-                $phone,
-                $code,
-                $amount,
-                $currency,
-                $atmInfo
-            );
-            
-            $this->logEvent($swapRef ?? 'SMS', 'SMS_SENT_VIA_SERVICE', [
-                'phone' => substr($phone, -8),
-                'success' => $result['success'] ?? false,
-                'message_id' => $result['message_id'] ?? null
-            ]);
-            
-            if ($result['success']) {
-                return; // SMS sent successfully via service
-            }
-        } catch (Exception $e) {
-            $this->logEvent($swapRef ?? 'SMS', 'SMS_SERVICE_ERROR', [
-                'error' => $e->getMessage()
-            ]);
-            // Fall back to outbox method
-        }
+    /**
+     * COMPLETELY DISABLED SMS SENDING - JUST LOGS
+     */
+    private function sendWithdrawalSms(string $phone, string $code, array $atmInfo, float $amount, string $currency): void
+    {
+        error_log("=== SMS COMPLETELY DISABLED ===");
+        error_log("Would send SMS to: " . $phone);
+        error_log("Withdrawal code: " . $code);
+        error_log("ATM PIN: " . ($atmInfo['atm_pin'] ?? 'N/A'));
+        error_log("Amount: " . $amount . " " . $currency);
+        return;
     }
-    
-    // Fallback: Store in message_outbox for worker to process
-    $messageId = 'SMS-' . uniqid();
-    
-    $message = "🔐 VouchMorph Withdrawal\nCode: {$code}\n";
-    if (!empty($atmInfo['atm_pin'])) {
-        $message .= "ATM PIN: {$atmInfo['atm_pin']}\n";
-    }
-    $message .= "Amount: {$amount} {$currency}\nValid for 24 hours.\nKeep this code secure!";
-
-    $stmt = $this->swapDB->prepare("
-        INSERT INTO message_outbox 
-        (message_id, channel, destination, payload, status, created_at)
-        VALUES (?, 'SMS', ?, ?, 'PENDING', NOW())
-    ");
-
-    $stmt->execute([
-        $messageId,
-        $phone,
-        json_encode([
-            'message' => $message,
-            'code' => $code,
-            'atm_info' => $atmInfo,
-            'amount' => $amount,
-            'currency' => $currency
-        ])
-    ]);
-    
-    $this->logEvent($swapRef ?? 'SMS', 'SMS_QUEUED', [
-        'phone' => substr($phone, -8),
-        'message_id' => $messageId
-    ]);
-    */
-}
 
     private function queueSettlementMessage(string $swapRef, array $source, array $destination, float $amount, array $holdResult, ?array $feeDetails = null): void
     {
+        error_log("[QUEUE_SETTLEMENT] Starting for swap: $swapRef");
+        
+        $beneficiaryPhone = isset($destination['cashout']['beneficiary_phone']) 
+            ? substr($destination['cashout']['beneficiary_phone'], -8) 
+            : null;
+        
         $metadata = [
-            'source_type' => $source['asset_type'],
+            'source_type' => $source['asset_type'] ?? 'UNKNOWN',
             'source_reference' => $this->maskIdentifier($source),
-            'beneficiary_phone' => substr($destination['cashout']['beneficiary_phone'] ?? '', -8),
+            'beneficiary_phone' => $beneficiaryPhone,
             'hold_reference' => $holdResult['hold_reference'] ?? null
         ];
         
-        // Add fee info if available
         if ($feeDetails) {
             $metadata['fee'] = [
                 'fee_id' => $feeDetails['fee_id'],
@@ -1527,6 +1345,8 @@ private function sendWithdrawalSms(string $phone, string $code, array $atmInfo, 
                 'split' => $feeDetails['split']
             ];
         }
+
+        error_log("[QUEUE_SETTLEMENT] Metadata: " . json_encode($metadata));
 
         $stmt = $this->swapDB->prepare("
             INSERT INTO settlement_messages
@@ -1541,6 +1361,8 @@ private function sendWithdrawalSms(string $phone, string $code, array $atmInfo, 
             $amount,
             json_encode($metadata)
         ]);
+        
+        error_log("[QUEUE_SETTLEMENT] Success");
     }
 
     private function handleUndispensedAmount(string $origin, array $destination, float $amount, string $ref): void
@@ -1564,63 +1386,60 @@ private function sendWithdrawalSms(string $phone, string $code, array $atmInfo, 
         }
     }
 
- private function recordMasterSwap(string $swapRef, array $source, array $destination, string $currency, array $verificationResult): int
-{
-    $sourceDetails = [
-        'institution' => $source['institution'],
-        'asset_type' => $source['asset_type'],
-        'reference' => $this->maskIdentifier($source),
-        'holder_name' => $verificationResult['asset_details']['holder_name'] ?? null,
-        'available_balance' => $verificationResult['asset_details']['available_balance'] ?? null
-    ];
+    private function recordMasterSwap(string $swapRef, array $source, array $destination, string $currency, array $verificationResult): int
+    {
+        $sourceDetails = [
+            'institution' => $source['institution'],
+            'asset_type' => $source['asset_type'],
+            'reference' => $this->maskIdentifier($source),
+            'holder_name' => $verificationResult['asset_details']['holder_name'] ?? null,
+            'available_balance' => $verificationResult['asset_details']['available_balance'] ?? null
+        ];
 
-    // Determine destination asset type based on delivery_mode or available fields
-    $destinationAssetType = 'UNKNOWN';
-    
-    if (isset($destination['delivery_mode']) && $destination['delivery_mode'] === 'cashout') {
-        $destinationAssetType = 'CASHOUT';
-    } elseif (isset($destination['asset_type'])) {
-        $destinationAssetType = $destination['asset_type'];
-    } elseif (isset($destination['beneficiary_account'])) {
-        $destinationAssetType = 'ACCOUNT';
-    } elseif (isset($destination['beneficiary_wallet'])) {
-        $destinationAssetType = 'WALLET';
-    } elseif (isset($destination['cashout'])) {
-        $destinationAssetType = 'CASHOUT';
+        $destinationAssetType = 'UNKNOWN';
+        
+        if (isset($destination['delivery_mode']) && $destination['delivery_mode'] === 'cashout') {
+            $destinationAssetType = 'CASHOUT';
+        } elseif (isset($destination['asset_type'])) {
+            $destinationAssetType = $destination['asset_type'];
+        } elseif (isset($destination['beneficiary_account'])) {
+            $destinationAssetType = 'ACCOUNT';
+        } elseif (isset($destination['beneficiary_wallet'])) {
+            $destinationAssetType = 'WALLET';
+        } elseif (isset($destination['cashout'])) {
+            $destinationAssetType = 'CASHOUT';
+        }
+
+        $destinationDetails = [
+            'institution' => $destination['institution'],
+            'asset_type' => $destinationAssetType,
+            'delivery_mode' => $destination['delivery_mode'] ?? 'deposit',
+            'beneficiary' => $destination['cashout']['beneficiary_phone'] ?? 
+                            $destination['beneficiary_account'] ?? 
+                            $destination['beneficiary_wallet'] ?? 
+                            $destination['cashout']['beneficiary'] ??
+                            null
+        ];
+
+        error_log("[recordMasterSwap] Destination details: " . json_encode($destinationDetails));
+
+        $stmt = $this->swapDB->prepare("
+            INSERT INTO swap_requests 
+            (swap_uuid, from_currency, to_currency, amount, source_details, destination_details, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'pending', NOW())
+            RETURNING swap_id
+        ");
+
+        $stmt->execute([
+            $swapRef, $currency, $currency, $source['amount'],
+            json_encode($sourceDetails), json_encode($destinationDetails)
+        ]);
+
+        return $stmt->fetchColumn();
     }
-
-    $destinationDetails = [
-        'institution' => $destination['institution'],
-        'asset_type' => $destinationAssetType,
-        'delivery_mode' => $destination['delivery_mode'] ?? 'deposit',
-        'beneficiary' => $destination['cashout']['beneficiary_phone'] ?? 
-                        $destination['beneficiary_account'] ?? 
-                        $destination['beneficiary_wallet'] ?? 
-                        $destination['cashout']['beneficiary'] ??
-                        null
-    ];
-
-    // Log for debugging
-    error_log("[recordMasterSwap] Destination details: " . json_encode($destinationDetails));
-
-    $stmt = $this->swapDB->prepare("
-        INSERT INTO swap_requests 
-        (swap_uuid, from_currency, to_currency, amount, source_details, destination_details, status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, 'pending', NOW())
-        RETURNING swap_id
-    ");
-
-    $stmt->execute([
-        $swapRef, $currency, $currency, $source['amount'],
-        json_encode($sourceDetails), json_encode($destinationDetails)
-    ]);
-
-    return $stmt->fetchColumn();
-}
 
     private function updateSwapLedgerFees(string $swapRef, string $from, string $to, float $amount, string $currency): void
     {
-        // Get fee amount from fee_collections if available
         $stmt = $this->swapDB->prepare("
             SELECT total_amount FROM swap_fee_collections 
             WHERE swap_reference = ? 
@@ -1640,14 +1459,10 @@ private function sendWithdrawalSms(string $phone, string $code, array $atmInfo, 
         $stmt->execute([$swapRef, $from, $to, $amount, $currency, $swapFee]);
     }
 
-    /**
-     * Process deposit to destination account (with fee deduction)
-     */
     private function processDeposit(int $swapId, string $swapRef, array $source, array $destination, string $currency, array $holdResult): void
     {
         $grossAmount = (float)$destination['amount'];
         
-        // Deduct TOTAL fee only - split handled at settlement
         $feeDetails = $this->deductSwapFee(
             $swapRef,
             'DEPOSIT',
@@ -1656,7 +1471,6 @@ private function sendWithdrawalSms(string $phone, string $code, array $atmInfo, 
             $destination['institution']
         );
         
-        // Use net amount for the actual deposit
         $netAmount = $feeDetails['net_amount'];
         
         $destInstitutionKey = $this->findInstitutionKey($destination['institution']);
@@ -1667,7 +1481,6 @@ private function sendWithdrawalSms(string $phone, string $code, array $atmInfo, 
         
         $bankClient = new GenericBankClient($participant);
 
-        // Pass net amount to deposit
         $result = $bankClient->transfer([
             'reference' => $swapRef,
             'source_institution' => $source['institution'],
@@ -1679,7 +1492,6 @@ private function sendWithdrawalSms(string $phone, string $code, array $atmInfo, 
 
         $this->debugApiCall('process_deposit', ['reference' => $swapRef], $result);
 
-        // NEW: Log the API call
         $this->logApiMessage(
             $swapRef,
             'process_deposit',
@@ -1691,7 +1503,6 @@ private function sendWithdrawalSms(string $phone, string $code, array $atmInfo, 
             null
         );
 
-        // Check if HTTP request was successful
         if (!isset($result['success']) || $result['success'] !== true) {
             $errorMsg = 'Bank communication failed';
             if (isset($result['curl_error']) && !empty($result['curl_error'])) {
@@ -1702,86 +1513,81 @@ private function sendWithdrawalSms(string $phone, string $code, array $atmInfo, 
             throw new RuntimeException("Deposit failed: " . $errorMsg);
         }
 
-        // Extract the actual bank response from the 'data' field
         $bankResponse = $result['data'] ?? [];
 
-        $this->logEvent($swapRef, 'DEPOSIT_BANK_RESPONSE', [
-            'bank_response' => $bankResponse
-        ]);
-
-        // Check if deposit was processed successfully
         if (!isset($bankResponse['processed']) || $bankResponse['processed'] !== true) {
             $errorMsg = $bankResponse['message'] ?? $bankResponse['error'] ?? 'Unknown error';
             throw new RuntimeException("Deposit failed: " . $errorMsg);
         }
         
-        // Queue settlement message with GROSS amount (includes fee)
         $this->queueSettlementMessage($swapRef, $source, $destination, $grossAmount, $holdResult, $feeDetails);
         
-        // Update net position with NET amount (actual money moved)
         $this->settlement->updateNetPosition($source['institution'], $destination['institution'], $netAmount, 'deposit');
     }
 
     private function maskIdentifier(array $source): string
-{
-    // Safely determine asset type with multiple fallbacks
-    $assetType = 'UNKNOWN';
-    
-    // Try to get asset_type from various possible locations
-    if (isset($source['asset_type'])) {
-        $assetType = strtoupper($source['asset_type']);
-    } elseif (isset($source['type'])) {
-        $assetType = strtoupper($source['type']);
-    } elseif (isset($source['source']['asset_type'])) {
-        $assetType = strtoupper($source['source']['asset_type']);
+    {
+        $assetType = 'UNKNOWN';
+        
+        if (isset($source['asset_type'])) {
+            $assetType = strtoupper($source['asset_type']);
+        } elseif (isset($source['type'])) {
+            $assetType = strtoupper($source['type']);
+        } elseif (isset($source['source']['asset_type'])) {
+            $assetType = strtoupper($source['source']['asset_type']);
+        }
+        
+        error_log("[maskIdentifier] Asset type: {$assetType}, Source keys: " . implode(', ', array_keys($source)));
+        
+        switch ($assetType) {
+            case 'VOUCHER':
+                $voucherNumber = $source['voucher']['voucher_number'] ?? $source['voucher_number'] ?? '';
+                return 'VCH-' . substr($voucherNumber, -4);
+                
+            case 'ACCOUNT':
+                $accountNumber = $source['account']['account_number'] ?? $source['account_number'] ?? '';
+                return 'ACC-' . substr($accountNumber, -4);
+                
+            case 'WALLET':
+                $phone = $source['wallet']['wallet_phone'] ?? 
+                         $source['wallet']['phone'] ?? 
+                         $source['wallet_phone'] ?? 
+                         $source['phone'] ?? 
+                         '';
+                return 'WLT-' . substr($phone, -8);
+                
+            case 'E-WALLET':
+                $phone = $source['ewallet']['ewallet_phone'] ?? 
+                         $source['ewallet']['phone'] ?? 
+                         $source['ewallet_phone'] ?? 
+                         $source['phone'] ?? 
+                         '';
+                return 'EWL-' . substr($phone, -8);
+                
+            case 'CARD':
+                $cardNumber = $source['card']['card_number'] ?? $source['card_number'] ?? '';
+                return 'CRD-' . substr($cardNumber, -4);
+                
+            case 'CASHOUT':
+                $phone = $source['cashout']['beneficiary_phone'] ?? $source['beneficiary_phone'] ?? '';
+                return 'CSH-' . substr($phone, -8);
+                
+            default:
+                if (isset($source['phone'])) {
+                    return 'USR-' . substr($source['phone'], -8);
+                }
+                if (isset($source['account_number'])) {
+                    return 'ACC-' . substr($source['account_number'], -4);
+                }
+                if (isset($source['voucher_number'])) {
+                    return 'VCH-' . substr($source['voucher_number'], -4);
+                }
+                if (isset($source['beneficiary_phone'])) {
+                    return 'BNF-' . substr($source['beneficiary_phone'], -8);
+                }
+                return 'SRC-' . substr(uniqid(), -6);
+        }
     }
-    
-    // Debug log to see what we're working with
-    error_log("[maskIdentifier] Asset type: {$assetType}, Source keys: " . implode(', ', array_keys($source)));
-    
-    switch ($assetType) {
-        case 'VOUCHER':
-            $voucherNumber = $source['voucher']['voucher_number'] ?? $source['voucher_number'] ?? '';
-            return 'VCH-' . substr($voucherNumber, -4);
-            
-        case 'ACCOUNT':
-            $accountNumber = $source['account']['account_number'] ?? $source['account_number'] ?? '';
-            return 'ACC-' . substr($accountNumber, -4);
-            
-        case 'WALLET':
-            $phone = $source['wallet']['wallet_phone'] ?? 
-                     $source['wallet']['phone'] ?? 
-                     $source['wallet_phone'] ?? 
-                     $source['phone'] ?? 
-                     '';
-            return 'WLT-' . substr($phone, -8);
-            
-        case 'E-WALLET':
-            $phone = $source['ewallet']['ewallet_phone'] ?? 
-                     $source['ewallet']['phone'] ?? 
-                     $source['ewallet_phone'] ?? 
-                     $source['phone'] ?? 
-                     '';
-            return 'EWL-' . substr($phone, -8);
-            
-        case 'CARD':
-            $cardNumber = $source['card']['card_number'] ?? $source['card_number'] ?? '';
-            return 'CRD-' . substr($cardNumber, -4);
-            
-        default:
-            // If we can't determine type, try to find any identifier
-            if (isset($source['phone'])) {
-                return 'USR-' . substr($source['phone'], -8);
-            }
-            if (isset($source['account_number'])) {
-                return 'ACC-' . substr($source['account_number'], -4);
-            }
-            if (isset($source['voucher_number'])) {
-                return 'VCH-' . substr($source['voucher_number'], -4);
-            }
-            return 'SRC-' . substr(uniqid(), -6);
-    }
-}
 
     private function logEvent(string $msgId, string $phase, array $data): void
     {
@@ -1817,27 +1623,21 @@ private function sendWithdrawalSms(string $phone, string $code, array $atmInfo, 
         }
     }
 
-    /**
-     * NEW: Get transaction trace for debugging
-     */
     public function getTransactionTrace(string $swapRef): array
     {
         try {
-            // Get main swap
             $stmt = $this->swapDB->prepare("
                 SELECT * FROM swap_requests WHERE swap_uuid = ?
             ");
             $stmt->execute([$swapRef]);
             $swap = $stmt->fetch(PDO::FETCH_ASSOC);
             
-            // Get hold transactions
             $stmt = $this->swapDB->prepare("
                 SELECT * FROM hold_transactions WHERE swap_reference = ?
             ");
             $stmt->execute([$swapRef]);
             $holds = $stmt->fetchAll(PDO::FETCH_ASSOC);
             
-            // Get API logs
             $stmt = $this->swapDB->prepare("
                 SELECT * FROM api_message_logs 
                 WHERE message_id = ? 
@@ -1846,7 +1646,6 @@ private function sendWithdrawalSms(string $phone, string $code, array $atmInfo, 
             $stmt->execute([$swapRef]);
             $apiLogs = $stmt->fetchAll(PDO::FETCH_ASSOC);
             
-            // Get fee info
             $stmt = $this->swapDB->prepare("
                 SELECT * FROM swap_fee_collections 
                 WHERE swap_reference = ?
@@ -1868,4 +1667,3 @@ private function sendWithdrawalSms(string $phone, string $code, array $atmInfo, 
         }
     }
 }
-
