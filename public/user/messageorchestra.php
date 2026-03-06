@@ -3,6 +3,9 @@ declare(strict_types=1);
 
 namespace DASHBOARD;
 
+use PDO; // IMPORTANT: This tells PHP to use the global PDO class
+use DATA_PERSISTENCE_LAYER\config\DBConnection; // You already have this
+
 // Same bootstrap code as regulationdemo.php
 ob_start();
 $countryCode = $_GET['country'] ?? $_SESSION['country'] ?? 'BW';
@@ -15,7 +18,6 @@ if (!defined('APP_ROOT')) {
 
 // Database connection
 require_once APP_ROOT . '/src/DATA_PERSISTENCE_LAYER/config/DBConnection.php';
-use DATA_PERSISTENCE_LAYER\config\DBConnection;
 $db = DBConnection::getConnection();
 
 // ============================================================================
@@ -1142,5 +1144,6 @@ foreach ($institutions as $debtor) {
     </script>
 </body>
 </html>
+
 
 
