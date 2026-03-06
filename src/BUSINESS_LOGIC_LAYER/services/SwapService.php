@@ -1217,12 +1217,17 @@ class SwapService
         ]);
     }
 
-    private function requestAtmToken(string $swapRef, array $source, array $destination, string $codeHash, array $holdResult, array $participant, ?float $netAmount = null): array
-    {
-        $debug = [];
-        $debug[] = ['time' => microtime(true), 'step' => 'REQUEST_TOKEN_START'];
-        
+   /**
+ * Request ATM token from destination institution - ENHANCED WITH DEBUGGING
+ */
+private function requestAtmToken(string $swapRef, array $source, array $destination, string $codeHash, array $holdResult, array $participant, ?float $netAmount = null): array
+{
+    $debug = [];
+    $debug[] = ['time' => microtime(true), 'step' => 'REQUEST_TOKEN_START'];
+    
+    try {
         $bankClient = new GenericBankClient($participant);
+        $debug[] = ['time' => microtime(true), 'step' => 'BANK_CLIENT_CREATED'];
 
         $payload = [
             'reference' => $swapRef,
@@ -1237,63 +1242,78 @@ class SwapService
         
         $debug[] = ['time' => microtime(true), 'step' => 'PAYLOAD_PREPARED', 'payload' => $payload];
 
-        try {
-            $result = $bankClient->transfer($payload, 'generate_atm_code');
-            $debug[] = ['time' => microtime(true), 'step' => 'API_CALL_COMPLETE', 'result_success' => $result['success'] ?? false];
+        // Log before API call
+        error_log("REQUEST_TOKEN: About to call bankClient->transfer with payload: " . json_encode($payload));
+        
+        $result = $bankClient->transfer($payload, 'generate_atm_code');
+        
+        $debug[] = ['time' => microtime(true), 'step' => 'API_CALL_COMPLETE', 'result_success' => $result['success'] ?? false];
+        error_log("REQUEST_TOKEN: API call result: " . json_encode($result));
 
-            $this->debugApiCall('generate_token', ['reference' => $swapRef], $result);
+        $this->debugApiCall('generate_token', ['reference' => $swapRef], $result);
 
-            $this->logApiMessage(
-                $swapRef,
-                'generate_token',
-                'outgoing',
-                $participant,
-                '/api/generate-atm-code',
-                $payload,
-                $result,
-                null
-            );
+        // Log the API call
+        $this->logApiMessage(
+            $swapRef,
+            'generate_token',
+            'outgoing',
+            $participant,
+            '/api/generate-atm-code',
+            $payload,
+            $result,
+            null
+        );
 
-            if (!isset($result['success']) || $result['success'] !== true) {
-                $errorMsg = 'Bank communication failed';
-                if (isset($result['curl_error']) && !empty($result['curl_error'])) {
-                    $errorMsg .= ': ' . $result['curl_error'];
-                    $debug[] = ['time' => microtime(true), 'step' => 'CURL_ERROR', 'error' => $result['curl_error']];
-                } elseif (isset($result['status_code'])) {
-                    $errorMsg .= ': HTTP ' . $result['status_code'];
-                    $debug[] = ['time' => microtime(true), 'step' => 'HTTP_ERROR', 'code' => $result['status_code']];
-                }
-                throw new RuntimeException("Failed to generate ATM token: " . $errorMsg);
+        // Check if HTTP request was successful
+        if (!isset($result['success']) || $result['success'] !== true) {
+            $errorMsg = 'Bank communication failed';
+            if (isset($result['curl_error']) && !empty($result['curl_error'])) {
+                $errorMsg .= ': ' . $result['curl_error'];
+                $debug[] = ['time' => microtime(true), 'step' => 'CURL_ERROR', 'error' => $result['curl_error']];
+            } elseif (isset($result['status_code'])) {
+                $errorMsg .= ': HTTP ' . $result['status_code'];
+                $debug[] = ['time' => microtime(true), 'step' => 'HTTP_ERROR', 'code' => $result['status_code']];
             }
-
-            $bankResponse = $result['data'] ?? [];
-            $debug[] = ['time' => microtime(true), 'step' => 'BANK_RESPONSE_RECEIVED', 'bank_response' => $bankResponse];
-
-            $this->logEvent($swapRef, 'ATM_TOKEN_BANK_RESPONSE', [
-                'bank_response' => $bankResponse
-            ]);
-
-            if (!isset($bankResponse['token_generated']) || $bankResponse['token_generated'] !== true) {
-                $errorMsg = $bankResponse['message'] ?? $bankResponse['error'] ?? 'Unknown error';
-                $debug[] = ['time' => microtime(true), 'step' => 'TOKEN_NOT_GENERATED', 'error' => $errorMsg];
-                throw new RuntimeException("Failed to generate ATM token: " . $errorMsg);
-            }
-
-            $this->logEvent($swapRef, 'ATM_TOKEN_GENERATED', [
-                'institution' => $participant['provider_code'] ?? $destination['institution'],
-                'token_reference' => $bankResponse['token_reference'] ?? null
-            ]);
-            
-            $debug[] = ['time' => microtime(true), 'step' => 'TOKEN_GENERATED_SUCCESS', 'token_ref' => $bankResponse['token_reference'] ?? null];
-
-        } catch (Exception $e) {
-            $debug[] = ['time' => microtime(true), 'step' => 'REQUEST_TOKEN_EXCEPTION', 'error' => $e->getMessage()];
+            error_log("REQUEST_TOKEN ERROR: " . $errorMsg);
             error_log("REQUEST_TOKEN DEBUG: " . json_encode($debug));
-            throw $e;
+            throw new RuntimeException("Failed to generate ATM token: " . $errorMsg);
         }
 
-        return $bankResponse;
+        // Extract the actual bank response from the 'data' field
+        $bankResponse = $result['data'] ?? [];
+        $debug[] = ['time' => microtime(true), 'step' => 'BANK_RESPONSE_RECEIVED', 'bank_response' => $bankResponse];
+
+        $this->logEvent($swapRef, 'ATM_TOKEN_BANK_RESPONSE', [
+            'bank_response' => $bankResponse
+        ]);
+
+        // Check if token was generated successfully
+        if (!isset($bankResponse['token_generated']) || $bankResponse['token_generated'] !== true) {
+            $errorMsg = $bankResponse['message'] ?? $bankResponse['error'] ?? 'Unknown error';
+            $debug[] = ['time' => microtime(true), 'step' => 'TOKEN_NOT_GENERATED', 'error' => $errorMsg];
+            error_log("REQUEST_TOKEN ERROR: Token not generated - " . $errorMsg);
+            error_log("REQUEST_TOKEN DEBUG: " . json_encode($debug));
+            throw new RuntimeException("Failed to generate ATM token: " . $errorMsg);
+        }
+
+        $this->logEvent($swapRef, 'ATM_TOKEN_GENERATED', [
+            'institution' => $participant['provider_code'] ?? $destination['institution'],
+            'token_reference' => $bankResponse['token_reference'] ?? null
+        ]);
+        
+        $debug[] = ['time' => microtime(true), 'step' => 'TOKEN_GENERATED_SUCCESS', 'token_ref' => $bankResponse['token_reference'] ?? null];
+        error_log("REQUEST_TOKEN SUCCESS: " . json_encode($debug));
+
+    } catch (Exception $e) {
+        $debug[] = ['time' => microtime(true), 'step' => 'REQUEST_TOKEN_EXCEPTION', 'error' => $e->getMessage()];
+        error_log("REQUEST_TOKEN EXCEPTION: " . $e->getMessage());
+        error_log("REQUEST_TOKEN EXCEPTION DEBUG: " . json_encode($debug));
+        error_log("REQUEST_TOKEN EXCEPTION TRACE: " . $e->getTraceAsString());
+        throw $e;
     }
+
+    return $bankResponse;
+}
 
     private function sendBankAuthorization(string $swapRef, array $source, array $destination, string $codeHash, array $participant): void
     {
@@ -1667,3 +1687,4 @@ class SwapService
         }
     }
 }
+
