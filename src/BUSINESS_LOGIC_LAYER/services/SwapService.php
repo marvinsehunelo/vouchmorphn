@@ -662,7 +662,7 @@ class SwapService
     }
 
     /**
-     * Execute swap with unified payload structure
+     * Execute swap with unified payload structure - ENHANCED WITH DEBUGGING
      */
     public function executeSwap(array $payload): array
     { 
@@ -672,6 +672,10 @@ class SwapService
         $bankClient = null;
         $swapRef = bin2hex(random_bytes(16));
         $atmResult = null;
+        
+        // DEBUG: Create a debug log array to track each step
+        $debugSteps = [];
+        $debugSteps[] = ['time' => microtime(true), 'step' => 'START', 'swap_ref' => $swapRef];
         
         try {
             if (empty($payload['source']['institution'])) {
@@ -685,6 +689,8 @@ class SwapService
             $currency = $payload['currency'] ?? 'BWP';
             $source = $payload['source'];
             $destination = $payload['destination'];
+            
+            $debugSteps[] = ['time' => microtime(true), 'step' => 'PAYLOAD_VALIDATED', 'source' => $source['institution'], 'dest' => $destination['institution']];
 
             // Find source institution
             $sourceInstitutionKey = $this->findInstitutionKey($source['institution']);
@@ -692,6 +698,8 @@ class SwapService
                 throw new RuntimeException("Source institution not found: {$source['institution']}");
             }
             $sourceParticipant = $this->participants[$sourceInstitutionKey];
+            
+            $debugSteps[] = ['time' => microtime(true), 'step' => 'SOURCE_FOUND', 'participant' => $sourceParticipant['provider_code'] ?? $sourceInstitutionKey];
             
             // Sanitize phones with source institution config
             $source = $this->sanitizePhones($source, $sourceParticipant);
@@ -703,10 +711,13 @@ class SwapService
                     throw new RuntimeException("Cashout validation failed: " . implode(', ', $errors));
                 }
                 $atmResult = $this->getDispensableAmount((float)$destination['amount'], $currency);
+                $debugSteps[] = ['time' => microtime(true), 'step' => 'CASHOUT_VALIDATED', 'dispensable' => $atmResult['dispensable_amount']];
             }
 
             // STEP 1: VERIFY SOURCE ASSET
+            $debugSteps[] = ['time' => microtime(true), 'step' => 'START_VERIFY_ASSET'];
             $verificationResult = $this->verifySourceAsset($swapRef, $source, $sourceParticipant);
+            $debugSteps[] = ['time' => microtime(true), 'step' => 'VERIFY_ASSET_COMPLETE', 'verified' => $verificationResult['verified']];
 
             if (!$verificationResult['verified']) {
                 throw new RuntimeException(
@@ -716,14 +727,20 @@ class SwapService
             }
             
             // STEP 2: LOCK THE FUNDS
+            $debugSteps[] = ['time' => microtime(true), 'step' => 'START_PLACE_HOLD'];
             $holdResult = $this->placeHoldOnSourceAsset($swapRef, $source, $verificationResult, $sourceParticipant, $destination);
             $bankClient = new GenericBankClient($sourceParticipant);
+            
+            $debugSteps[] = ['time' => microtime(true), 'step' => 'PLACE_HOLD_COMPLETE', 
+                            'hold_placed' => $holdResult['hold_placed'], 
+                            'hold_reference' => $holdResult['hold_reference'] ?? null];
             
             if (!$holdResult['hold_placed']) {
                 throw new RuntimeException("Failed to place hold: " . ($holdResult['message'] ?? 'Unknown error'));
             }
 
             // STEP 3: RECORD MASTER SWAP
+            $debugSteps[] = ['time' => microtime(true), 'step' => 'START_RECORD_SWAP'];
             $swapId = $this->recordMasterSwap(
                 $swapRef,
                 $source,
@@ -731,19 +748,48 @@ class SwapService
                 $currency,
                 $verificationResult
             );
+            $debugSteps[] = ['time' => microtime(true), 'step' => 'RECORD_SWAP_COMPLETE', 'swap_id' => $swapId];
+
+            // ============================================================
+            // CRITICAL SECTION - AFTER HOLD, BEFORE DEBIT
+            // ============================================================
+            $debugSteps[] = ['time' => microtime(true), 'step' => 'BEFORE_PROCESS_DESTINATION', 
+                            'delivery_mode' => $destination['delivery_mode'] ?? 'deposit'];
 
             // STEP 4: PROCESS DESTINATION (with fee deduction)
-            if (isset($destination['delivery_mode']) && $destination['delivery_mode'] === 'cashout') {
-                $this->processCashout($swapId, $swapRef, $source, $destination, $currency, $holdResult);
-            } else {
-                $this->processDeposit($swapId, $swapRef, $source, $destination, $currency, $holdResult);
+            try {
+                if (isset($destination['delivery_mode']) && $destination['delivery_mode'] === 'cashout') {
+                    $debugSteps[] = ['time' => microtime(true), 'step' => 'START_PROCESS_CASHOUT'];
+                    $this->processCashout($swapId, $swapRef, $source, $destination, $currency, $holdResult);
+                    $debugSteps[] = ['time' => microtime(true), 'step' => 'PROCESS_CASHOUT_COMPLETE'];
+                } else {
+                    $debugSteps[] = ['time' => microtime(true), 'step' => 'START_PROCESS_DEPOSIT'];
+                    $this->processDeposit($swapId, $swapRef, $source, $destination, $currency, $holdResult);
+                    $debugSteps[] = ['time' => microtime(true), 'step' => 'PROCESS_DEPOSIT_COMPLETE'];
+                }
+            } catch (Exception $e) {
+                $debugSteps[] = ['time' => microtime(true), 'step' => 'PROCESS_DESTINATION_FAILED', 
+                                'error' => $e->getMessage(), 
+                                'trace' => $e->getTraceAsString()];
+                throw $e; // Re-throw to be caught by outer catch
             }
 
             // STEP 5: DEBIT THE FUNDS
-            $this->debitSourceFunds($swapRef, $source, $holdResult, $sourceParticipant);
+            $debugSteps[] = ['time' => microtime(true), 'step' => 'START_DEBIT_FUNDS'];
+            try {
+                $this->debitSourceFunds($swapRef, $source, $holdResult, $sourceParticipant);
+                $debugSteps[] = ['time' => microtime(true), 'step' => 'DEBIT_FUNDS_COMPLETE'];
+            } catch (Exception $e) {
+                $debugSteps[] = ['time' => microtime(true), 'step' => 'DEBIT_FUNDS_FAILED', 
+                                'error' => $e->getMessage(), 
+                                'trace' => $e->getTraceAsString()];
+                throw $e;
+            }
 
             // STEP 6: HANDLE ANY UNDISPENSED AMOUNT
             if ($atmResult && $atmResult['undispensed_amount'] > 0.01) {
+                $debugSteps[] = ['time' => microtime(true), 'step' => 'HANDLE_UNDISPENSED', 
+                                'amount' => $atmResult['undispensed_amount']];
                 $this->handleUndispensedAmount(
                     $source['institution'],
                     $destination,
@@ -753,10 +799,13 @@ class SwapService
             }
 
             $this->swapDB->commit();
+            $debugSteps[] = ['time' => microtime(true), 'step' => 'TRANSACTION_COMMITTED'];
+            
             $this->logEvent($swapRef, 'SWAP_EXECUTED', [
                 'status' => 'SUCCESS',
                 'source_type' => $source['asset_type'],
-                'destination_type' => $destination['asset_type']
+                'destination_type' => $destination['asset_type'],
+                'debug_steps' => $debugSteps
             ]);
 
             return [
@@ -764,12 +813,18 @@ class SwapService
                 'swap_reference' => $swapRef,
                 'message' => 'Swap initiated successfully',
                 'hold_reference' => $holdResult['hold_reference'] ?? null,
-                'dispensed_notes' => $atmResult['notes'] ?? []
+                'dispensed_notes' => $atmResult['notes'] ?? [],
+                'debug' => $debugSteps // Return debug steps in response
             ];
 
         } catch (Exception $e) {
+            $debugSteps[] = ['time' => microtime(true), 'step' => 'EXCEPTION_CAUGHT', 
+                            'error' => $e->getMessage(), 
+                            'trace' => $e->getTraceAsString()];
+            
             if ($holdResult && $holdResult['hold_placed'] && $bankClient) {
                 try {
+                    $debugSteps[] = ['time' => microtime(true), 'step' => 'RELEASING_HOLD'];
                     $bankClient->releaseHold([
                         'hold_reference' => $holdResult['hold_reference'],
                         'reason' => 'Transaction failed: ' . $e->getMessage()
@@ -779,20 +834,28 @@ class SwapService
                     if (isset($holdResult['hold_reference'])) {
                         $this->updateHoldStatus($holdResult['hold_reference'], 'RELEASED');
                     }
+                    $debugSteps[] = ['time' => microtime(true), 'step' => 'HOLD_RELEASED'];
                 } catch (Exception $releaseError) {
+                    $debugSteps[] = ['time' => microtime(true), 'step' => 'HOLD_RELEASE_FAILED', 
+                                    'error' => $releaseError->getMessage()];
                     error_log("Failed to release hold: " . $releaseError->getMessage());
                 }
             }
             
             if ($this->swapDB->inTransaction()) {
                 $this->swapDB->rollBack();
+                $debugSteps[] = ['time' => microtime(true), 'step' => 'TRANSACTION_ROLLED_BACK'];
             }
             
-            $this->logEvent($swapRef ?? 'N/A', 'SWAP_FAILED', ['error' => $e->getMessage()]);
+            $this->logEvent($swapRef ?? 'N/A', 'SWAP_FAILED', [
+                'error' => $e->getMessage(),
+                'debug_steps' => $debugSteps
+            ]);
             
             return [
                 'status' => 'error',
-                'message' => $e->getMessage()
+                'message' => $e->getMessage(),
+                'debug' => $debugSteps // Return debug steps even on error
             ];
         }
     }
@@ -1155,56 +1218,88 @@ class SwapService
     }
 
     /**
-     * Process cashout to ATM/Agent (with fee deduction)
+     * Process cashout to ATM/Agent (with fee deduction) - ENHANCED WITH DEBUGGING
      */
     private function processCashout(int $swapId, string $swapRef, array $source, array $destination, string $currency, array $holdResult): void
     {
-        $grossAmount = (float)$destination['amount'];
+        $debug = [];
+        $debug[] = ['time' => microtime(true), 'step' => 'CASHOUT_START'];
         
-        // Deduct TOTAL fee only - split handled at settlement
-        $feeDetails = $this->deductSwapFee(
-            $swapRef,
-            'CASHOUT',
-            $grossAmount,
-            $source['institution'],
-            $destination['institution']
-        );
-        
-        // Use net amount for the actual cashout
-        $netAmount = $feeDetails['net_amount'];
-        $cashoutData = $destination['cashout'];
-        
-        $destInstitutionKey = $this->findInstitutionKey($destination['institution']);
-        if (!$destInstitutionKey) {
-            throw new RuntimeException("Destination institution not found: {$destination['institution']}");
-        }
-        $destParticipant = $this->participants[$destInstitutionKey];
-        
-        if (isset($cashoutData['beneficiary_phone'])) {
-            $cashoutData['beneficiary_phone'] = $this->formatPhoneForInstitution(
-                $cashoutData['beneficiary_phone'], $destParticipant
+        try {
+            $grossAmount = (float)$destination['amount'];
+            $debug[] = ['time' => microtime(true), 'step' => 'GROSS_AMOUNT', 'amount' => $grossAmount];
+            
+            // Deduct TOTAL fee only - split handled at settlement
+            $feeDetails = $this->deductSwapFee(
+                $swapRef,
+                'CASHOUT',
+                $grossAmount,
+                $source['institution'],
+                $destination['institution']
             );
+            $debug[] = ['time' => microtime(true), 'step' => 'FEE_DEDUCTED', 'fee' => $feeDetails['fee_amount'], 'net' => $feeDetails['net_amount']];
+            
+            // Use net amount for the actual cashout
+            $netAmount = $feeDetails['net_amount'];
+            $cashoutData = $destination['cashout'];
+            
+            $destInstitutionKey = $this->findInstitutionKey($destination['institution']);
+            if (!$destInstitutionKey) {
+                throw new RuntimeException("Destination institution not found: {$destination['institution']}");
+            }
+            $destParticipant = $this->participants[$destInstitutionKey];
+            $debug[] = ['time' => microtime(true), 'step' => 'DEST_FOUND', 'participant' => $destParticipant['provider_code'] ?? $destInstitutionKey];
+            
+            if (isset($cashoutData['beneficiary_phone'])) {
+                $originalPhone = $cashoutData['beneficiary_phone'];
+                $cashoutData['beneficiary_phone'] = $this->formatPhoneForInstitution(
+                    $cashoutData['beneficiary_phone'], $destParticipant
+                );
+                $debug[] = ['time' => microtime(true), 'step' => 'PHONE_FORMATTED', 'original' => $originalPhone, 'formatted' => $cashoutData['beneficiary_phone']];
+            }
+            
+            $rawCode = (string)random_int(100000, 999999);
+            $codeHash = password_hash($rawCode, PASSWORD_BCRYPT);
+            $debug[] = ['time' => microtime(true), 'step' => 'CODE_GENERATED', 'raw_length' => strlen($rawCode), 'hash_length' => strlen($codeHash)];
+
+            // CREATE VOUCHER
+            $debug[] = ['time' => microtime(true), 'step' => 'CREATING_VOUCHER'];
+            $this->createCashoutVoucher($swapId, $codeHash, $destination, $rawCode, $cashoutData);
+            $debug[] = ['time' => microtime(true), 'step' => 'VOUCHER_CREATED'];
+            
+            // REQUEST ATM TOKEN
+            $debug[] = ['time' => microtime(true), 'step' => 'REQUESTING_ATM_TOKEN'];
+            $atmToken = $this->requestAtmToken($swapRef, $source, $destination, $codeHash, $holdResult, $destParticipant, $netAmount);
+            $debug[] = ['time' => microtime(true), 'step' => 'ATM_TOKEN_RECEIVED', 'token_reference' => $atmToken['token_reference'] ?? null];
+
+            // SEND SMS
+            $debug[] = ['time' => microtime(true), 'step' => 'SENDING_SMS'];
+            $this->sendWithdrawalSms($cashoutData['beneficiary_phone'], $rawCode, $atmToken, $netAmount, $currency);
+            $debug[] = ['time' => microtime(true), 'step' => 'SMS_SENT'];
+            
+            // QUEUE SETTLEMENT
+            $debug[] = ['time' => microtime(true), 'step' => 'QUEUEING_SETTLEMENT'];
+            $this->queueSettlementMessage($swapRef, $source, $destination, $grossAmount, $holdResult, $feeDetails);
+            $debug[] = ['time' => microtime(true), 'step' => 'SETTLEMENT_QUEUED'];
+
+            // UPDATE NET POSITION
+            $debug[] = ['time' => microtime(true), 'step' => 'UPDATING_NET_POSITION'];
+            $this->settlement->updateNetPosition($source['institution'], $destination['institution'], $netAmount, 'cashout');
+            $debug[] = ['time' => microtime(true), 'step' => 'NET_POSITION_UPDATED'];
+            
+            // UPDATE SWAP LEDGER
+            $debug[] = ['time' => microtime(true), 'step' => 'UPDATING_SWAP_LEDGER'];
+            $this->updateSwapLedgerFees($swapRef, $source['institution'], $destination['institution'], $grossAmount, $currency);
+            $debug[] = ['time' => microtime(true), 'step' => 'SWAP_LEDGER_UPDATED'];
+            
+        } catch (Exception $e) {
+            $debug[] = ['time' => microtime(true), 'step' => 'CASHOUT_EXCEPTION', 'error' => $e->getMessage()];
+            error_log("CASHOUT ERROR: " . json_encode($debug));
+            throw $e;
         }
         
-        $rawCode = (string)random_int(100000, 999999);
-        $codeHash = password_hash($rawCode, PASSWORD_BCRYPT);
-
-        $this->createCashoutVoucher($swapId, $codeHash, $destination, $rawCode, $cashoutData);
-        
-        // Pass net amount to token generation
-        $atmToken = $this->requestAtmToken($swapRef, $source, $destination, $codeHash, $holdResult, $destParticipant, $netAmount);
-
-        // UPDATED: Send SMS using the SMS service
-        $this->sendWithdrawalSms($cashoutData['beneficiary_phone'], $rawCode, $atmToken, $netAmount, $currency);
-        
-        // Queue settlement message with GROSS amount (includes fee)
-        $this->queueSettlementMessage($swapRef, $source, $destination, $grossAmount, $holdResult, $feeDetails);
-
-        // Update net position with NET amount (actual money moved)
-        $this->settlement->updateNetPosition($source['institution'], $destination['institution'], $netAmount, 'cashout');
-        
-        // Update swap_ledgers with fee info
-        $this->updateSwapLedgerFees($swapRef, $source['institution'], $destination['institution'], $grossAmount, $currency);
+        // Log all debug steps
+        error_log("CASHOUT DEBUG: " . json_encode($debug));
     }
 
     private function createCashoutVoucher(int $swapId, string $codeHash, array $destination, string $rawCode, array $cashoutData): void
@@ -1237,10 +1332,13 @@ class SwapService
     }
 
     /**
-     * Request ATM token from destination institution
+     * Request ATM token from destination institution - ENHANCED WITH DEBUGGING
      */
     private function requestAtmToken(string $swapRef, array $source, array $destination, string $codeHash, array $holdResult, array $participant, ?float $netAmount = null): array
     {
+        $debug = [];
+        $debug[] = ['time' => microtime(true), 'step' => 'REQUEST_TOKEN_START'];
+        
         $bankClient = new GenericBankClient($participant);
 
         $payload = [
@@ -1253,51 +1351,67 @@ class SwapService
             'code_hash' => $codeHash,
             'action' => 'GENERATE_ATM_TOKEN'
         ];
+        
+        $debug[] = ['time' => microtime(true), 'step' => 'PAYLOAD_PREPARED', 'payload' => $payload];
 
-        $result = $bankClient->transfer($payload, 'generate_atm_code');
+        try {
+            $result = $bankClient->transfer($payload, 'generate_atm_code');
+            $debug[] = ['time' => microtime(true), 'step' => 'API_CALL_COMPLETE', 'result_success' => $result['success'] ?? false];
 
-        $this->debugApiCall('generate_token', ['reference' => $swapRef], $result);
+            $this->debugApiCall('generate_token', ['reference' => $swapRef], $result);
 
-        // NEW: Log the API call
-        $this->logApiMessage(
-            $swapRef,
-            'generate_token',
-            'outgoing',
-            $participant,
-            '/api/generate-atm-code',
-            $payload,
-            $result,
-            null
-        );
+            // NEW: Log the API call
+            $this->logApiMessage(
+                $swapRef,
+                'generate_token',
+                'outgoing',
+                $participant,
+                '/api/generate-atm-code',
+                $payload,
+                $result,
+                null
+            );
 
-        // Check if HTTP request was successful
-        if (!isset($result['success']) || $result['success'] !== true) {
-            $errorMsg = 'Bank communication failed';
-            if (isset($result['curl_error']) && !empty($result['curl_error'])) {
-                $errorMsg .= ': ' . $result['curl_error'];
-            } elseif (isset($result['status_code'])) {
-                $errorMsg .= ': HTTP ' . $result['status_code'];
+            // Check if HTTP request was successful
+            if (!isset($result['success']) || $result['success'] !== true) {
+                $errorMsg = 'Bank communication failed';
+                if (isset($result['curl_error']) && !empty($result['curl_error'])) {
+                    $errorMsg .= ': ' . $result['curl_error'];
+                    $debug[] = ['time' => microtime(true), 'step' => 'CURL_ERROR', 'error' => $result['curl_error']];
+                } elseif (isset($result['status_code'])) {
+                    $errorMsg .= ': HTTP ' . $result['status_code'];
+                    $debug[] = ['time' => microtime(true), 'step' => 'HTTP_ERROR', 'code' => $result['status_code']];
+                }
+                throw new RuntimeException("Failed to generate ATM token: " . $errorMsg);
             }
-            throw new RuntimeException("Failed to generate ATM token: " . $errorMsg);
+
+            // Extract the actual bank response from the 'data' field
+            $bankResponse = $result['data'] ?? [];
+            $debug[] = ['time' => microtime(true), 'step' => 'BANK_RESPONSE_RECEIVED', 'bank_response' => $bankResponse];
+
+            $this->logEvent($swapRef, 'ATM_TOKEN_BANK_RESPONSE', [
+                'bank_response' => $bankResponse
+            ]);
+
+            // Check if token was generated successfully
+            if (!isset($bankResponse['token_generated']) || $bankResponse['token_generated'] !== true) {
+                $errorMsg = $bankResponse['message'] ?? $bankResponse['error'] ?? 'Unknown error';
+                $debug[] = ['time' => microtime(true), 'step' => 'TOKEN_NOT_GENERATED', 'error' => $errorMsg];
+                throw new RuntimeException("Failed to generate ATM token: " . $errorMsg);
+            }
+
+            $this->logEvent($swapRef, 'ATM_TOKEN_GENERATED', [
+                'institution' => $participant['provider_code'] ?? $destination['institution'],
+                'token_reference' => $bankResponse['token_reference'] ?? null
+            ]);
+            
+            $debug[] = ['time' => microtime(true), 'step' => 'TOKEN_GENERATED_SUCCESS', 'token_ref' => $bankResponse['token_reference'] ?? null];
+
+        } catch (Exception $e) {
+            $debug[] = ['time' => microtime(true), 'step' => 'REQUEST_TOKEN_EXCEPTION', 'error' => $e->getMessage()];
+            error_log("REQUEST_TOKEN DEBUG: " . json_encode($debug));
+            throw $e;
         }
-
-        // Extract the actual bank response from the 'data' field
-        $bankResponse = $result['data'] ?? [];
-
-        $this->logEvent($swapRef, 'ATM_TOKEN_BANK_RESPONSE', [
-            'bank_response' => $bankResponse
-        ]);
-
-        // Check if token was generated successfully
-        if (!isset($bankResponse['token_generated']) || $bankResponse['token_generated'] !== true) {
-            $errorMsg = $bankResponse['message'] ?? $bankResponse['error'] ?? 'Unknown error';
-            throw new RuntimeException("Failed to generate ATM token: " . $errorMsg);
-        }
-
-        $this->logEvent($swapRef, 'ATM_TOKEN_GENERATED', [
-            'institution' => $participant['provider_code'] ?? $destination['institution'],
-            'token_reference' => $bankResponse['token_reference'] ?? null
-        ]);
 
         // Return the unwrapped bank response
         return $bankResponse;
@@ -1742,6 +1856,3 @@ class SwapService
         }
     }
 }
-
-
-
