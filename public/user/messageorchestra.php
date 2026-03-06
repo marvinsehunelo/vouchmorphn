@@ -282,7 +282,7 @@ foreach ($institutions as $debtor) {
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
     <title>VOUCHMORPH · MESSAGE CLEARING HOUSE · <?php echo $countryCode; ?></title>
     <style>
         * {
@@ -297,12 +297,16 @@ foreach ($institutions as $debtor) {
             color: #ffffff;
             line-height: 1.4;
             font-weight: 300;
+            overflow-x: hidden;
+            width: 100%;
+            position: relative;
         }
 
         .container {
             max-width: 2000px;
             margin: 0 auto;
             padding: 2rem;
+            width: 100%;
         }
 
         /* Header Styles */
@@ -313,10 +317,12 @@ foreach ($institutions as $debtor) {
             margin-bottom: 2rem;
             padding: 1rem 0;
             border-bottom: 2px solid #222;
+            flex-wrap: wrap;
+            gap: 1rem;
         }
 
         .logo {
-            font-size: 1.4rem;
+            font-size: clamp(1rem, 4vw, 1.4rem);
             font-weight: 300;
             text-transform: uppercase;
             letter-spacing: 0.2em;
@@ -325,7 +331,7 @@ foreach ($institutions as $debtor) {
 
         .logo span {
             color: #888;
-            font-size: 0.8rem;
+            font-size: clamp(0.6rem, 2vw, 0.8rem);
             margin-left: 1rem;
         }
 
@@ -334,8 +340,9 @@ foreach ($institutions as $debtor) {
             background: #111;
             border: 1px solid #0f0;
             color: #0f0;
-            font-size: 0.8rem;
+            font-size: clamp(0.7rem, 2vw, 0.8rem);
             text-transform: uppercase;
+            white-space: nowrap;
         }
 
         /* Clearing-specific styles */
@@ -344,10 +351,12 @@ foreach ($institutions as $debtor) {
             justify-content: space-between;
             align-items: center;
             margin-bottom: 2rem;
+            flex-wrap: wrap;
+            gap: 1rem;
         }
 
         .clearing-title {
-            font-size: 2rem;
+            font-size: clamp(1.5rem, 5vw, 2rem);
             font-weight: 200;
             text-transform: uppercase;
             letter-spacing: 0.2em;
@@ -356,17 +365,19 @@ foreach ($institutions as $debtor) {
 
         .timeframe-selector {
             display: flex;
-            gap: 1rem;
+            gap: 0.5rem;
+            flex-wrap: wrap;
         }
 
         .timeframe-btn {
-            padding: 0.5rem 1.5rem;
+            padding: 0.5rem 1rem;
             background: transparent;
             border: 1px solid #333;
             color: #888;
             text-decoration: none;
-            font-size: 0.8rem;
+            font-size: clamp(0.7rem, 2vw, 0.8rem);
             text-transform: uppercase;
+            white-space: nowrap;
         }
 
         .timeframe-btn.active {
@@ -379,14 +390,14 @@ foreach ($institutions as $debtor) {
         .global-status {
             display: grid;
             grid-template-columns: repeat(4, 1fr);
-            gap: 2rem;
-            margin-bottom: 3rem;
+            gap: 1rem;
+            margin-bottom: 2rem;
         }
 
         .status-card {
             background: #111;
             border: 2px solid #222;
-            padding: 1.5rem;
+            padding: 1.5rem 1rem;
             position: relative;
             overflow: hidden;
         }
@@ -402,31 +413,34 @@ foreach ($institutions as $debtor) {
         }
 
         .status-label {
-            font-size: 0.7rem;
+            font-size: clamp(0.6rem, 1.5vw, 0.7rem);
             text-transform: uppercase;
             color: #666;
             letter-spacing: 0.1em;
             margin-bottom: 0.5rem;
+            white-space: nowrap;
         }
 
         .status-value {
-            font-size: 2.5rem;
+            font-size: clamp(1.5rem, 4vw, 2.5rem);
             font-weight: 200;
             font-family: 'Courier New', monospace;
             color: #0f0;
+            line-height: 1.2;
+            word-break: break-word;
         }
 
         .status-unit {
-            font-size: 0.8rem;
+            font-size: clamp(0.6rem, 1.5vw, 0.8rem);
             color: #444;
-            margin-left: 0.5rem;
+            margin-left: 0.25rem;
         }
 
         /* Zone 2: Main Clearing Area */
         .clearing-main {
             display: grid;
-            grid-template-columns: 350px 1fr;
-            gap: 2rem;
+            grid-template-columns: minmax(280px, 350px) 1fr;
+            gap: 1.5rem;
             margin-bottom: 2rem;
         }
 
@@ -441,7 +455,7 @@ foreach ($institutions as $debtor) {
         .feed-header {
             padding: 1rem;
             border-bottom: 2px solid #222;
-            font-size: 0.8rem;
+            font-size: clamp(0.7rem, 2vw, 0.8rem);
             text-transform: uppercase;
             color: #888;
             position: sticky;
@@ -472,7 +486,15 @@ foreach ($institutions as $debtor) {
             align-items: center;
             gap: 0.5rem;
             margin-bottom: 0.5rem;
-            font-size: 0.9rem;
+            font-size: clamp(0.8rem, 2vw, 0.9rem);
+            flex-wrap: wrap;
+        }
+
+        .swap-source, .swap-dest {
+            max-width: 120px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
 
         .swap-source {
@@ -481,6 +503,7 @@ foreach ($institutions as $debtor) {
 
         .swap-arrow {
             color: #444;
+            flex-shrink: 0;
         }
 
         .swap-dest {
@@ -490,8 +513,10 @@ foreach ($institutions as $debtor) {
         .swap-meta {
             display: flex;
             justify-content: space-between;
-            font-size: 0.8rem;
+            font-size: clamp(0.7rem, 1.8vw, 0.8rem);
             color: #666;
+            flex-wrap: wrap;
+            gap: 0.5rem;
         }
 
         .swap-amount {
@@ -503,6 +528,7 @@ foreach ($institutions as $debtor) {
             border: 1px solid;
             font-size: 0.6rem;
             text-transform: uppercase;
+            white-space: nowrap;
         }
 
         .status-completed { border-color: #0f0; color: #0f0; }
@@ -514,6 +540,7 @@ foreach ($institutions as $debtor) {
             background: #111;
             border: 2px solid #222;
             padding: 1.5rem;
+            overflow-x: auto;
         }
 
         .visualizer-header {
@@ -523,26 +550,31 @@ foreach ($institutions as $debtor) {
             margin-bottom: 2rem;
             padding-bottom: 1rem;
             border-bottom: 2px solid #222;
+            flex-wrap: wrap;
+            gap: 1rem;
         }
 
         .selected-swap-info {
-            font-size: 1.2rem;
+            font-size: clamp(1rem, 3vw, 1.2rem);
         }
 
         .selected-swap-ref {
             color: #0f0;
             font-family: 'Courier New', monospace;
+            word-break: break-all;
         }
 
         /* Message Flow Timeline */
         .message-timeline {
             margin: 2rem 0;
+            min-width: 300px;
         }
 
         .timeline-step {
             display: flex;
             margin-bottom: 1.5rem;
             position: relative;
+            flex-wrap: wrap;
         }
 
         .timeline-step::before {
@@ -570,6 +602,7 @@ foreach ($institutions as $debtor) {
             justify-content: center;
             margin-right: 1.5rem;
             z-index: 2;
+            flex-shrink: 0;
         }
 
         .timeline-content {
@@ -577,27 +610,36 @@ foreach ($institutions as $debtor) {
             background: #000;
             border: 2px solid #222;
             padding: 1.5rem;
+            min-width: 200px;
+            overflow-x: auto;
         }
 
         .timeline-title {
-            font-size: 1rem;
+            font-size: clamp(0.9rem, 2.5vw, 1rem);
             text-transform: uppercase;
             color: #0f0;
             margin-bottom: 0.5rem;
         }
 
         .timeline-subtitle {
-            font-size: 0.8rem;
+            font-size: clamp(0.7rem, 2vw, 0.8rem);
             color: #888;
             margin-bottom: 1rem;
+            word-break: break-word;
         }
 
         .timeline-details {
             background: #0a0a0a;
             padding: 1rem;
             font-family: 'Courier New', monospace;
-            font-size: 0.8rem;
+            font-size: clamp(0.7rem, 1.8vw, 0.8rem);
             overflow-x: auto;
+        }
+
+        .timeline-details pre {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            color: #ccc;
         }
 
         /* Zone 3: Net Positions */
@@ -606,6 +648,7 @@ foreach ($institutions as $debtor) {
             border: 2px solid #222;
             padding: 1.5rem;
             margin-bottom: 2rem;
+            overflow-x: auto;
         }
 
         .card-header {
@@ -615,10 +658,12 @@ foreach ($institutions as $debtor) {
             margin-bottom: 1.5rem;
             padding-bottom: 0.75rem;
             border-bottom: 2px solid #222;
+            flex-wrap: wrap;
+            gap: 1rem;
         }
 
         .card-title {
-            font-size: 1rem;
+            font-size: clamp(0.9rem, 2.5vw, 1rem);
             font-weight: 300;
             text-transform: uppercase;
             letter-spacing: 0.1em;
@@ -630,13 +675,14 @@ foreach ($institutions as $debtor) {
             background: #000;
             border: 1px solid #333;
             color: #888;
-            font-size: 0.7rem;
+            font-size: clamp(0.6rem, 1.8vw, 0.7rem);
             text-transform: uppercase;
+            white-space: nowrap;
         }
 
         .positions-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
             gap: 1.5rem;
             margin-top: 1.5rem;
         }
@@ -651,16 +697,20 @@ foreach ($institutions as $debtor) {
             display: flex;
             justify-content: space-between;
             margin-bottom: 1rem;
+            flex-wrap: wrap;
+            gap: 0.5rem;
         }
 
         .position-institution {
             font-weight: 400;
             color: #fff;
+            word-break: break-word;
         }
 
         .position-net {
-            font-size: 1.2rem;
+            font-size: clamp(1rem, 2.5vw, 1.2rem);
             font-family: 'Courier New', monospace;
+            white-space: nowrap;
         }
 
         .net-positive { color: #0f0; }
@@ -672,11 +722,12 @@ foreach ($institutions as $debtor) {
             border: 2px solid #222;
             padding: 1.5rem;
             margin-bottom: 2rem;
+            overflow-x: auto;
         }
 
         .matrix-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
             gap: 1rem;
             margin-top: 1.5rem;
         }
@@ -688,18 +739,28 @@ foreach ($institutions as $debtor) {
             display: flex;
             justify-content: space-between;
             align-items: center;
+            flex-wrap: wrap;
+            gap: 0.5rem;
         }
 
         .edge-path {
             display: flex;
             align-items: center;
             gap: 0.5rem;
+            flex-wrap: wrap;
+        }
+
+        .edge-from, .edge-to {
+            max-width: 100px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
 
         .edge-from { color: #ff6b6b; }
         .edge-to { color: #4ecdc4; }
         .edge-arrow { color: #444; }
-        .edge-amount { color: #0f0; font-weight: 400; }
+        .edge-amount { color: #0f0; font-weight: 400; white-space: nowrap; }
 
         /* Zone 5: Message Clearance Monitor */
         .clearance-monitor {
@@ -707,12 +768,14 @@ foreach ($institutions as $debtor) {
             border: 2px solid #222;
             padding: 1.5rem;
             margin-bottom: 2rem;
+            overflow-x: auto;
         }
 
         .clearance-table {
             width: 100%;
             border-collapse: collapse;
             margin-top: 1rem;
+            min-width: 500px;
         }
 
         .clearance-table th {
@@ -720,7 +783,7 @@ foreach ($institutions as $debtor) {
             padding: 1rem;
             background: #000;
             color: #888;
-            font-size: 0.7rem;
+            font-size: clamp(0.6rem, 1.8vw, 0.7rem);
             text-transform: uppercase;
         }
 
@@ -728,6 +791,7 @@ foreach ($institutions as $debtor) {
             padding: 1rem;
             border-bottom: 1px solid #222;
             font-family: 'Courier New', monospace;
+            font-size: clamp(0.7rem, 2vw, 0.8rem);
         }
 
         .success-rate {
@@ -736,6 +800,7 @@ foreach ($institutions as $debtor) {
             background: #1a3a1a;
             color: #0f0;
             border-radius: 3px;
+            white-space: nowrap;
         }
 
         /* Zone 6: Raw Message Console */
@@ -743,6 +808,7 @@ foreach ($institutions as $debtor) {
             background: #111;
             border: 2px solid #222;
             padding: 1.5rem;
+            overflow-x: auto;
         }
 
         .console-header {
@@ -750,13 +816,15 @@ foreach ($institutions as $debtor) {
             justify-content: space-between;
             align-items: center;
             margin-bottom: 1rem;
+            flex-wrap: wrap;
+            gap: 1rem;
         }
 
         .console-content {
             background: #000;
             padding: 1.5rem;
             font-family: 'Courier New', monospace;
-            font-size: 0.8rem;
+            font-size: clamp(0.7rem, 2vw, 0.8rem);
             overflow-x: auto;
             border: 2px solid #222;
             margin-bottom: 1rem;
@@ -773,16 +841,23 @@ foreach ($institutions as $debtor) {
             border-top: 1px solid #333;
         }
 
+        .console-content pre {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            color: #ccc;
+        }
+
         /* Replay Button */
         .replay-btn {
             padding: 0.5rem 1.5rem;
             background: transparent;
             border: 2px solid #0f0;
             color: #0f0;
-            font-size: 0.8rem;
+            font-size: clamp(0.7rem, 2vw, 0.8rem);
             text-transform: uppercase;
             cursor: pointer;
             transition: all 0.2s;
+            white-space: nowrap;
         }
 
         .replay-btn:hover {
@@ -806,7 +881,228 @@ foreach ($institutions as $debtor) {
             border-top: 2px solid #222;
             text-align: center;
             color: #444;
-            font-size: 0.7rem;
+            font-size: clamp(0.6rem, 2vw, 0.7rem);
+        }
+
+        /* ============================================ */
+        /* RESPONSIVE BREAKPOINTS */
+        /* ============================================ */
+
+        /* Large Tablets (max-width: 1200px) */
+        @media screen and (max-width: 1200px) {
+            .container {
+                padding: 1.5rem;
+            }
+            
+            .global-status {
+                gap: 1rem;
+            }
+            
+            .status-card {
+                padding: 1.25rem 0.75rem;
+            }
+        }
+
+        /* Tablets (max-width: 992px) */
+        @media screen and (max-width: 992px) {
+            .clearing-main {
+                grid-template-columns: 1fr;
+            }
+            
+            .swap-feed {
+                height: 400px;
+            }
+            
+            .global-status {
+                grid-template-columns: repeat(2, 1fr);
+            }
+            
+            .positions-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+
+        /* Mobile Landscape (max-width: 768px) */
+        @media screen and (max-width: 768px) {
+            .container {
+                padding: 1rem;
+            }
+            
+            .header {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+            
+            .status-badge {
+                align-self: flex-start;
+            }
+            
+            .clearing-header {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+            
+            .global-status {
+                gap: 0.75rem;
+            }
+            
+            .status-card {
+                padding: 1rem 0.75rem;
+            }
+            
+            .positions-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .matrix-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .timeline-step {
+                flex-direction: column;
+            }
+            
+            .timeline-step::before {
+                display: none;
+            }
+            
+            .timeline-icon {
+                margin-bottom: 1rem;
+            }
+            
+            .visualizer-header {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+            
+            .replay-btn {
+                width: 100%;
+            }
+        }
+
+        /* Mobile Portrait (max-width: 480px) */
+        @media screen and (max-width: 480px) {
+            .global-status {
+                grid-template-columns: 1fr;
+            }
+            
+            .timeframe-selector {
+                width: 100%;
+            }
+            
+            .timeframe-btn {
+                flex: 1;
+                text-align: center;
+                padding: 0.5rem 0.25rem;
+            }
+            
+            .swap-path {
+                font-size: 0.8rem;
+            }
+            
+            .swap-meta {
+                flex-direction: column;
+                gap: 0.25rem;
+            }
+            
+            .card-header {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+            
+            .position-header {
+                flex-direction: column;
+            }
+            
+            .edge-path {
+                width: 100%;
+            }
+            
+            .console-header {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+        }
+
+        /* Small Mobile (max-width: 360px) */
+        @media screen and (max-width: 360px) {
+            .container {
+                padding: 0.75rem;
+            }
+            
+            .status-card {
+                padding: 0.75rem 0.5rem;
+            }
+            
+            .status-value {
+                font-size: 1.2rem;
+            }
+            
+            .swap-source, .swap-dest {
+                max-width: 80px;
+            }
+            
+            .edge-from, .edge-to {
+                max-width: 70px;
+            }
+        }
+
+        /* Large Screens (min-width: 2000px) */
+        @media screen and (min-width: 2000px) {
+            .container {
+                max-width: 90%;
+            }
+            
+            .global-status {
+                gap: 2.5rem;
+            }
+            
+            .status-card {
+                padding: 2rem;
+            }
+            
+            .status-value {
+                font-size: 3rem;
+            }
+            
+            .positions-grid {
+                grid-template-columns: repeat(4, 1fr);
+            }
+        }
+
+        /* Touch-friendly improvements */
+        @media (hover: none) and (pointer: coarse) {
+            .swap-item {
+                padding: 1.2rem;
+            }
+            
+            .timeframe-btn, .replay-btn {
+                padding: 0.75rem 1.5rem;
+            }
+            
+            .swap-item:hover {
+                background: #111;
+            }
+        }
+
+        /* Print styles */
+        @media print {
+            body {
+                background: white;
+                color: black;
+            }
+            
+            .status-card, .swap-feed, .clearing-visualizer, 
+            .net-positions, .settlement-matrix, .clearance-monitor {
+                break-inside: avoid;
+                background: white;
+                color: black;
+                border: 1px solid #ccc;
+            }
+            
+            .replay-btn, .timeframe-selector {
+                display: none;
+            }
         }
     </style>
 </head>
@@ -861,9 +1157,9 @@ foreach ($institutions as $debtor) {
                 <a href="?clearing_view=<?php echo $view; ?>&timeframe=<?php echo $timeframe; ?>&swap=<?php echo $swap['swap_uuid']; ?>" style="text-decoration: none;">
                     <div class="swap-item <?php echo $selectedSwap === $swap['swap_uuid'] ? 'selected' : ''; ?>">
                         <div class="swap-path">
-                            <span class="swap-source"><?php echo htmlspecialchars(substr($swap['source_institution'] ?? 'UNKNOWN', 0, 10)); ?></span>
+                            <span class="swap-source" title="<?php echo htmlspecialchars($swap['source_institution'] ?? 'UNKNOWN'); ?>"><?php echo htmlspecialchars(substr($swap['source_institution'] ?? 'UNKNOWN', 0, 10)); ?></span>
                             <span class="swap-arrow">→</span>
-                            <span class="swap-dest"><?php echo htmlspecialchars(substr($swap['dest_institution'] ?? 'UNKNOWN', 0, 10)); ?></span>
+                            <span class="swap-dest" title="<?php echo htmlspecialchars($swap['dest_institution'] ?? 'UNKNOWN'); ?>"><?php echo htmlspecialchars(substr($swap['dest_institution'] ?? 'UNKNOWN', 0, 10)); ?></span>
                         </div>
                         <div class="swap-meta">
                             <span><?php echo htmlspecialchars(substr($swap['source_type'] ?? '', 0, 8)); ?> → <?php echo htmlspecialchars(substr($swap['dest_type'] ?? '', 0, 8)); ?></span>
@@ -981,7 +1277,7 @@ foreach ($institutions as $debtor) {
                             <div class="timeline-subtitle">Double-Entry Accounting · <?php echo date('H:i:s', strtotime($ledgerEntries[0]['created_at'])); ?></div>
                             <div class="timeline-details">
                                 <?php foreach ($ledgerEntries as $entry): ?>
-                                <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem; padding: 0.5rem; background: #0a0a0a;">
+                                <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem; padding: 0.5rem; background: #0a0a0a; flex-wrap: wrap; gap: 0.5rem;">
                                     <span style="color: #ff6b6b;">DEBIT: <?php echo htmlspecialchars($entry['debit_account_name'] ?? $entry['debit_account_id']); ?></span>
                                     <span style="color: #4ecdc4;">CREDIT: <?php echo htmlspecialchars($entry['credit_account_name'] ?? $entry['credit_account_id']); ?></span>
                                     <span style="color: #0f0;"><?php echo format_amount($entry['amount']); ?> BWP</span>
@@ -1000,7 +1296,7 @@ foreach ($institutions as $debtor) {
                             <div class="timeline-title">FEE SPLIT</div>
                             <div class="timeline-subtitle"><?php echo htmlspecialchars($fee['fee_type'] ?? 'Fee'); ?> · <?php echo date('H:i:s', strtotime($fee['collected_at'] ?? $fee['created_at'])); ?></div>
                             <div class="timeline-details">
-                                <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
+                                <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem; flex-wrap: wrap; gap: 0.5rem;">
                                     <span>Total Fee:</span>
                                     <span class="positive"><?php echo format_amount($fee['total_amount']); ?> BWP</span>
                                 </div>
@@ -1011,13 +1307,13 @@ foreach ($institutions as $debtor) {
                                 if (is_array($split)):
                                 foreach ($split as $party => $amount): 
                                 ?>
-                                <div style="display: flex; justify-content: space-between; margin-left: 1rem; color: #888;">
+                                <div style="display: flex; justify-content: space-between; margin-left: 1rem; color: #888; flex-wrap: wrap; gap: 0.5rem;">
                                     <span><?php echo strtoupper($party); ?>:</span>
                                     <span class="positive">+<?php echo format_amount($amount); ?> BWP</span>
                                 </div>
                                 <?php endforeach; endif; ?>
                                 <?php if (!empty($fee['vat_amount']) && $fee['vat_amount'] > 0): ?>
-                                <div style="display: flex; justify-content: space-between; margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid #333;">
+                                <div style="display: flex; justify-content: space-between; margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid #333; flex-wrap: wrap; gap: 0.5rem;">
                                     <span>VAT (14%):</span>
                                     <span><?php echo format_amount($fee['vat_amount']); ?> BWP</span>
                                 </div>
@@ -1035,12 +1331,12 @@ foreach ($institutions as $debtor) {
                             <div class="timeline-title">SETTLEMENT OBLIGATION</div>
                             <div class="timeline-subtitle">Queued for Net Settlement</div>
                             <div class="timeline-details">
-                                <div style="display: flex; justify-content: space-between;">
+                                <div style="display: flex; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem;">
                                     <span>Debtor: <?php echo htmlspecialchars($messageFlow['settlement']['debtor'] ?? 'N/A'); ?></span>
                                     <span>→</span>
                                     <span>Creditor: <?php echo htmlspecialchars($messageFlow['settlement']['creditor'] ?? 'N/A'); ?></span>
                                 </div>
-                                <div style="display: flex; justify-content: space-between; margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid #333;">
+                                <div style="display: flex; justify-content: space-between; margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid #333; flex-wrap: wrap; gap: 0.5rem;">
                                     <span>Amount:</span>
                                     <span class="positive"><?php echo format_amount($messageFlow['settlement']['amount'] ?? 0); ?> BWP</span>
                                 </div>
@@ -1050,7 +1346,7 @@ foreach ($institutions as $debtor) {
                     <?php endif; ?>
                 </div>
                 <?php else: ?>
-                <div style="text-align: center; padding: 4rem; color: #444;">
+                <div style="text-align: center; padding: 4rem 1rem; color: #444;">
                     <div style="font-size: 3rem; margin-bottom: 1rem;">↖️</div>
                     <div style="font-size: 1.2rem;">Select a swap from the live feed</div>
                     <div style="margin-top: 1rem; font-size: 0.8rem;">View the complete message clearing flow</div>
@@ -1081,7 +1377,7 @@ foreach ($institutions as $debtor) {
                             <?php echo $netPosition >= 0 ? '+' : ''; ?><?php echo format_amount($netPosition); ?> BWP
                         </span>
                     </div>
-                    <div style="display: flex; justify-content: space-between; font-size: 0.8rem; color: #666;">
+                    <div style="display: flex; justify-content: space-between; font-size: 0.8rem; color: #666; flex-wrap: wrap; gap: 0.5rem;">
                         <span>Receivable: <?php echo format_amount($nets['credit']); ?></span>
                         <span>Payable: <?php echo format_amount($nets['debit']); ?></span>
                     </div>
@@ -1102,9 +1398,9 @@ foreach ($institutions as $debtor) {
                 <?php foreach ($settlementMatrix as $edge): ?>
                 <div class="matrix-edge">
                     <div class="edge-path">
-                        <span class="edge-from"><?php echo htmlspecialchars(substr($edge['from'], 0, 8)); ?></span>
+                        <span class="edge-from" title="<?php echo htmlspecialchars($edge['from']); ?>"><?php echo htmlspecialchars(substr($edge['from'], 0, 8)); ?></span>
                         <span class="edge-arrow">→</span>
-                        <span class="edge-to"><?php echo htmlspecialchars(substr($edge['to'], 0, 8)); ?></span>
+                        <span class="edge-to" title="<?php echo htmlspecialchars($edge['to']); ?>"><?php echo htmlspecialchars(substr($edge['to'], 0, 8)); ?></span>
                     </div>
                     <span class="edge-amount"><?php echo format_amount($edge['amount']); ?></span>
                 </div>
@@ -1224,10 +1520,8 @@ foreach ($institutions as $debtor) {
             }, steps.length * 300 + 500);
         }
 
-        // Auto-refresh live feed every 10 seconds (optional)
-        // setTimeout(() => {
-        //     location.reload();
-        // }, 10000);
+        // Optional: Handle touch events for mobile
+        document.addEventListener('touchstart', function() {}, {passive: true});
     </script>
 </body>
 </html>
