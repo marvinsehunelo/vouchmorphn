@@ -32,7 +32,7 @@ $dateRange = match($timeframe) {
     'week' => ['start' => date('Y-m-d 00:00:00', strtotime('-7 days')), 'end' => date('Y-m-d 23:59:59')],
     'month' => ['start' => date('Y-m-d 00:00:00', strtotime('-30 days')), 'end' => date('Y-m-d 23:59:59')],
     default => ['start' => date('Y-m-d 00:00:00'), 'end' => date('Y-m-d 23:59:59')]
-];
+}];
 
 // ============================================================================
 // 1. GLOBAL SYSTEM STATUS
@@ -1142,3 +1142,4 @@ foreach ($institutions as $debtor) {
     </script>
 </body>
 </html>
+
