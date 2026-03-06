@@ -1431,71 +1431,83 @@ class SwapService
         ], 'authorize');
     }
 
-    /**
-     * UPDATED: Send withdrawal SMS using the SMS service
-     */
-    private function sendWithdrawalSms(string $phone, string $code, array $atmInfo, float $amount, string $currency): void
-    {
-        // Try to send via SMS service if available
-        if ($this->smsService) {
-            try {
-                $result = $this->smsService->sendWithdrawalCode(
-                    $phone,
-                    $code,
-                    $amount,
-                    $currency,
-                    $atmInfo
-                );
-                
-                $this->logEvent($swapRef ?? 'SMS', 'SMS_SENT_VIA_SERVICE', [
-                    'phone' => substr($phone, -8),
-                    'success' => $result['success'] ?? false,
-                    'message_id' => $result['message_id'] ?? null
-                ]);
-                
-                if ($result['success']) {
-                    return; // SMS sent successfully via service
-                }
-            } catch (Exception $e) {
-                $this->logEvent($swapRef ?? 'SMS', 'SMS_SERVICE_ERROR', [
-                    'error' => $e->getMessage()
-                ]);
-                // Fall back to outbox method
+   /**
+ * UPDATED: Send withdrawal SMS using the SMS service - DISABLED FOR TESTING
+ */
+private function sendWithdrawalSms(string $phone, string $code, array $atmInfo, float $amount, string $currency): void
+{
+    // TEMPORARILY DISABLED - Just log and return
+    error_log("=== SMS DISABLED FOR TESTING ===");
+    error_log("Would send SMS to: " . $phone);
+    error_log("Withdrawal code: " . $code);
+    error_log("Amount: " . $amount . " " . $currency);
+    error_log("ATM Info: " . json_encode($atmInfo));
+    
+    // Return without doing anything - this allows the swap to complete
+    return;
+    
+    /* ORIGINAL CODE - COMMENTED OUT
+    // Try to send via SMS service if available
+    if ($this->smsService) {
+        try {
+            $result = $this->smsService->sendWithdrawalCode(
+                $phone,
+                $code,
+                $amount,
+                $currency,
+                $atmInfo
+            );
+            
+            $this->logEvent($swapRef ?? 'SMS', 'SMS_SENT_VIA_SERVICE', [
+                'phone' => substr($phone, -8),
+                'success' => $result['success'] ?? false,
+                'message_id' => $result['message_id'] ?? null
+            ]);
+            
+            if ($result['success']) {
+                return; // SMS sent successfully via service
             }
+        } catch (Exception $e) {
+            $this->logEvent($swapRef ?? 'SMS', 'SMS_SERVICE_ERROR', [
+                'error' => $e->getMessage()
+            ]);
+            // Fall back to outbox method
         }
-        
-        // Fallback: Store in message_outbox for worker to process
-        $messageId = 'SMS-' . uniqid();
-        
-        $message = "🔐 VouchMorph Withdrawal\nCode: {$code}\n";
-        if (!empty($atmInfo['atm_pin'])) {
-            $message .= "ATM PIN: {$atmInfo['atm_pin']}\n";
-        }
-        $message .= "Amount: {$amount} {$currency}\nValid for 24 hours.\nKeep this code secure!";
-
-        $stmt = $this->swapDB->prepare("
-            INSERT INTO message_outbox 
-            (message_id, channel, destination, payload, status, created_at)
-            VALUES (?, 'SMS', ?, ?, 'PENDING', NOW())
-        ");
-
-        $stmt->execute([
-            $messageId,
-            $phone,
-            json_encode([
-                'message' => $message,
-                'code' => $code,
-                'atm_info' => $atmInfo,
-                'amount' => $amount,
-                'currency' => $currency
-            ])
-        ]);
-        
-        $this->logEvent($swapRef ?? 'SMS', 'SMS_QUEUED', [
-            'phone' => substr($phone, -8),
-            'message_id' => $messageId
-        ]);
     }
+    
+    // Fallback: Store in message_outbox for worker to process
+    $messageId = 'SMS-' . uniqid();
+    
+    $message = "🔐 VouchMorph Withdrawal\nCode: {$code}\n";
+    if (!empty($atmInfo['atm_pin'])) {
+        $message .= "ATM PIN: {$atmInfo['atm_pin']}\n";
+    }
+    $message .= "Amount: {$amount} {$currency}\nValid for 24 hours.\nKeep this code secure!";
+
+    $stmt = $this->swapDB->prepare("
+        INSERT INTO message_outbox 
+        (message_id, channel, destination, payload, status, created_at)
+        VALUES (?, 'SMS', ?, ?, 'PENDING', NOW())
+    ");
+
+    $stmt->execute([
+        $messageId,
+        $phone,
+        json_encode([
+            'message' => $message,
+            'code' => $code,
+            'atm_info' => $atmInfo,
+            'amount' => $amount,
+            'currency' => $currency
+        ])
+    ]);
+    
+    $this->logEvent($swapRef ?? 'SMS', 'SMS_QUEUED', [
+        'phone' => substr($phone, -8),
+        'message_id' => $messageId
+    ]);
+    */
+}
 
     private function queueSettlementMessage(string $swapRef, array $source, array $destination, float $amount, array $holdResult, ?array $feeDetails = null): void
     {
@@ -1856,3 +1868,4 @@ class SwapService
         }
     }
 }
+
