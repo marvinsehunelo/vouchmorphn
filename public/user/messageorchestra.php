@@ -3,8 +3,7 @@ declare(strict_types=1);
 
 namespace DASHBOARD;
 
-use PDO; // IMPORTANT: This tells PHP to use the global PDO class
-use DATA_PERSISTENCE_LAYER\config\DBConnection; // You already have this
+use PDO; // ADD THIS for PDO::FETCH_ASSOC
 
 // Same bootstrap code as regulationdemo.php
 ob_start();
@@ -18,7 +17,15 @@ if (!defined('APP_ROOT')) {
 
 // Database connection
 require_once APP_ROOT . '/src/DATA_PERSISTENCE_LAYER/config/DBConnection.php';
+use DATA_PERSISTENCE_LAYER\config\DBConnection;
 $db = DBConnection::getConnection();
+
+// ============================================================================
+// HELPER FUNCTION FOR SAFE NUMBER FORMATTING
+// ============================================================================
+function format_amount($amount, $decimals = 2) {
+    return number_format((float)$amount, $decimals);
+}
 
 // ============================================================================
 // FETCH MESSAGE CLEARING DATA
@@ -49,7 +56,7 @@ $tpsQuery = $db->prepare("
 ");
 $tpsQuery->execute([$dateRange['start'], $dateRange['end']]);
 $tpsData = $tpsQuery->fetch(PDO::FETCH_ASSOC);
-$tps = $tpsData['duration_seconds'] > 0 
+$tps = $tpsData && $tpsData['duration_seconds'] > 0 
     ? round($tpsData['tx_count'] / $tpsData['duration_seconds'], 2) 
     : 0;
 
@@ -105,13 +112,12 @@ $feeDetails = [];
 $apiCalls = [];
 
 if ($selectedSwap) {
-    // Get swap details
+    // Get swap details - FIXED: removed metadata column
     $swapDetailQuery = $db->prepare("
         SELECT 
             sr.*,
             sr.source_details,
-            sr.destination_details,
-            sr.metadata
+            sr.destination_details
         FROM swap_requests sr
         WHERE sr.swap_uuid = ?
     ");
@@ -158,16 +164,21 @@ if ($selectedSwap) {
         $feeDetails = $feeQuery->fetchAll(PDO::FETCH_ASSOC);
         
         // Get settlement queue entry
+        $sourceInstitution = is_array($swapDetails['source_details']) 
+            ? ($swapDetails['source_details']['institution'] ?? '') 
+            : (json_decode($swapDetails['source_details'], true)['institution'] ?? '');
+        
+        $destInstitution = is_array($swapDetails['destination_details']) 
+            ? ($swapDetails['destination_details']['institution'] ?? '') 
+            : (json_decode($swapDetails['destination_details'], true)['institution'] ?? '');
+        
         $settlementQuery = $db->prepare("
             SELECT * FROM settlement_queue 
             WHERE debtor = ? OR creditor = ?
             ORDER BY created_at DESC
             LIMIT 1
         ");
-        $settlementQuery->execute([
-            $swapDetails['source_details']['institution'] ?? '',
-            $swapDetails['destination_details']['institution'] ?? ''
-        ]);
+        $settlementQuery->execute([$sourceInstitution, $destInstitution]);
         $messageFlow['settlement'] = $settlementQuery->fetch(PDO::FETCH_ASSOC);
     }
 }
@@ -197,8 +208,8 @@ foreach ($netPositions as $pos) {
     if (!isset($institutionNets[$pos['creditor']])) {
         $institutionNets[$pos['creditor']] = ['debit' => 0, 'credit' => 0];
     }
-    $institutionNets[$pos['debtor']]['debit'] += $pos['net_amount'];
-    $institutionNets[$pos['creditor']]['credit'] += $pos['net_amount'];
+    $institutionNets[$pos['debtor']]['debit'] += (float)$pos['net_amount'];
+    $institutionNets[$pos['creditor']]['credit'] += (float)$pos['net_amount'];
 }
 
 // ============================================================================
@@ -255,7 +266,7 @@ foreach ($institutions as $debtor) {
                 $settlementMatrix[] = [
                     'from' => $debtor,
                     'to' => $creditor,
-                    'amount' => $amount
+                    'amount' => (float)$amount
                 ];
             }
         }
@@ -294,7 +305,7 @@ foreach ($institutions as $debtor) {
             padding: 2rem;
         }
 
-        /* Header Styles (same as your existing) */
+        /* Header Styles */
         .header {
             display: flex;
             justify-content: space-between;
@@ -597,6 +608,32 @@ foreach ($institutions as $debtor) {
             margin-bottom: 2rem;
         }
 
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.5rem;
+            padding-bottom: 0.75rem;
+            border-bottom: 2px solid #222;
+        }
+
+        .card-title {
+            font-size: 1rem;
+            font-weight: 300;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            color: #fff;
+        }
+
+        .card-badge {
+            padding: 0.25rem 1rem;
+            background: #000;
+            border: 1px solid #333;
+            color: #888;
+            font-size: 0.7rem;
+            text-transform: uppercase;
+        }
+
         .positions-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
@@ -722,6 +759,7 @@ foreach ($institutions as $debtor) {
             font-size: 0.8rem;
             overflow-x: auto;
             border: 2px solid #222;
+            margin-bottom: 1rem;
         }
 
         .console-request {
@@ -798,11 +836,11 @@ foreach ($institutions as $debtor) {
         <div class="global-status">
             <div class="status-card">
                 <div class="status-label">TRANSACTIONS PER SECOND</div>
-                <div class="status-value"><?php echo number_format($tps, 2); ?><span class="status-unit">TPS</span></div>
+                <div class="status-value"><?php echo format_amount($tps, 2); ?><span class="status-unit">TPS</span></div>
             </div>
             <div class="status-card">
                 <div class="status-label">TOTAL LIQUIDITY</div>
-                <div class="status-value"><?php echo number_format($liquidity / 1000000, 2); ?><span class="status-unit">M BWP</span></div>
+                <div class="status-value"><?php echo format_amount($liquidity / 1000000, 2); ?><span class="status-unit">M BWP</span></div>
             </div>
             <div class="status-card">
                 <div class="status-label">ACTIVE INSTITUTIONS</div>
@@ -823,13 +861,13 @@ foreach ($institutions as $debtor) {
                 <a href="?clearing_view=<?php echo $view; ?>&timeframe=<?php echo $timeframe; ?>&swap=<?php echo $swap['swap_uuid']; ?>" style="text-decoration: none;">
                     <div class="swap-item <?php echo $selectedSwap === $swap['swap_uuid'] ? 'selected' : ''; ?>">
                         <div class="swap-path">
-                            <span class="swap-source"><?php echo substr($swap['source_institution'] ?? 'UNKNOWN', 0, 10); ?></span>
+                            <span class="swap-source"><?php echo htmlspecialchars(substr($swap['source_institution'] ?? 'UNKNOWN', 0, 10)); ?></span>
                             <span class="swap-arrow">→</span>
-                            <span class="swap-dest"><?php echo substr($swap['dest_institution'] ?? 'UNKNOWN', 0, 10); ?></span>
+                            <span class="swap-dest"><?php echo htmlspecialchars(substr($swap['dest_institution'] ?? 'UNKNOWN', 0, 10)); ?></span>
                         </div>
                         <div class="swap-meta">
-                            <span><?php echo substr($swap['source_type'] ?? '', 0, 8); ?> → <?php echo substr($swap['dest_type'] ?? '', 0, 8); ?></span>
-                            <span class="swap-amount"><?php echo number_format($swap['amount'], 2); ?> BWP</span>
+                            <span><?php echo htmlspecialchars(substr($swap['source_type'] ?? '', 0, 8)); ?> → <?php echo htmlspecialchars(substr($swap['dest_type'] ?? '', 0, 8)); ?></span>
+                            <span class="swap-amount"><?php echo format_amount($swap['amount']); ?> BWP</span>
                         </div>
                         <div class="swap-meta">
                             <span><?php echo date('H:i:s', strtotime($swap['created_at'])); ?></span>
@@ -860,10 +898,17 @@ foreach ($institutions as $debtor) {
                             <div class="timeline-subtitle">POST /swap/execute · <?php echo date('H:i:s', strtotime($swapDetails['created_at'])); ?></div>
                             <div class="timeline-details">
                                 <pre><?php 
+                                $sourceDetails = is_string($swapDetails['source_details']) 
+                                    ? json_decode($swapDetails['source_details'], true) 
+                                    : $swapDetails['source_details'];
+                                $destDetails = is_string($swapDetails['destination_details']) 
+                                    ? json_decode($swapDetails['destination_details'], true) 
+                                    : $swapDetails['destination_details'];
+                                
                                 echo json_encode([
-                                    'source' => $swapDetails['source_details'],
-                                    'destination' => $swapDetails['destination_details'],
-                                    'amount' => $swapDetails['amount'],
+                                    'source' => $sourceDetails,
+                                    'destination' => $destDetails,
+                                    'amount' => (float)$swapDetails['amount'],
                                     'currency' => $swapDetails['from_currency']
                                 ], JSON_PRETTY_PRINT); 
                                 ?></pre>
@@ -877,15 +922,15 @@ foreach ($institutions as $debtor) {
                         <div class="timeline-icon">2</div>
                         <div class="timeline-content">
                             <div class="timeline-title">HOLD CREATED</div>
-                            <div class="timeline-subtitle">Participant: <?php echo $hold['participant_name']; ?> · <?php echo date('H:i:s', strtotime($hold['placed_at'])); ?></div>
+                            <div class="timeline-subtitle">Participant: <?php echo htmlspecialchars($hold['participant_name'] ?? 'Unknown'); ?> · <?php echo date('H:i:s', strtotime($hold['placed_at'] ?? $hold['created_at'])); ?></div>
                             <div class="timeline-details">
                                 <pre><?php 
                                 echo json_encode([
                                     'hold_reference' => $hold['hold_reference'],
                                     'asset_type' => $hold['asset_type'],
-                                    'amount' => $hold['amount'],
+                                    'amount' => (float)$hold['amount'],
                                     'status' => $hold['status'],
-                                    'expiry' => $hold['hold_expiry']
+                                    'expiry' => $hold['hold_expiry'] ?? 'N/A'
                                 ], JSON_PRETTY_PRINT); 
                                 ?></pre>
                             </div>
@@ -898,18 +943,28 @@ foreach ($institutions as $debtor) {
                     <div class="timeline-step">
                         <div class="timeline-icon">3</div>
                         <div class="timeline-content">
-                            <div class="timeline-title"><?php echo strtoupper($api['direction']); ?> API MESSAGE</div>
-                            <div class="timeline-subtitle"><?php echo $api['participant_name']; ?> · <?php echo $api['endpoint']; ?> · <?php echo date('H:i:s', strtotime($api['created_at'])); ?></div>
+                            <div class="timeline-title"><?php echo strtoupper($api['direction'] ?? 'OUTGOING'); ?> API MESSAGE</div>
+                            <div class="timeline-subtitle"><?php echo htmlspecialchars($api['participant_name'] ?? 'Unknown'); ?> · <?php echo htmlspecialchars($api['endpoint'] ?? 'N/A'); ?> · <?php echo date('H:i:s', strtotime($api['created_at'])); ?></div>
                             <div class="timeline-details">
                                 <div class="console-request">
                                     <strong>REQUEST:</strong>
-                                    <pre><?php echo json_encode($api['request_payload'], JSON_PRETTY_PRINT); ?></pre>
+                                    <pre><?php 
+                                    $requestPayload = is_string($api['request_payload']) 
+                                        ? json_decode($api['request_payload'], true) 
+                                        : $api['request_payload'];
+                                    echo json_encode($requestPayload, JSON_PRETTY_PRINT); 
+                                    ?></pre>
                                 </div>
                                 <div class="console-response">
-                                    <strong>RESPONSE (<?php echo $api['http_status_code']; ?>):</strong>
-                                    <pre><?php echo json_encode($api['response_payload'], JSON_PRETTY_PRINT); ?></pre>
+                                    <strong>RESPONSE (<?php echo $api['http_status_code'] ?? 'N/A'; ?>):</strong>
+                                    <pre><?php 
+                                    $responsePayload = is_string($api['response_payload']) 
+                                        ? json_decode($api['response_payload'], true) 
+                                        : $api['response_payload'];
+                                    echo json_encode($responsePayload, JSON_PRETTY_PRINT); 
+                                    ?></pre>
                                 </div>
-                                <?php if ($api['duration_ms']): ?>
+                                <?php if (!empty($api['duration_ms'])): ?>
                                 <div style="margin-top: 0.5rem; color: #888;">⏱️ <?php echo $api['duration_ms']; ?>ms</div>
                                 <?php endif; ?>
                             </div>
@@ -927,9 +982,9 @@ foreach ($institutions as $debtor) {
                             <div class="timeline-details">
                                 <?php foreach ($ledgerEntries as $entry): ?>
                                 <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem; padding: 0.5rem; background: #0a0a0a;">
-                                    <span style="color: #ff6b6b;">DEBIT: <?php echo $entry['debit_account_name'] ?? $entry['debit_account_id']; ?></span>
-                                    <span style="color: #4ecdc4;">CREDIT: <?php echo $entry['credit_account_name'] ?? $entry['credit_account_id']; ?></span>
-                                    <span style="color: #0f0;"><?php echo number_format($entry['amount'], 2); ?> BWP</span>
+                                    <span style="color: #ff6b6b;">DEBIT: <?php echo htmlspecialchars($entry['debit_account_name'] ?? $entry['debit_account_id']); ?></span>
+                                    <span style="color: #4ecdc4;">CREDIT: <?php echo htmlspecialchars($entry['credit_account_name'] ?? $entry['credit_account_id']); ?></span>
+                                    <span style="color: #0f0;"><?php echo format_amount($entry['amount']); ?> BWP</span>
                                 </div>
                                 <?php endforeach; ?>
                             </div>
@@ -943,25 +998,28 @@ foreach ($institutions as $debtor) {
                         <div class="timeline-icon">5</div>
                         <div class="timeline-content">
                             <div class="timeline-title">FEE SPLIT</div>
-                            <div class="timeline-subtitle"><?php echo $fee['fee_type']; ?> · <?php echo date('H:i:s', strtotime($fee['collected_at'])); ?></div>
+                            <div class="timeline-subtitle"><?php echo htmlspecialchars($fee['fee_type'] ?? 'Fee'); ?> · <?php echo date('H:i:s', strtotime($fee['collected_at'] ?? $fee['created_at'])); ?></div>
                             <div class="timeline-details">
                                 <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
                                     <span>Total Fee:</span>
-                                    <span class="positive"><?php echo number_format($fee['total_amount'], 2); ?> BWP</span>
+                                    <span class="positive"><?php echo format_amount($fee['total_amount']); ?> BWP</span>
                                 </div>
                                 <?php 
-                                $split = json_decode($fee['split_config'], true);
+                                $split = is_string($fee['split_config']) 
+                                    ? json_decode($fee['split_config'], true) 
+                                    : ($fee['split_config'] ?? []);
+                                if (is_array($split)):
                                 foreach ($split as $party => $amount): 
                                 ?>
                                 <div style="display: flex; justify-content: space-between; margin-left: 1rem; color: #888;">
                                     <span><?php echo strtoupper($party); ?>:</span>
-                                    <span class="positive">+<?php echo number_format($amount, 2); ?> BWP</span>
+                                    <span class="positive">+<?php echo format_amount($amount); ?> BWP</span>
                                 </div>
-                                <?php endforeach; ?>
-                                <?php if ($fee['vat_amount'] > 0): ?>
+                                <?php endforeach; endif; ?>
+                                <?php if (!empty($fee['vat_amount']) && $fee['vat_amount'] > 0): ?>
                                 <div style="display: flex; justify-content: space-between; margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid #333;">
                                     <span>VAT (14%):</span>
-                                    <span><?php echo number_format($fee['vat_amount'], 2); ?> BWP</span>
+                                    <span><?php echo format_amount($fee['vat_amount']); ?> BWP</span>
                                 </div>
                                 <?php endif; ?>
                             </div>
@@ -978,13 +1036,13 @@ foreach ($institutions as $debtor) {
                             <div class="timeline-subtitle">Queued for Net Settlement</div>
                             <div class="timeline-details">
                                 <div style="display: flex; justify-content: space-between;">
-                                    <span>Debtor: <?php echo $messageFlow['settlement']['debtor']; ?></span>
+                                    <span>Debtor: <?php echo htmlspecialchars($messageFlow['settlement']['debtor'] ?? 'N/A'); ?></span>
                                     <span>→</span>
-                                    <span>Creditor: <?php echo $messageFlow['settlement']['creditor']; ?></span>
+                                    <span>Creditor: <?php echo htmlspecialchars($messageFlow['settlement']['creditor'] ?? 'N/A'); ?></span>
                                 </div>
                                 <div style="display: flex; justify-content: space-between; margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid #333;">
                                     <span>Amount:</span>
-                                    <span class="positive"><?php echo number_format($messageFlow['settlement']['amount'], 2); ?> BWP</span>
+                                    <span class="positive"><?php echo format_amount($messageFlow['settlement']['amount'] ?? 0); ?> BWP</span>
                                 </div>
                             </div>
                         </div>
@@ -1008,22 +1066,28 @@ foreach ($institutions as $debtor) {
                 <div class="card-badge">REAL-TIME SETTLEMENT</div>
             </div>
             <div class="positions-grid">
+                <?php if (empty($institutionNets)): ?>
+                <div class="position-card" style="grid-column: 1/-1; text-align: center; color: #666;">
+                    No net positions yet
+                </div>
+                <?php else: ?>
                 <?php foreach ($institutionNets as $institution => $nets): 
-                    $netPosition = $nets['credit'] - $nets['debit'];
+                    $netPosition = (float)($nets['credit'] - $nets['debit']);
                 ?>
                 <div class="position-card">
                     <div class="position-header">
-                        <span class="position-institution"><?php echo $institution; ?></span>
+                        <span class="position-institution"><?php echo htmlspecialchars($institution); ?></span>
                         <span class="position-net <?php echo $netPosition >= 0 ? 'net-positive' : 'net-negative'; ?>">
-                            <?php echo $netPosition >= 0 ? '+' : ''; ?><?php echo number_format($netPosition, 2); ?> BWP
+                            <?php echo $netPosition >= 0 ? '+' : ''; ?><?php echo format_amount($netPosition); ?> BWP
                         </span>
                     </div>
                     <div style="display: flex; justify-content: space-between; font-size: 0.8rem; color: #666;">
-                        <span>Receivable: <?php echo number_format($nets['credit'], 2); ?></span>
-                        <span>Payable: <?php echo number_format($nets['debit'], 2); ?></span>
+                        <span>Receivable: <?php echo format_amount($nets['credit']); ?></span>
+                        <span>Payable: <?php echo format_amount($nets['debit']); ?></span>
                     </div>
                 </div>
                 <?php endforeach; ?>
+                <?php endif; ?>
             </div>
         </div>
 
@@ -1038,11 +1102,11 @@ foreach ($institutions as $debtor) {
                 <?php foreach ($settlementMatrix as $edge): ?>
                 <div class="matrix-edge">
                     <div class="edge-path">
-                        <span class="edge-from"><?php echo substr($edge['from'], 0, 8); ?></span>
+                        <span class="edge-from"><?php echo htmlspecialchars(substr($edge['from'], 0, 8)); ?></span>
                         <span class="edge-arrow">→</span>
-                        <span class="edge-to"><?php echo substr($edge['to'], 0, 8); ?></span>
+                        <span class="edge-to"><?php echo htmlspecialchars(substr($edge['to'], 0, 8)); ?></span>
                     </div>
-                    <span class="edge-amount"><?php echo number_format($edge['amount'], 2); ?></span>
+                    <span class="edge-amount"><?php echo format_amount($edge['amount']); ?></span>
                 </div>
                 <?php endforeach; ?>
             </div>
@@ -1065,18 +1129,24 @@ foreach ($institutions as $debtor) {
                     </tr>
                 </thead>
                 <tbody>
+                    <?php if (empty($clearanceMetrics)): ?>
+                    <tr><td colspan="4" style="text-align: center; color: #666;">No message data for this period</td></tr>
+                    <?php else: ?>
                     <?php foreach ($clearanceMetrics as $metric): ?>
                     <tr>
-                        <td><?php echo $metric['participant_name']; ?></td>
-                        <td><?php echo $metric['total_messages']; ?></td>
+                        <td><?php echo htmlspecialchars($metric['participant_name'] ?? 'Unknown'); ?></td>
+                        <td><?php echo (int)($metric['total_messages'] ?? 0); ?></td>
                         <td>
                             <span class="success-rate">
-                                <?php echo number_format(($metric['successful'] / $metric['total_messages']) * 100, 1); ?>%
+                                <?php 
+                                $successRate = ((float)($metric['successful'] ?? 0) / max(1, (float)($metric['total_messages'] ?? 1))) * 100;
+                                echo format_amount($successRate, 1); ?>%
                             </span>
                         </td>
-                        <td><?php echo round($metric['avg_response_time']); ?> ms</td>
+                        <td><?php echo round((float)($metric['avg_response_time'] ?? 0)); ?> ms</td>
                     </tr>
                     <?php endforeach; ?>
+                    <?php endif; ?>
                 </tbody>
             </table>
         </div>
@@ -1091,15 +1161,25 @@ foreach ($institutions as $debtor) {
             <?php foreach ($apiCalls as $api): ?>
             <div class="console-content">
                 <div class="console-request">
-                    <strong>➡️ <?php echo strtoupper($api['direction']); ?> REQUEST to <?php echo $api['participant_name']; ?></strong>
-                    <pre><?php echo json_encode($api['request_payload'], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES); ?></pre>
+                    <strong>➡️ <?php echo strtoupper($api['direction'] ?? 'OUTGOING'); ?> REQUEST to <?php echo htmlspecialchars($api['participant_name'] ?? 'Unknown'); ?></strong>
+                    <pre><?php 
+                    $requestPayload = is_string($api['request_payload']) 
+                        ? json_decode($api['request_payload'], true) 
+                        : ($api['request_payload'] ?? []);
+                    echo json_encode($requestPayload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES); 
+                    ?></pre>
                 </div>
                 <div class="console-response">
-                    <strong>⬅️ RESPONSE (HTTP <?php echo $api['http_status_code']; ?>)</strong>
-                    <pre><?php echo json_encode($api['response_payload'], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES); ?></pre>
+                    <strong>⬅️ RESPONSE (HTTP <?php echo $api['http_status_code'] ?? 'N/A'; ?>)</strong>
+                    <pre><?php 
+                    $responsePayload = is_string($api['response_payload']) 
+                        ? json_decode($api['response_payload'], true) 
+                        : ($api['response_payload'] ?? []);
+                    echo json_encode($responsePayload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES); 
+                    ?></pre>
                 </div>
-                <?php if ($api['curl_error']): ?>
-                <div style="color: #f00; margin-top: 0.5rem;">⚠️ CURL Error: <?php echo $api['curl_error']; ?></div>
+                <?php if (!empty($api['curl_error'])): ?>
+                <div style="color: #f00; margin-top: 0.5rem;">⚠️ CURL Error: <?php echo htmlspecialchars($api['curl_error']); ?></div>
                 <?php endif; ?>
             </div>
             <?php endforeach; ?>
@@ -1109,7 +1189,14 @@ foreach ($institutions as $debtor) {
         <!-- FOOTER -->
         <div class="footer">
             <p>VOUCHMORPH · MESSAGE CLEARING HOUSE · DOUBLE-ENTRY VERIFIED · ISO20022 COMPLIANT</p>
-            <p style="margin-top: 0.5rem;">CLEARED: <?php echo count($liveSwaps); ?> SWAPS · NET EXPOSURE: <?php echo number_format(array_sum(array_column($institutionNets, 'credit')) - array_sum(array_column($institutionNets, 'debit')), 2); ?> BWP</p>
+            <p style="margin-top: 0.5rem;">
+                CLEARED: <?php echo count($liveSwaps); ?> SWAPS · 
+                NET EXPOSURE: <?php 
+                $totalCredit = array_sum(array_column($institutionNets, 'credit'));
+                $totalDebit = array_sum(array_column($institutionNets, 'debit'));
+                echo format_amount($totalCredit - $totalDebit); 
+                ?> BWP
+            </p>
         </div>
     </div>
 
@@ -1137,13 +1224,10 @@ foreach ($institutions as $debtor) {
             }, steps.length * 300 + 500);
         }
 
-        // Auto-refresh live feed every 10 seconds
-        setTimeout(() => {
-            location.reload();
-        }, 10000);
+        // Auto-refresh live feed every 10 seconds (optional)
+        // setTimeout(() => {
+        //     location.reload();
+        // }, 10000);
     </script>
 </body>
 </html>
-
-
-
