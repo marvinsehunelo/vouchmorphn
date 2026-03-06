@@ -823,3 +823,12 @@ COMMENT ON TABLE api_message_logs IS 'Logs of all API calls to/from participants
 -- =========================================================
 -- END OF SCHEMA
 -- =========================================================
+
+ALTER TABLE swap_vouchers 
+ADD COLUMN IF NOT EXISTS code_hash VARCHAR(255),
+ADD COLUMN IF NOT EXISTS attempts INT DEFAULT 0;
+
+-- 3. Create indexes for performance
+CREATE INDEX IF NOT EXISTS idx_net_positions_debtor_creditor ON net_positions(debtor, creditor);
+CREATE INDEX IF NOT EXISTS idx_swap_vouchers_code_hash ON swap_vouchers(code_hash) WHERE status = 'ACTIVE';
+
