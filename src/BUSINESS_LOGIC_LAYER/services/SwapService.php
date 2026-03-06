@@ -1438,38 +1438,59 @@ class SwapService
         }
     }
 
-    private function recordMasterSwap(string $swapRef, array $source, array $destination, string $currency, array $verificationResult): int
-    {
-        $sourceDetails = [
-            'institution' => $source['institution'],
-            'asset_type' => $source['asset_type'],
-            'reference' => $this->maskIdentifier($source),
-            'holder_name' => $verificationResult['asset_details']['holder_name'] ?? null,
-            'available_balance' => $verificationResult['asset_details']['available_balance'] ?? null
-        ];
+ private function recordMasterSwap(string $swapRef, array $source, array $destination, string $currency, array $verificationResult): int
+{
+    $sourceDetails = [
+        'institution' => $source['institution'],
+        'asset_type' => $source['asset_type'],
+        'reference' => $this->maskIdentifier($source),
+        'holder_name' => $verificationResult['asset_details']['holder_name'] ?? null,
+        'available_balance' => $verificationResult['asset_details']['available_balance'] ?? null
+    ];
 
-        $destinationDetails = [
-            'institution' => $destination['institution'],
-            'asset_type' => $destination['asset_type'],
-            'beneficiary' => $destination['cashout']['beneficiary_phone'] ?? 
-                            $destination['beneficiary_account'] ?? 
-                            $destination['beneficiary_wallet'] ?? null
-        ];
-
-        $stmt = $this->swapDB->prepare("
-            INSERT INTO swap_requests 
-            (swap_uuid, from_currency, to_currency, amount, source_details, destination_details, status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'pending', NOW())
-            RETURNING swap_id
-        ");
-
-        $stmt->execute([
-            $swapRef, $currency, $currency, $source['amount'],
-            json_encode($sourceDetails), json_encode($destinationDetails)
-        ]);
-
-        return $stmt->fetchColumn();
+    // Determine destination asset type based on delivery_mode or available fields
+    $destinationAssetType = 'UNKNOWN';
+    
+    if (isset($destination['delivery_mode']) && $destination['delivery_mode'] === 'cashout') {
+        $destinationAssetType = 'CASHOUT';
+    } elseif (isset($destination['asset_type'])) {
+        $destinationAssetType = $destination['asset_type'];
+    } elseif (isset($destination['beneficiary_account'])) {
+        $destinationAssetType = 'ACCOUNT';
+    } elseif (isset($destination['beneficiary_wallet'])) {
+        $destinationAssetType = 'WALLET';
+    } elseif (isset($destination['cashout'])) {
+        $destinationAssetType = 'CASHOUT';
     }
+
+    $destinationDetails = [
+        'institution' => $destination['institution'],
+        'asset_type' => $destinationAssetType,
+        'delivery_mode' => $destination['delivery_mode'] ?? 'deposit',
+        'beneficiary' => $destination['cashout']['beneficiary_phone'] ?? 
+                        $destination['beneficiary_account'] ?? 
+                        $destination['beneficiary_wallet'] ?? 
+                        $destination['cashout']['beneficiary'] ??
+                        null
+    ];
+
+    // Log for debugging
+    error_log("[recordMasterSwap] Destination details: " . json_encode($destinationDetails));
+
+    $stmt = $this->swapDB->prepare("
+        INSERT INTO swap_requests 
+        (swap_uuid, from_currency, to_currency, amount, source_details, destination_details, status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'pending', NOW())
+        RETURNING swap_id
+    ");
+
+    $stmt->execute([
+        $swapRef, $currency, $currency, $source['amount'],
+        json_encode($sourceDetails), json_encode($destinationDetails)
+    ]);
+
+    return $stmt->fetchColumn();
+}
 
     private function updateSwapLedgerFees(string $swapRef, string $from, string $to, float $amount, string $currency): void
     {
@@ -1721,5 +1742,6 @@ class SwapService
         }
     }
 }
+
 
 
