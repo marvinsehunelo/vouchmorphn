@@ -1576,24 +1576,65 @@ class SwapService
     }
 
     private function maskIdentifier(array $source): string
-    {
-        $assetType = strtoupper($source['asset_type'] ?? 'UNKNOWN');
-        
-        switch ($assetType) {
-            case 'VOUCHER':
-                return 'VCH-' . substr($source['voucher']['voucher_number'] ?? '', -4);
-            case 'ACCOUNT':
-                return 'ACC-' . substr($source['account']['account_number'] ?? '', -4);
-            case 'WALLET':
-                return 'WLT-' . substr($source['wallet']['wallet_phone'] ?? '', -8);
-            case 'E-WALLET':
-                return 'EWL-' . substr($source['ewallet']['ewallet_phone'] ?? '', -8);
-            case 'CARD':
-                return 'CRD-' . substr($source['card']['card_number'] ?? '', -4);
-            default:
-                return 'SRC-' . uniqid();
-        }
+{
+    // Safely determine asset type with multiple fallbacks
+    $assetType = 'UNKNOWN';
+    
+    // Try to get asset_type from various possible locations
+    if (isset($source['asset_type'])) {
+        $assetType = strtoupper($source['asset_type']);
+    } elseif (isset($source['type'])) {
+        $assetType = strtoupper($source['type']);
+    } elseif (isset($source['source']['asset_type'])) {
+        $assetType = strtoupper($source['source']['asset_type']);
     }
+    
+    // Debug log to see what we're working with
+    error_log("[maskIdentifier] Asset type: {$assetType}, Source keys: " . implode(', ', array_keys($source)));
+    
+    switch ($assetType) {
+        case 'VOUCHER':
+            $voucherNumber = $source['voucher']['voucher_number'] ?? $source['voucher_number'] ?? '';
+            return 'VCH-' . substr($voucherNumber, -4);
+            
+        case 'ACCOUNT':
+            $accountNumber = $source['account']['account_number'] ?? $source['account_number'] ?? '';
+            return 'ACC-' . substr($accountNumber, -4);
+            
+        case 'WALLET':
+            $phone = $source['wallet']['wallet_phone'] ?? 
+                     $source['wallet']['phone'] ?? 
+                     $source['wallet_phone'] ?? 
+                     $source['phone'] ?? 
+                     '';
+            return 'WLT-' . substr($phone, -8);
+            
+        case 'E-WALLET':
+            $phone = $source['ewallet']['ewallet_phone'] ?? 
+                     $source['ewallet']['phone'] ?? 
+                     $source['ewallet_phone'] ?? 
+                     $source['phone'] ?? 
+                     '';
+            return 'EWL-' . substr($phone, -8);
+            
+        case 'CARD':
+            $cardNumber = $source['card']['card_number'] ?? $source['card_number'] ?? '';
+            return 'CRD-' . substr($cardNumber, -4);
+            
+        default:
+            // If we can't determine type, try to find any identifier
+            if (isset($source['phone'])) {
+                return 'USR-' . substr($source['phone'], -8);
+            }
+            if (isset($source['account_number'])) {
+                return 'ACC-' . substr($source['account_number'], -4);
+            }
+            if (isset($source['voucher_number'])) {
+                return 'VCH-' . substr($source['voucher_number'], -4);
+            }
+            return 'SRC-' . substr(uniqid(), -6);
+    }
+}
 
     private function logEvent(string $msgId, string $phase, array $data): void
     {
@@ -1680,4 +1721,5 @@ class SwapService
         }
     }
 }
+
 
