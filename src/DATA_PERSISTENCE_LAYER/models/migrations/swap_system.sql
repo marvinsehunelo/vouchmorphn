@@ -832,3 +832,56 @@ ADD COLUMN IF NOT EXISTS attempts INT DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_net_positions_debtor_creditor ON net_positions(debtor, creditor);
 CREATE INDEX IF NOT EXISTS idx_swap_vouchers_code_hash ON swap_vouchers(code_hash) WHERE status = 'ACTIVE';
 
+-- =========================================================
+-- FIX 1: Create message_outbox table if it doesn't exist
+-- =========================================================
+CREATE TABLE IF NOT EXISTS message_outbox (
+    id SERIAL PRIMARY KEY,
+    message_id VARCHAR(255) UNIQUE NOT NULL,
+    channel VARCHAR(50) NOT NULL,
+    destination VARCHAR(255) NOT NULL,
+    payload JSONB NOT NULL,
+    status VARCHAR(50) DEFAULT 'PENDING',
+    attempts INT DEFAULT 0,
+    last_error TEXT,
+    last_attempt TIMESTAMP,
+    processed_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- =========================================================
+-- FIX 2: Create swap_vouchers table if not exists (for cashouts)
+-- =========================================================
+CREATE TABLE IF NOT EXISTS swap_vouchers (
+    voucher_id SERIAL PRIMARY KEY,
+    swap_id INTEGER,
+    code_hash VARCHAR(255) NOT NULL,
+    code_suffix VARCHAR(4),
+    amount NUMERIC(20,4) NOT NULL,
+    expiry_at TIMESTAMP NOT NULL,
+    status VARCHAR(20) DEFAULT 'ACTIVE',
+    redeemed_at TIMESTAMP,
+    claimant_phone VARCHAR(20),
+    is_cardless_redemption BOOLEAN DEFAULT TRUE,
+    attempts INT DEFAULT 0,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- =========================================================
+-- FIX 3: Ensure swap_requests has all needed columns
+-- =========================================================
+ALTER TABLE swap_requests 
+ADD COLUMN IF NOT EXISTS source_details JSONB,
+ADD COLUMN IF NOT EXISTS destination_details JSONB;
+
+-- =========================================================
+-- FIX 4: Create indexes for performance
+-- =========================================================
+CREATE INDEX IF NOT EXISTS idx_message_outbox_status ON message_outbox(status);
+CREATE INDEX IF NOT EXISTS idx_message_outbox_created ON message_outbox(created_at);
+CREATE INDEX IF NOT EXISTS idx_swap_vouchers_code_hash ON swap_vouchers(code_hash);
+CREATE INDEX IF NOT EXISTS idx_swap_vouchers_status ON swap_vouchers(status);
+
+
