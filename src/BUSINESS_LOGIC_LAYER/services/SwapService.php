@@ -1535,6 +1535,238 @@ public function cancelSwap(string $swapRef, string $reason = 'User requested can
         error_log("[QUEUE_SETTLEMENT] Success");
     }
 
+// ============================================================================
+// ADD THESE CONSTANTS to your class (with your other constants)
+// ============================================================================
+private const HOLD_EXPIRY_HOURS = 24;
+private const VOUCHER_EXPIRY_HOURS = 24;
+private const EXPIRY_BATCH_SIZE = 100;
+
+// ============================================================================
+// ADD THESE METHODS for expiry processing
+// ============================================================================
+
+/**
+ * Process expired holds - to be called by cron job every 5-10 minutes
+ * This handles automatic release of holds that have passed their expiry
+ * 
+ * @return array Statistics of processed holds
+ */
+public function processExpiredHolds(): array
+{
+    $stats = [
+        'processed' => 0,
+        'failed' => 0,
+        'errors' => [],
+        'holds_released' => 0,
+        'swaps_updated' => 0
+    ];
+    
+    try {
+        // Find expired holds that are still ACTIVE
+        $expired = $this->swapDB->prepare("
+            SELECT 
+                ht.hold_id,
+                ht.hold_reference,
+                ht.swap_reference,
+                ht.participant_id,
+                ht.amount,
+                ht.hold_expiry,
+                p.config as participant_config,
+                sr.swap_id,
+                sr.status as swap_status
+            FROM hold_transactions ht
+            JOIN swap_requests sr ON ht.swap_reference = sr.swap_uuid
+            LEFT JOIN participants p ON ht.participant_id = p.participant_id
+            WHERE ht.status = 'ACTIVE' 
+            AND ht.hold_expiry < NOW()
+            ORDER BY ht.hold_expiry ASC
+            LIMIT :limit
+            FOR UPDATE SKIP LOCKED
+        ");
+        $expired->bindValue(':limit', self::EXPIRY_BATCH_SIZE, PDO::PARAM_INT);
+        $expired->execute();
+        
+        while ($hold = $expired->fetch(PDO::FETCH_ASSOC)) {
+            try {
+                $this->swapDB->beginTransaction();
+                
+                $this->logEvent($hold['swap_reference'], 'EXPIRY_PROCESSING', [
+                    'hold_reference' => $hold['hold_reference'],
+                    'expiry_time' => $hold['hold_expiry']
+                ]);
+                
+                // 1. Release the hold at the bank if we have participant config
+                $holdReleased = false;
+                if ($hold['participant_config']) {
+                    try {
+                        $participant = json_decode($hold['participant_config'], true);
+                        $bankClient = new GenericBankClient($participant);
+                        
+                        $releaseResult = $bankClient->releaseHold([
+                            'hold_reference' => $hold['hold_reference'],
+                            'reason' => 'Hold expired after ' . self::HOLD_EXPIRY_HOURS . ' hours'
+                        ]);
+                        
+                        if (isset($releaseResult['success']) && $releaseResult['success'] === true) {
+                            $holdReleased = true;
+                        } else {
+                            $errorMsg = $releaseResult['message'] ?? 'Unknown error';
+                            throw new RuntimeException("Bank release failed: " . $errorMsg);
+                        }
+                    } catch (Exception $e) {
+                        // Log but continue - we still need to update our DB
+                        $this->logEvent($hold['swap_reference'], 'EXPIRY_BANK_RELEASE_FAILED', [
+                            'hold_reference' => $hold['hold_reference'],
+                            'error' => $e->getMessage()
+                        ]);
+                    }
+                }
+                
+                // 2. Update hold status to EXPIRED
+                $updateHold = $this->swapDB->prepare("
+                    UPDATE hold_transactions 
+                    SET status = 'EXPIRED', 
+                        released_at = NOW(),
+                        metadata = jsonb_set(
+                            COALESCE(metadata, '{}'::jsonb),
+                            '{expiry_details}',
+                            jsonb_build_object(
+                                'expired_at', to_jsonb(NOW()),
+                                'bank_released', to_jsonb(?),
+                                'reason', 'Auto-expired after 24 hours'
+                            )
+                        )
+                    WHERE hold_reference = ?
+                ");
+                $updateHold->execute([$holdReleased ? 'true' : 'false', $hold['hold_reference']]);
+                $stats['holds_released']++;
+                
+                // 3. Update swap request status to expired
+                $updateSwap = $this->swapDB->prepare("
+                    UPDATE swap_requests 
+                    SET status = 'expired',
+                        metadata = jsonb_set(
+                            COALESCE(metadata, '{}'::jsonb),
+                            '{expiry}',
+                            jsonb_build_object(
+                                'expired_at', to_jsonb(NOW()),
+                                'hold_reference', to_jsonb(?)
+                            )
+                        )
+                    WHERE swap_uuid = ?
+                    AND status IN ('pending', 'processing')
+                ");
+                $updateSwap->execute([$hold['hold_reference'], $hold['swap_reference']]);
+                $stats['swaps_updated'] += $updateSwap->rowCount();
+                
+                // 4. Void any associated vouchers
+                $voidVoucher = $this->swapDB->prepare("
+                    UPDATE swap_vouchers 
+                    SET status = 'EXPIRED', 
+                        voided_at = NOW(),
+                        void_reason = 'Associated hold expired'
+                    WHERE swap_id = ? 
+                    AND status = 'ACTIVE'
+                ");
+                $voidVoucher->execute([$hold['swap_id']]);
+                
+                // 5. Remove from settlement queue if any pending
+                $removeSettlement = $this->swapDB->prepare("
+                    DELETE FROM settlement_queue 
+                    WHERE hold_reference = ? AND status = 'PENDING'
+                ");
+                $removeSettlement->execute([$hold['hold_reference']]);
+                
+                $this->logEvent($hold['swap_reference'], 'EXPIRY_PROCESSED', [
+                    'hold_reference' => $hold['hold_reference'],
+                    'bank_released' => $holdReleased
+                ]);
+                
+                $this->swapDB->commit();
+                $stats['processed']++;
+                
+            } catch (Exception $e) {
+                $this->swapDB->rollBack();
+                $stats['failed']++;
+                $stats['errors'][] = [
+                    'hold' => $hold['hold_reference'],
+                    'error' => $e->getMessage()
+                ];
+                
+                $this->logEvent($hold['swap_reference'], 'EXPIRY_PROCESSING_FAILED', [
+                    'hold_reference' => $hold['hold_reference'],
+                    'error' => $e->getMessage()
+                ]);
+            }
+        }
+        
+    } catch (Exception $e) {
+        error_log("[EXPIRY] Fatal error in processExpiredHolds: " . $e->getMessage());
+        $stats['fatal_error'] = $e->getMessage();
+    }
+    
+    return $stats;
+}
+
+/**
+ * Process expired vouchers - to be called by cron job
+ * Simple cleanup of expired vouchers that were never used
+ * 
+ * @return array Statistics of processed vouchers
+ */
+public function processExpiredVouchers(): array
+{
+    $stats = ['processed' => 0];
+    
+    try {
+        // Direct update of expired vouchers
+        $stmt = $this->swapDB->prepare("
+            UPDATE swap_vouchers 
+            SET status = 'EXPIRED',
+                metadata = jsonb_set(
+                    COALESCE(metadata, '{}'::jsonb),
+                    '{expired_at}',
+                    to_jsonb(NOW())
+                )
+            WHERE expiry_at < NOW() 
+            AND status = 'ACTIVE'
+        ");
+        $stmt->execute();
+        
+        $stats['processed'] = $stmt->rowCount();
+        
+        if ($stats['processed'] > 0) {
+            $this->logEvent('CRON', 'VOUCHER_EXPIRY_PROCESSED', [
+                'count' => $stats['processed']
+            ]);
+        }
+        
+    } catch (Exception $e) {
+        error_log("[EXPIRY] Failed to process expired vouchers: " . $e->getMessage());
+        $stats['error'] = $e->getMessage();
+    }
+    
+    return $stats;
+}
+
+/**
+ * Full expiry processing - to be called by cron job
+ * This runs both hold and voucher expiry in one go
+ */
+public function processAllExpired(): array
+{
+    $result = [
+        'holds' => $this->processExpiredHolds(),
+        'vouchers' => $this->processExpiredVouchers(),
+        'timestamp' => date('Y-m-d H:i:s')
+    ];
+    
+    error_log("[EXPIRY] Completed: " . json_encode($result));
+    
+    return $result;
+}
+    
     private function handleUndispensedAmount(string $origin, array $destination, float $amount, string $ref): void
     {
         if ($destination['asset_type'] === 'E-WALLET') {
@@ -1837,6 +2069,7 @@ public function cancelSwap(string $swapRef, string $reason = 'User requested can
         }
     }
 }
+
 
 
 
