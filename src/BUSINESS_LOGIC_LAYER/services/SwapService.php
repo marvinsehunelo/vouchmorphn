@@ -1360,6 +1360,138 @@ private function requestAtmToken(string $swapRef, array $source, array $destinat
         return;
     }
 
+    /**
+ * Cancel a pending cashout swap
+ * @param string $swapRef The swap reference to cancel
+ * @param string $reason Reason for cancellation
+ * @param int|null $cancelledBy User ID if user-initiated
+ */
+public function cancelSwap(string $swapRef, string $reason = 'User requested cancellation', ?int $cancelledBy = null): array
+{
+    $this->swapDB->beginTransaction();
+    
+    try {
+        // Get swap and hold details
+        $stmt = $this->swapDB->prepare("
+            SELECT 
+                sr.*,
+                ht.hold_reference,
+                ht.status as hold_status,
+                ht.participant_id,
+                p.config as participant_config,
+                sv.voucher_id,
+                sv.status as voucher_status
+            FROM swap_requests sr
+            LEFT JOIN hold_transactions ht ON sr.swap_uuid = ht.swap_reference
+            LEFT JOIN participants p ON ht.participant_id = p.participant_id
+            LEFT JOIN swap_vouchers sv ON sr.swap_id = sv.swap_id
+            WHERE sr.swap_uuid = ?
+            AND sr.status IN ('pending', 'processing')
+            FOR UPDATE
+        ");
+        $stmt->execute([$swapRef]);
+        $swap = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+        if (!$swap) {
+            throw new RuntimeException("Swap not found or already completed/cancelled");
+        }
+        
+        error_log("[CANCEL] Cancelling swap: $swapRef, Reason: $reason");
+        
+        // 1. Release the hold if it exists and is ACTIVE
+        if ($swap['hold_reference'] && $swap['hold_status'] === 'ACTIVE' && $swap['participant_config']) {
+            $participant = json_decode($swap['participant_config'], true);
+            $bankClient = new GenericBankClient($participant);
+            
+            $releaseResult = $bankClient->releaseHold([
+                'hold_reference' => $swap['hold_reference'],
+                'reason' => $reason
+            ]);
+            
+            if (!isset($releaseResult['success']) || $releaseResult['success'] !== true) {
+                throw new RuntimeException("Failed to release hold: " . ($releaseResult['message'] ?? 'Unknown error'));
+            }
+            
+            // Update hold status
+            $this->updateHoldStatus($swap['hold_reference'], 'RELEASED');
+        }
+        
+        // 2. Void any associated voucher
+        if ($swap['voucher_id'] && $swap['voucher_status'] === 'ACTIVE') {
+            $voidStmt = $this->swapDB->prepare("
+                UPDATE swap_vouchers 
+                SET status = 'VOIDED',
+                    voided_at = NOW(),
+                    void_reason = ?
+                WHERE voucher_id = ?
+            ");
+            $voidStmt->execute([$reason, $swap['voucher_id']]);
+        }
+        
+        // 3. Update swap status to CANCELLED
+        $updateStmt = $this->swapDB->prepare("
+            UPDATE swap_requests 
+            SET status = 'cancelled',
+                metadata = jsonb_set(
+                    COALESCE(metadata, '{}'::jsonb),
+                    '{cancellation}',
+                    jsonb_build_object(
+                        'cancelled_at', to_jsonb(NOW()),
+                        'cancelled_by', to_jsonb(?),
+                        'reason', to_jsonb(?)
+                    )
+                )
+            WHERE swap_uuid = ?
+            RETURNING swap_id
+        ");
+        $updateStmt->execute([$cancelledBy ?? 'system', $reason, $swapRef]);
+        
+        // 4. Remove from settlement queue if any
+        if ($swap['hold_reference']) {
+            $queueStmt = $this->swapDB->prepare("
+                DELETE FROM settlement_queue 
+                WHERE hold_reference = ? AND status = 'PENDING'
+            ");
+            $queueStmt->execute([$swap['hold_reference']]);
+        }
+        
+        // 5. Log the cancellation
+        $this->logApiMessage(
+            $swapRef,
+            'swap_cancelled',
+            'internal',
+            null,
+            '/api/swap/cancel',
+            ['reason' => $reason],
+            ['success' => true],
+            null
+        );
+        
+        $this->logEvent($swapRef, 'SWAP_CANCELLED', [
+            'reason' => $reason,
+            'cancelled_by' => $cancelledBy ?? 'system'
+        ]);
+        
+        $this->swapDB->commit();
+        
+        return [
+            'success' => true,
+            'message' => 'Swap cancelled successfully',
+            'swap_reference' => $swapRef,
+            'hold_released' => !empty($swap['hold_reference'])
+        ];
+        
+    } catch (Exception $e) {
+        $this->swapDB->rollBack();
+        error_log("[CANCEL] Failed for $swapRef: " . $e->getMessage());
+        
+        return [
+            'success' => false,
+            'error' => $e->getMessage()
+        ];
+    }
+}
+
     private function queueSettlementMessage(string $swapRef, array $source, array $destination, float $amount, array $holdResult, ?array $feeDetails = null): void
     {
         error_log("[QUEUE_SETTLEMENT] Starting for swap: $swapRef");
@@ -1705,5 +1837,6 @@ private function requestAtmToken(string $swapRef, array $source, array $destinat
         }
     }
 }
+
 
 
