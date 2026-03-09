@@ -887,3 +887,17 @@ CREATE INDEX IF NOT EXISTS idx_swap_vouchers_status ON swap_vouchers(status);
 ALTER TABLE swap_requests 
 ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::jsonb;
 
+-- Add if missing
+ALTER TABLE hold_transactions 
+ADD COLUMN IF NOT EXISTS hold_expiry TIMESTAMPTZ,
+ADD COLUMN IF NOT EXISTS released_at TIMESTAMPTZ,
+ADD COLUMN IF NOT EXISTS debited_at TIMESTAMPTZ;
+
+-- Index for expiry queries
+CREATE INDEX IF NOT EXISTS idx_holds_expiry_status 
+ON hold_transactions(hold_expiry, status) 
+WHERE status = 'ACTIVE';
+
+private const HOLD_EXPIRY_HOURS = 24;  // Standard hold duration
+private const VOUCHER_EXPIRY_HOURS = 24;  // Standard voucher duration
+private const EXPIRY_BATCH_SIZE = 100;  // For cron job
