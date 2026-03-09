@@ -41,15 +41,6 @@ if (class_exists('\Dotenv\Dotenv')) {
     }
 }
 
-// FIX 6: Load config with better error handling
-$configPath = APP_ROOT . '/src/CORE_CONFIG/countries/BW/config_BW.php';
-if (file_exists($configPath)) {
-    require_once $configPath;
-} else {
-    error_log("CRITICAL: Config file missing at " . $configPath);
-    // Don't die in production, but log it
-}
-
 // ======================================================
 // RAILWAY COMPATIBILITY FIXES
 // ======================================================
@@ -92,9 +83,6 @@ try {
 } catch (\Exception $e) {
     $db_error = $e->getMessage();
     error_log("Regulation demo DB error: " . $db_error);
-    if (getenv('APP_ENV') !== 'production') {
-        echo "<!-- DB Debug: " . htmlspecialchars($db_error) . " -->\n";
-    }
 }
 
 // Fix 3: Environment info
@@ -126,14 +114,6 @@ if (file_exists($bootstrapPath)) {
     require_once $bootstrapPath;
 } else {
     error_log("CRITICAL: bootstrap.php not found at " . $bootstrapPath);
-}
-
-// Debug DATABASE_URL
-error_log("[TEST] DATABASE_URL from env: " . (getenv('DATABASE_URL') ? 'SET' : 'NOT SET'));
-if (getenv('DATABASE_URL')) {
-    $url = getenv('DATABASE_URL');
-    $masked = preg_replace('/:[^@]*@/', ':****@', $url);
-    error_log("[TEST] DATABASE_URL value: " . $masked);
 }
 
 // Start session if not already started
@@ -235,7 +215,7 @@ foreach (['account', 'wallet', 'e-wallet', 'card', 'atm', 'agent', 'voucher'] as
 }
 
 // ============================================================================
-// DATABASE QUERIES
+// DATABASE QUERIES - Enhanced for settlement reporting
 // ============================================================================
 
 $heartbeat = ['status' => 'ACTIVE', 'latency_ms' => 45, 'system_load' => 0.23, 'created_at' => date('Y-m-d H:i:s')];
@@ -253,6 +233,9 @@ $totalExposure = 0;
 $totalFeesCollected = 0;
 $feesByType = [];
 $feeCollections = [];
+$settlementSummary = [];
+$weeklySettlements = [];
+$monthlySettlements = [];
 
 if ($db) {
     try {
@@ -281,30 +264,94 @@ if ($db) {
             if ($result) $heartbeat = $result;
         }
 
-        if ($tableExists('net_positions')) {
-            $stmt = $db->query("SELECT debtor, creditor, amount, currency_code, updated_at FROM net_positions WHERE amount != 0 ORDER BY amount DESC");
+        // NET POSITIONS - For settlement netting
+        if ($tableExists('settlement_queue')) {
+            $stmt = $db->query("
+                SELECT 
+                    debtor, 
+                    creditor, 
+                    SUM(amount) as amount,
+                    COUNT(*) as transaction_count
+                FROM settlement_queue 
+                WHERE amount > 0 
+                GROUP BY debtor, creditor 
+                ORDER BY amount DESC
+            ");
             $netPositions = $stmt->fetchAll(\PDO::FETCH_ASSOC);
             $totalExposure = array_sum(array_column($netPositions, 'amount'));
         }
 
+        // PENDING SETTLEMENTS
         if ($tableExists('settlement_messages')) {
-            $stmt = $db->query("SELECT message_id, transaction_id, from_participant, to_participant, amount, type, status, created_at, metadata FROM settlement_messages WHERE status = 'PENDING' ORDER BY created_at DESC LIMIT 50");
+            $stmt = $db->query("
+                SELECT 
+                    message_id, 
+                    transaction_id, 
+                    from_participant, 
+                    to_participant, 
+                    amount, 
+                    type, 
+                    status, 
+                    created_at, 
+                    metadata 
+                FROM settlement_messages 
+                WHERE status = 'PENDING' 
+                ORDER BY created_at DESC 
+                LIMIT 50
+            ");
             $pendingSettlements = $stmt->fetchAll(\PDO::FETCH_ASSOC);
         }
 
+        // RECENT SWAPS
         if ($tableExists('swap_requests')) {
-            $stmt = $db->query("SELECT swap_id, swap_uuid::text as swap_uuid, amount, status, created_at FROM swap_requests ORDER BY created_at DESC LIMIT 10");
+            $stmt = $db->query("
+                SELECT 
+                    swap_id, 
+                    swap_uuid::text as swap_uuid, 
+                    amount, 
+                    status, 
+                    created_at,
+                    metadata->>'source_institution' as source_institution,
+                    metadata->>'destination_institution' as destination_institution
+                FROM swap_requests 
+                ORDER BY created_at DESC 
+                LIMIT 10
+            ");
             $recentSwaps = $stmt->fetchAll(\PDO::FETCH_ASSOC);
         }
 
+        // ACTIVE VOUCHERS
         if ($tableExists('swap_vouchers')) {
-            $stmt = $db->query("SELECT voucher_id, code_suffix, amount, claimant_phone, expiry_at, status FROM swap_vouchers WHERE status = 'ACTIVE' AND expiry_at > NOW() ORDER BY created_at DESC");
+            $stmt = $db->query("
+                SELECT 
+                    voucher_id, 
+                    code_suffix, 
+                    amount, 
+                    claimant_phone, 
+                    expiry_at, 
+                    status 
+                FROM swap_vouchers 
+                WHERE status = 'ACTIVE' AND expiry_at > NOW() 
+                ORDER BY created_at DESC
+            ");
             $activeVouchers = $stmt->fetchAll(\PDO::FETCH_ASSOC);
             $totalVoucherAmount = array_sum(array_column($activeVouchers, 'amount'));
         }
 
+        // SETTLEMENT QUEUE
         if ($tableExists('settlement_queue')) {
-            $stmt = $db->query("SELECT id, debtor, creditor, amount, created_at FROM settlement_queue WHERE amount > 0 ORDER BY created_at ASC LIMIT 50");
+            $stmt = $db->query("
+                SELECT 
+                    id, 
+                    debtor, 
+                    creditor, 
+                    amount, 
+                    created_at 
+                FROM settlement_queue 
+                WHERE amount > 0 
+                ORDER BY created_at ASC 
+                LIMIT 50
+            ");
             $queueItems = $stmt->fetchAll(\PDO::FETCH_ASSOC);
             foreach ($queueItems as $item) {
                 $settlementQueue[] = [
@@ -317,23 +364,75 @@ if ($db) {
             }
         }
 
+        // MESSAGE OUTBOX
         if ($tableExists('message_outbox')) {
-            $stmt = $db->query("SELECT message_id, channel, destination, status, created_at FROM message_outbox WHERE status IN ('PENDING', 'SENT') ORDER BY created_at ASC LIMIT 50");
+            $stmt = $db->query("
+                SELECT 
+                    message_id, 
+                    channel, 
+                    destination, 
+                    status, 
+                    created_at 
+                FROM message_outbox 
+                WHERE status IN ('PENDING', 'SENT') 
+                ORDER BY created_at ASC 
+                LIMIT 50
+            ");
             $messageOutbox = $stmt->fetchAll(\PDO::FETCH_ASSOC);
         }
 
+        // AUDIT LOGS
         if ($tableExists('audit_logs')) {
-            $stmt = $db->query("SELECT entity_type, action, category, severity, performed_at FROM audit_logs ORDER BY performed_at DESC LIMIT 20");
+            $stmt = $db->query("
+                SELECT 
+                    entity_type, 
+                    action, 
+                    category, 
+                    severity, 
+                    performed_at 
+                FROM audit_logs 
+                ORDER BY performed_at DESC 
+                LIMIT 20
+            ");
             $recentAudits = $stmt->fetchAll(\PDO::FETCH_ASSOC);
         }
 
+        // REGULATOR OUTBOX
         if ($tableExists('regulator_outbox')) {
-            $stmt = $db->query("SELECT id, report_id, status, attempts, integrity_hash, created_at, last_attempt FROM regulator_outbox ORDER BY created_at DESC LIMIT 20");
+            $stmt = $db->query("
+                SELECT 
+                    id, 
+                    report_id, 
+                    status, 
+                    attempts, 
+                    integrity_hash, 
+                    created_at, 
+                    last_attempt 
+                FROM regulator_outbox 
+                ORDER BY created_at DESC 
+                LIMIT 20
+            ");
             $regReports = $stmt->fetchAll(\PDO::FETCH_ASSOC);
         }
 
+        // FEE COLLECTIONS
         if ($tableExists('swap_fee_collections')) {
-            $stmt = $db->query("SELECT fee_id, fee_type, total_amount, source_institution, destination_institution, split_config, vat_amount, status, collected_at FROM swap_fee_collections WHERE status = 'COLLECTED' ORDER BY collected_at DESC LIMIT 50");
+            $stmt = $db->query("
+                SELECT 
+                    fee_id, 
+                    fee_type, 
+                    total_amount, 
+                    source_institution, 
+                    destination_institution, 
+                    split_config, 
+                    vat_amount, 
+                    status, 
+                    collected_at 
+                FROM swap_fee_collections 
+                WHERE status = 'COLLECTED' 
+                ORDER BY collected_at DESC 
+                LIMIT 50
+            ");
             $feeCollections = $stmt->fetchAll(\PDO::FETCH_ASSOC);
             $totalFeesCollected = array_sum(array_column($feeCollections, 'total_amount'));
             foreach ($feeCollections as $fee) {
@@ -343,13 +442,70 @@ if ($db) {
             }
         }
 
+        // SETTLEMENT SUMMARY - For reports
+        if ($tableExists('settlement_queue')) {
+            // Weekly summary
+            $stmt = $db->query("
+                SELECT 
+                    DATE_TRUNC('week', created_at) as week_start,
+                    COUNT(*) as transaction_count,
+                    SUM(amount) as total_amount,
+                    COUNT(DISTINCT debtor) as debtor_count,
+                    COUNT(DISTINCT creditor) as creditor_count
+                FROM settlement_queue
+                WHERE created_at >= NOW() - INTERVAL '30 days'
+                GROUP BY DATE_TRUNC('week', created_at)
+                ORDER BY week_start DESC
+            ");
+            $weeklySettlements = $stmt->fetchAll(\PDO::FETCH_ASSOC);
+
+            // Monthly summary
+            $stmt = $db->query("
+                SELECT 
+                    DATE_TRUNC('month', created_at) as month_start,
+                    COUNT(*) as transaction_count,
+                    SUM(amount) as total_amount,
+                    COUNT(DISTINCT debtor) as debtor_count,
+                    COUNT(DISTINCT creditor) as creditor_count
+                FROM settlement_queue
+                WHERE created_at >= NOW() - INTERVAL '90 days'
+                GROUP BY DATE_TRUNC('month', created_at)
+                ORDER BY month_start DESC
+            ");
+            $monthlySettlements = $stmt->fetchAll(\PDO::FETCH_ASSOC);
+
+            // Net settlement positions (netted)
+            $stmt = $db->query("
+                WITH netted AS (
+                    SELECT 
+                        debtor,
+                        creditor,
+                        SUM(amount) as gross_amount
+                    FROM settlement_queue
+                    WHERE created_at >= NOW() - INTERVAL '7 days'
+                    GROUP BY debtor, creditor
+                )
+                SELECT 
+                    debtor,
+                    creditor,
+                    gross_amount,
+                    CASE 
+                        WHEN gross_amount > 0 THEN 'PAYABLE'
+                        ELSE 'RECEIVABLE'
+                    END as net_position
+                FROM netted
+                ORDER BY gross_amount DESC
+            ");
+            $settlementSummary = $stmt->fetchAll(\PDO::FETCH_ASSOC);
+        }
+
     } catch (\Exception $e) {
         debug_log("Database error: " . $e->getMessage());
     }
 }
 
 // ============================================================================
-// AJAX SWAP HANDLER
+// AJAX SWAP HANDLER - FIXED PAYLOAD STRUCTURE
 // ============================================================================
 
 if (!isset($isAjax)) {
@@ -374,7 +530,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_swap']) && $i
     try {
         $debug_log[] = "1. Starting swap execution";
 
-        // Fix 8: Check if KeyVault class exists
+        // Check if KeyVault class exists
         if (!class_exists('\SECURITY_LAYER\Encryption\KeyVault')) {
             throw new \Exception('KeyVault class not found');
         }
@@ -383,7 +539,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_swap']) && $i
         $encryptionKey = $keyVault->getEncryptionKey();
         $debug_log[] = "2. KeyVault initialized";
 
-        // Fix 9: Check if SwapService class exists
+        // Check if SwapService class exists
         if (!class_exists('\BUSINESS_LOGIC_LAYER\services\SwapService')) {
             throw new \Exception('SwapService class not found');
         }
@@ -398,6 +554,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_swap']) && $i
         $amount       = (float)($_POST['amount'] ?? 0);
         $debug_log[]  = "4. Form data: swapType=$swapType, deliveryMode=$deliveryMode, toType=$toType";
 
+        // Get source phone/account
         $phoneNumber = '';
         switch ($fromType) {
             case 'e-wallet':
@@ -414,88 +571,103 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_swap']) && $i
         }
         $debug_log[] = "5. Source phone/account: $phoneNumber";
 
+        // Build source in the format your API expects
+        $source = [
+            'institution' => $_POST['from_institution'] ?? '',
+            'asset_type' => $fromType,
+            'amount' => $amount
+        ];
+
+        // Add source details based on type
+        if ($fromType === 'e-wallet') {
+            $source['ewallet'] = [
+                'ewallet_phone' => $phoneNumber
+            ];
+        } elseif ($fromType === 'wallet') {
+            $source['wallet'] = [
+                'wallet_phone' => $phoneNumber,
+                'wallet_pin' => $_POST['pin'] ?? null
+            ];
+        } elseif ($fromType === 'account') {
+            $source['account'] = [
+                'account_number' => $phoneNumber
+            ];
+        } elseif ($fromType === 'card') {
+            $source['card'] = [
+                'card_number' => $_POST['card_number'] ?? '',
+                'card_pin' => $_POST['pin'] ?? null
+            ];
+        } elseif ($fromType === 'voucher') {
+            $source['voucher'] = [
+                'voucher_number' => $_POST['voucher_number'] ?? '',
+                'claimant_phone' => $phoneNumber,
+                'voucher_pin' => $_POST['pin'] ?? null
+            ];
+        }
+
+        // Filter out null values
+        $source = array_filter($source);
+
+        // Build destination in the EXACT format your API expects
         if ($swapType === 'business' && !empty($_POST['recipients']) && is_array($_POST['recipients'])) {
-            $legs = [];
+            // Business case - multiple destinations
+            $destinations = [];
             foreach ($_POST['recipients'] as $recipient) {
-                $leg = [
-                    'institution'    => $recipient['institution'] ?? '',
-                    'asset_type'     => $toType,
-                    'amount'         => (float)($recipient['amount'] ?? 0),
-                    'delivery_mode'  => $deliveryMode,
-                    'reference'      => $recipient['reference'] ?? 'BUS-PAY',
-                    'purpose'        => 'Business Payment'
+                $dest = [
+                    'institution' => $recipient['institution'] ?? '',
+                    'delivery_mode' => $deliveryMode,
+                    'amount' => (float)($recipient['amount'] ?? 0)
                 ];
                 
                 if ($deliveryMode === 'cashout') {
-                    $leg['cashout'] = ['beneficiary_phone' => $recipient['phone'] ?? ''];
+                    $dest['beneficiary_phone'] = $recipient['phone'] ?? '';
                 } else {
-                    $leg['beneficiary_account'] = $recipient['phone'] ?? '';
+                    $dest['beneficiary_account'] = $recipient['phone'] ?? '';
                 }
                 
-                $legs[] = $leg;
+                $destinations[] = array_filter($dest);
             }
-            $debug_log[] = "6. Business legs built: " . count($legs);
+            $destination = $destinations; // Array of destinations for business
         } else {
+            // Personal case - single destination
             $destPhone = $deliveryMode === 'cashout'
                 ? $_POST['destination_phone'] ?? ''
                 : $_POST['destination_account'] ?? $_POST['destination_card'] ?? '';
             
-            $leg = [
-                'institution'   => $_POST['to_institution'] ?? '',
-                'asset_type'    => strtoupper($toType),
-                'amount'        => $amount,
+            $destination = [
+                'institution' => $_POST['to_institution'] ?? '',
                 'delivery_mode' => $deliveryMode,
-                'reference'     => ($deliveryMode === 'cashout' ? 'CASH-' : 'DEP-') . uniqid(),
-                'purpose'       => ($deliveryMode === 'cashout' ? 'Cash Withdrawal' : 'Deposit Transfer')
+                'amount' => $amount
             ];
-            
+
             if ($deliveryMode === 'cashout') {
-                $leg['cashout'] = ['beneficiary_phone' => $destPhone];
+                $destination['beneficiary_phone'] = $destPhone;
             } else {
-                $leg['beneficiary_account'] = $destPhone;
+                $destination['beneficiary_account'] = $destPhone;
             }
             
-            $legs = [$leg];
-            $debug_log[] = "6. Personal leg created";
-        }
-
-        if (empty($legs[0]['institution'])) {
-            throw new \RuntimeException("Destination institution is required");
-        }
-
-        if ($deliveryMode === 'cashout') {
-            if (empty($legs[0]['cashout']['beneficiary_phone'])) {
-                throw new \RuntimeException("Beneficiary phone is required for cashout");
-            }
-        } else {
-            if (empty($legs[0]['beneficiary_account'])) {
-                throw new \RuntimeException("Destination account is required for deposit");
+            // Add asset_type if needed (for deposit to specific account types)
+            if ($deliveryMode === 'deposit' && !empty($toType)) {
+                $destination['asset_type'] = strtoupper($toType);
             }
         }
 
-        $source = [
-            'institution' => $_POST['from_institution'] ?? '',
-            'asset_type'  => $_POST['from_type'] ?? '',
-            'amount'      => $amount,
-            'phone'       => $phoneNumber,
-            'account'     => ['account_number' => $_POST['account_number'] ?? null],
-            'wallet'      => $fromType === 'wallet' ? ['wallet_phone' => $phoneNumber, 'wallet_pin' => $_POST['pin'] ?? null] : null,
-            'ewallet'     => $fromType === 'e-wallet' ? ['ewallet_phone' => $phoneNumber] : null,
-            'card'        => $fromType === 'card' ? ['card_number' => $_POST['card_number'] ?? null, 'card_pin' => $_POST['pin'] ?? null] : null,
-            'voucher'     => $fromType === 'voucher' ? ['voucher_number' => $_POST['voucher_number'] ?? null, 'claimant_phone' => $phoneNumber, 'voucher_pin' => $_POST['pin'] ?? null] : null
-        ];
-        $source = array_filter($source, fn($v) => $v !== null);
-
+        // Build final payload matching your working API exactly
         $payload = [
-            'currency'    => 'BWP',
-            'swap_type'   => $swapType,
-            'source'      => $source,
-            'destination' => array_filter($legs[0], fn($v) => $v !== null && $v !== '')
+            'currency' => 'BWP',
+            'source' => $source,
+            'destination' => $destination
         ];
+
+        // Add swap_type only if needed (some APIs expect it)
+        if ($swapType !== 'self') {
+            $payload['swap_type'] = $swapType;
+        }
         
         $debug_log[] = "7. Payload prepared";
         error_log("DASHBOARD PAYLOAD: " . json_encode($payload));
 
+        // Execute swap
         $swapResult = $swapService->executeSwap($payload);
         $debug_log[] = "8. Swap executed with status: " . ($swapResult['status'] ?? 'unknown');
 
@@ -503,39 +675,86 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_swap']) && $i
         
         if ($isSuccess) {
             $debug_log[] = "9. Swap successful";
+            
+            // Insert audit log
             if ($db) {
                 try {
-                    $stmt = $db->prepare("INSERT INTO audit_logs (entity, action, category, severity, performed_by_type, performed_at) VALUES ('SWAP', 'EXECUTE', 'TRANSACTION', 'info', 'user', NOW())");
+                    $stmt = $db->prepare("
+                        INSERT INTO audit_logs 
+                        (entity_type, action, category, severity, performed_by_type, performed_at) 
+                        VALUES ('SWAP', 'EXECUTE', 'TRANSACTION', 'info', 'user', NOW())
+                    ");
                     $stmt->execute();
-                    $debug_log[] = "10. Audit log inserted";
+                    
+                    // Also insert into settlement queue for netting
+                    $stmt = $db->prepare("
+                        INSERT INTO settlement_queue (debtor, creditor, amount, created_at)
+                        VALUES (
+                            (SELECT name FROM participants WHERE participant_id = ?),
+                            (SELECT name FROM participants WHERE participant_id = ?),
+                            ?,
+                            NOW()
+                        )
+                        ON CONFLICT (debtor, creditor) 
+                        DO UPDATE SET amount = settlement_queue.amount + EXCLUDED.amount
+                    ");
+                    
+                    // Get participant IDs
+                    $sourceParticipant = $_POST['from_institution'] ?? '';
+                    $destParticipant = $_POST['to_institution'] ?? '';
+                    
+                    if ($sourceParticipant && $destParticipant) {
+                        $stmt->execute([$sourceParticipant, $destParticipant, $amount]);
+                    }
+                    
+                    $debug_log[] = "10. Audit log and settlement queue updated";
                 } catch (\Exception $e) {
                     $debug_log[] = "10. Audit log error: " . $e->getMessage();
                 }
             }
 
+            // Build response
             $response = [
-                'status'         => 'success',
-                'swap_reference' => $swapResult['swap_reference'] ?? 'SWAP-' . uniqid(),
-                'timestamp'      => date('Y-m-d H:i:s'),
-                'amount'         => $amount,
-                'delivery_mode'  => $deliveryMode,
-                'source'         => $source,
-                'destination'    => $legs[0],
+                'status' => 'success',
+                'swap_reference' => $swapResult['swap_reference'] ?? $swapResult['reference'] ?? 'SWAP-' . uniqid(),
+                'transaction_id' => $swapResult['transaction_id'] ?? null,
+                'timestamp' => date('Y-m-d H:i:s'),
+                'amount' => $amount,
+                'delivery_mode' => $deliveryMode,
+                'source' => $source,
+                'destination' => $destination,
                 'hold_reference' => $swapResult['hold_reference'] ?? null,
-                'dispensed_notes'=> $swapResult['dispensed_notes'] ?? [],
-                'legs'           => $legs,
-                'debug'          => $debug_log
+                'dispensed_notes' => $swapResult['dispensed_notes'] ?? [],
+                'fee' => $swapResult['fee'] ?? ($deliveryMode === 'cashout' ? 10.00 : 6.00),
+                'net_amount' => $amount - ($swapResult['fee'] ?? ($deliveryMode === 'cashout' ? 10.00 : 6.00)),
+                'debug' => $debug_log
             ];
 
-            if ($deliveryMode === 'cashout' && $db) {
+            // Get voucher details for cashouts
+            if ($deliveryMode === 'cashout' && $db && isset($response['swap_reference'])) {
                 try {
-                    $stmt = $db->prepare("SELECT code_suffix, expiry_at FROM swap_vouchers WHERE swap_id = (SELECT swap_id FROM swap_requests WHERE swap_uuid = ? LIMIT 1) ORDER BY created_at DESC LIMIT 1");
+                    $stmt = $db->prepare("
+                        SELECT 
+                            code_suffix, 
+                            expiry_at,
+                            amount
+                        FROM swap_vouchers 
+                        WHERE swap_id = (
+                            SELECT swap_id 
+                            FROM swap_requests 
+                            WHERE swap_uuid::text = ? 
+                            LIMIT 1
+                        ) 
+                        ORDER BY created_at DESC 
+                        LIMIT 1
+                    ");
                     $stmt->execute([$response['swap_reference']]);
                     $voucher = $stmt->fetch(\PDO::FETCH_ASSOC);
                     if ($voucher) {
                         $response['voucher'] = [
                             'code_suffix' => $voucher['code_suffix'],
-                            'expiry'      => $voucher['expiry_at']
+                            'expiry' => $voucher['expiry_at'],
+                            'amount' => $voucher['amount']
                         ];
                         $debug_log[] = "11. Voucher fetched";
                     }
@@ -545,18 +764,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_swap']) && $i
             }
         } else {
             $response = [
-                'status'  => 'error',
+                'status' => 'error',
                 'message' => $swapResult['message'] ?? 'Swap execution failed',
-                'debug'   => $debug_log
+                'error_code' => $swapResult['error_code'] ?? null,
+                'debug' => $debug_log
             ];
         }
 
     } catch (\Exception $e) {
         error_log("SWAP EXCEPTION: " . $e->getMessage());
         $response = [
-            'status'  => 'error',
+            'status' => 'error',
             'message' => $e->getMessage(),
-            'debug'   => array_merge($debug_log, ["EXCEPTION: " . $e->getMessage()])
+            'debug' => array_merge($debug_log, ["EXCEPTION: " . $e->getMessage()])
         ];
     }
 
@@ -566,6 +786,214 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_swap']) && $i
     }
     header('Content-Type: application/json');
     echo json_encode($response);
+    exit;
+}
+
+// ============================================================================
+// SETTLEMENT REPORT GENERATION
+// ============================================================================
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['generate_settlement_report'])) {
+    $reportType = $_POST['report_type'] ?? 'daily';
+    $reportDate = $_POST['report_date'] ?? date('Y-m-d');
+    
+    header('Content-Type: application/json');
+    
+    try {
+        if (!$db) {
+            throw new \Exception('Database connection not available');
+        }
+        
+        if ($reportType === 'daily') {
+            // Daily settlement report
+            $stmt = $db->prepare("
+                WITH daily_settlements AS (
+                    SELECT 
+                        debtor,
+                        creditor,
+                        SUM(amount) as total_amount,
+                        COUNT(*) as transaction_count,
+                        MIN(created_at) as first_transaction,
+                        MAX(created_at) as last_transaction
+                    FROM settlement_queue
+                    WHERE DATE(created_at) = ?
+                    GROUP BY debtor, creditor
+                )
+                SELECT 
+                    ds.*,
+                    p1.name as debtor_name,
+                    p1.settlement_account as debtor_account,
+                    p2.name as creditor_name,
+                    p2.settlement_account as creditor_account
+                FROM daily_settlements ds
+                LEFT JOIN participants p1 ON ds.debtor = p1.name
+                LEFT JOIN participants p2 ON ds.creditor = p2.name
+                ORDER BY total_amount DESC
+            ");
+            $stmt->execute([$reportDate]);
+            $settlements = $stmt->fetchAll(\PDO::FETCH_ASSOC);
+            
+            // Calculate net positions
+            $netPositions = [];
+            foreach ($settlements as $s) {
+                $key = $s['debtor'] . '|' . $s['creditor'];
+                $netPositions[$key] = $s;
+            }
+            
+            $response = [
+                'success' => true,
+                'report_date' => $reportDate,
+                'report_type' => 'daily',
+                'total_settlements' => count($settlements),
+                'total_amount' => array_sum(array_column($settlements, 'total_amount')),
+                'settlements' => $settlements,
+                'net_positions' => $netPositions
+            ];
+            
+        } elseif ($reportType === 'weekly') {
+            // Weekly settlement report with netting
+            $startDate = date('Y-m-d', strtotime($reportDate . ' -6 days'));
+            $endDate = $reportDate;
+            
+            $stmt = $db->prepare("
+                WITH weekly_settlements AS (
+                    SELECT 
+                        debtor,
+                        creditor,
+                        SUM(amount) as gross_amount,
+                        COUNT(*) as transaction_count
+                    FROM settlement_queue
+                    WHERE DATE(created_at) BETWEEN ? AND ?
+                    GROUP BY debtor, creditor
+                ),
+                netted_positions AS (
+                    SELECT 
+                        debtor,
+                        creditor,
+                        gross_amount,
+                        CASE 
+                            WHEN gross_amount > 0 THEN 'PAYABLE'
+                            ELSE 'RECEIVABLE'
+                        END as position_type
+                    FROM weekly_settlements
+                )
+                SELECT 
+                    np.*,
+                    p1.name as debtor_name,
+                    p1.settlement_account as debtor_account,
+                    p2.name as creditor_name,
+                    p2.settlement_account as creditor_account
+                FROM netted_positions np
+                LEFT JOIN participants p1 ON np.debtor = p1.name
+                LEFT JOIN participants p2 ON np.creditor = p2.name
+                ORDER BY gross_amount DESC
+            ");
+            $stmt->execute([$startDate, $endDate]);
+            $settlements = $stmt->fetchAll(\PDO::FETCH_ASSOC);
+            
+            // Calculate net settlement for each participant
+            $participantNet = [];
+            foreach ($settlements as $s) {
+                if (!isset($participantNet[$s['debtor']])) {
+                    $participantNet[$s['debtor']] = ['payable' => 0, 'receivable' => 0];
+                }
+                if (!isset($participantNet[$s['creditor']])) {
+                    $participantNet[$s['creditor']] = ['payable' => 0, 'receivable' => 0];
+                }
+                
+                $participantNet[$s['debtor']]['payable'] += $s['gross_amount'];
+                $participantNet[$s['creditor']]['receivable'] += $s['gross_amount'];
+            }
+            
+            $response = [
+                'success' => true,
+                'report_date' => $reportDate,
+                'report_type' => 'weekly',
+                'start_date' => $startDate,
+                'end_date' => $endDate,
+                'total_settlements' => count($settlements),
+                'total_gross_amount' => array_sum(array_column($settlements, 'gross_amount')),
+                'settlements' => $settlements,
+                'participant_net_positions' => $participantNet
+            ];
+            
+        } elseif ($reportType === 'monthly') {
+            // Monthly settlement report
+            $year = date('Y', strtotime($reportDate));
+            $month = date('m', strtotime($reportDate));
+            
+            $stmt = $db->prepare("
+                WITH monthly_settlements AS (
+                    SELECT 
+                        debtor,
+                        creditor,
+                        SUM(amount) as total_amount,
+                        COUNT(*) as transaction_count,
+                        DATE_TRUNC('month', created_at) as settlement_month
+                    FROM settlement_queue
+                    WHERE EXTRACT(YEAR FROM created_at) = ?
+                    AND EXTRACT(MONTH FROM created_at) = ?
+                    GROUP BY debtor, creditor, DATE_TRUNC('month', created_at)
+                )
+                SELECT 
+                    ms.*,
+                    p1.name as debtor_name,
+                    p1.settlement_account as debtor_account,
+                    p2.name as creditor_name,
+                    p2.settlement_account as creditor_account
+                FROM monthly_settlements ms
+                LEFT JOIN participants p1 ON ms.debtor = p1.name
+                LEFT JOIN participants p2 ON ms.creditor = p2.name
+                ORDER BY total_amount DESC
+            ");
+            $stmt->execute([$year, $month]);
+            $settlements = $stmt->fetchAll(\PDO::FETCH_ASSOC);
+            
+            // Group by week for detailed view
+            $weeklyBreakdown = [];
+            foreach ($settlements as $s) {
+                $week = date('W', strtotime($s['settlement_month']));
+                if (!isset($weeklyBreakdown[$week])) {
+                    $weeklyBreakdown[$week] = [
+                        'total' => 0,
+                        'count' => 0,
+                        'settlements' => []
+                    ];
+                }
+                $weeklyBreakdown[$week]['total'] += $s['total_amount'];
+                $weeklyBreakdown[$week]['count'] += $s['transaction_count'];
+                $weeklyBreakdown[$week]['settlements'][] = $s;
+            }
+            
+            $response = [
+                'success' => true,
+                'report_date' => $reportDate,
+                'report_type' => 'monthly',
+                'year' => $year,
+                'month' => $month,
+                'total_settlements' => count($settlements),
+                'total_amount' => array_sum(array_column($settlements, 'total_amount')),
+                'settlements' => $settlements,
+                'weekly_breakdown' => $weeklyBreakdown
+            ];
+        }
+        
+        // Log report generation
+        $stmt = $db->prepare("
+            INSERT INTO audit_logs 
+            (entity_type, action, category, severity, performed_by_type, metadata, performed_at) 
+            VALUES ('REPORT', 'GENERATE', 'SETTLEMENT', 'info', 'system', ?, NOW())
+        ");
+        $stmt->execute([json_encode(['report_type' => $reportType, 'date' => $reportDate])]);
+        
+        echo json_encode($response);
+        
+    } catch (\Exception $e) {
+        echo json_encode([
+            'success' => false,
+            'error' => $e->getMessage()
+        ]);
+    }
     exit;
 }
 
@@ -1161,6 +1589,53 @@ ob_start();
         .recent-swaps {
             margin-top: 2rem;
         }
+
+        /* SETTLEMENT REPORTS */
+        .report-controls {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 2rem;
+            align-items: flex-end;
+        }
+
+        .report-btn {
+            padding: 0.75rem 1.5rem;
+            background: #000;
+            border: 1px solid #0f0;
+            color: #0f0;
+            cursor: pointer;
+        }
+
+        .report-btn:hover {
+            background: #0f0;
+            color: #000;
+        }
+
+        .settlement-summary {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        .summary-item {
+            background: #111;
+            border: 1px solid #333;
+            padding: 1rem;
+            text-align: center;
+        }
+
+        .summary-label {
+            font-size: 0.7rem;
+            color: #888;
+            text-transform: uppercase;
+        }
+
+        .summary-value {
+            font-size: 1.5rem;
+            color: #0f0;
+            margin-top: 0.5rem;
+        }
     </style>
 </head>
 <body>
@@ -1188,6 +1663,7 @@ ob_start();
                 <a href="?view=dashboard&country=<?php echo $countryCode; ?>&regulator_view=<?php echo $regulatorView; ?>" class="view-btn <?php echo $selectedView === 'dashboard' ? 'active' : ''; ?>">DASHBOARD</a>
                 <a href="?view=swap&country=<?php echo $countryCode; ?>&regulator_view=<?php echo $regulatorView; ?>" class="view-btn <?php echo $selectedView === 'swap' ? 'active' : ''; ?>">EXECUTE</a>
                 <a href="?view=settlements&country=<?php echo $countryCode; ?>&regulator_view=<?php echo $regulatorView; ?>" class="view-btn <?php echo $selectedView === 'settlements' ? 'active' : ''; ?>">SETTLEMENTS</a>
+                <a href="?view=reports&country=<?php echo $countryCode; ?>&regulator_view=<?php echo $regulatorView; ?>" class="view-btn <?php echo $selectedView === 'reports' ? 'active' : ''; ?>">REPORTS</a>
                 <a href="?view=regulatory&country=<?php echo $countryCode; ?>&regulator_view=<?php echo $regulatorView; ?>" class="view-btn <?php echo $selectedView === 'regulatory' ? 'active' : ''; ?>">REGULATORY</a>
                 <a href="?view=audit&country=<?php echo $countryCode; ?>&regulator_view=<?php echo $regulatorView; ?>" class="view-btn <?php echo $selectedView === 'audit' ? 'active' : ''; ?>">AUDIT</a>
             </div>
@@ -1247,7 +1723,7 @@ ob_start();
         <div class="grid-2">
             <div class="card">
                 <div class="card-header">
-                    <div class="card-title">NET POSITIONS</div>
+                    <div class="card-title">NET POSITIONS (FOR SETTLEMENT)</div>
                     <div class="card-badge">real-time</div>
                 </div>
                 <div class="table-responsive">
@@ -1257,7 +1733,7 @@ ob_start();
                                 <th>DEBTOR</th>
                                 <th>CREDITOR</th>
                                 <th class="text-right">AMOUNT</th>
-                                <th>CURRENCY</th>
+                                <th>TRANSACTIONS</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -1271,7 +1747,7 @@ ob_start();
                                     <td class="text-right <?php echo $pos['amount'] >= 0 ? 'positive' : 'negative'; ?>">
                                         <?php echo safe_number_format($pos['amount']); ?>
                                     </td>
-                                    <td><?php echo $pos['currency_code'] ?? 'BWP'; ?></td>
+                                    <td><?php echo $pos['transaction_count'] ?? 1; ?></td>
                                 </tr>
                                 <?php endforeach; ?>
                             <?php endif; ?>
@@ -1497,7 +1973,29 @@ ob_start();
         </div>
 
         <?php elseif ($selectedView === 'settlements'): ?>
-        <!-- SETTLEMENTS VIEW -->
+        <!-- SETTLEMENTS VIEW WITH NETTING -->
+        <div class="report-controls">
+            <div>
+                <label>GENERATE SETTLEMENT REPORT</label>
+                <select id="reportType">
+                    <option value="daily">Daily</option>
+                    <option value="weekly">Weekly (Netting)</option>
+                    <option value="monthly">Monthly</option>
+                </select>
+            </div>
+            <div>
+                <label>DATE</label>
+                <input type="date" id="reportDate" value="<?php echo date('Y-m-d'); ?>">
+            </div>
+            <div>
+                <button class="report-btn" onclick="generateSettlementReport()">GENERATE</button>
+            </div>
+        </div>
+
+        <div id="settlementReport" style="display: none;">
+            <!-- Dynamic report content will be inserted here -->
+        </div>
+
         <div class="grid-2">
             <div class="card">
                 <div class="card-header">
@@ -1534,7 +2032,7 @@ ob_start();
             
             <div class="card">
                 <div class="card-header">
-                    <div class="card-title">SETTLEMENT QUEUE</div>
+                    <div class="card-title">SETTLEMENT QUEUE (NETTING)</div>
                     <div class="card-badge">settlement_queue</div>
                 </div>
                 <div class="table-responsive">
@@ -1595,6 +2093,113 @@ ob_start();
                                 <td><?php echo htmlspecialchars($settlement['type'] ?? '-'); ?></td>
                                 <td><span class="status status-pending"><?php echo $settlement['status']; ?></span></td>
                                 <td><?php echo date('H:i', strtotime($settlement['created_at'])); ?></td>
+                            </tr>
+                            <?php endforeach; ?>
+                        <?php endif; ?>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <?php elseif ($selectedView === 'reports'): ?>
+        <!-- REPORTS VIEW -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">WEEKLY SETTLEMENT SUMMARY</div>
+                <div class="card-badge">netted</div>
+            </div>
+            <div class="table-responsive">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>WEEK</th>
+                            <th class="text-right">TRANSACTIONS</th>
+                            <th class="text-right">TOTAL AMOUNT</th>
+                            <th>DEBTORS</th>
+                            <th>CREDITORS</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php if (empty($weeklySettlements)): ?>
+                        <tr><td colspan="5" class="text-center" style="color: #444; padding: 2rem;">— NO WEEKLY DATA —</td></tr>
+                        <?php else: ?>
+                            <?php foreach ($weeklySettlements as $week): ?>
+                            <tr>
+                                <td><?php echo date('Y-m-d', strtotime($week['week_start'])); ?></td>
+                                <td class="text-right"><?php echo $week['transaction_count']; ?></td>
+                                <td class="text-right positive"><?php echo safe_number_format($week['total_amount']); ?> BWP</td>
+                                <td><?php echo $week['debtor_count']; ?></td>
+                                <td><?php echo $week['creditor_count']; ?></td>
+                            </tr>
+                            <?php endforeach; ?>
+                        <?php endif; ?>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">MONTHLY SETTLEMENT SUMMARY</div>
+                <div class="card-badge">netted</div>
+            </div>
+            <div class="table-responsive">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>MONTH</th>
+                            <th class="text-right">TRANSACTIONS</th>
+                            <th class="text-right">TOTAL AMOUNT</th>
+                            <th>DEBTORS</th>
+                            <th>CREDITORS</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php if (empty($monthlySettlements)): ?>
+                        <tr><td colspan="5" class="text-center" style="color: #444; padding: 2rem;">— NO MONTHLY DATA —</td></tr>
+                        <?php else: ?>
+                            <?php foreach ($monthlySettlements as $month): ?>
+                            <tr>
+                                <td><?php echo date('Y-m', strtotime($month['month_start'])); ?></td>
+                                <td class="text-right"><?php echo $month['transaction_count']; ?></td>
+                                <td class="text-right positive"><?php echo safe_number_format($month['total_amount']); ?> BWP</td>
+                                <td><?php echo $month['debtor_count']; ?></td>
+                                <td><?php echo $month['creditor_count']; ?></td>
+                            </tr>
+                            <?php endforeach; ?>
+                        <?php endif; ?>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">NET SETTLEMENT POSITIONS (LAST 7 DAYS)</div>
+                <div class="card-badge">post-netting</div>
+            </div>
+            <div class="table-responsive">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>DEBTOR</th>
+                            <th>CREDITOR</th>
+                            <th class="text-right">GROSS AMOUNT</th>
+                            <th>POSITION</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php if (empty($settlementSummary)): ?>
+                        <tr><td colspan="4" class="text-center" style="color: #444; padding: 2rem;">— NO SETTLEMENT POSITIONS —</td></tr>
+                        <?php else: ?>
+                            <?php foreach ($settlementSummary as $summary): ?>
+                            <tr>
+                                <td><?php echo htmlspecialchars($summary['debtor']); ?></td>
+                                <td><?php echo htmlspecialchars($summary['creditor']); ?></td>
+                                <td class="text-right <?php echo $summary['gross_amount'] >= 0 ? 'positive' : 'negative'; ?>">
+                                    <?php echo safe_number_format($summary['gross_amount']); ?>
+                                </td>
+                                <td><span class="status status-<?php echo $summary['net_position'] === 'PAYABLE' ? 'pending' : 'success'; ?>"><?php echo $summary['net_position']; ?></span></td>
                             </tr>
                             <?php endforeach; ?>
                         <?php endif; ?>
@@ -1929,6 +2534,7 @@ ob_start();
                                     <h4 style="color: #888; margin-bottom: 1rem;">TRANSACTION</h4>
                                     <table style="width: 100%;">
                                         <tr><td>REFERENCE:</td><td class="mono">${data.swap_reference.substring(0, 16)}…</td></tr>
+                                        <tr><td>TRANSACTION ID:</td><td class="mono">${data.transaction_id || 'N/A'}</td></tr>
                                         <tr><td>AMOUNT:</td><td class="positive">${data.amount.toFixed(2)} BWP</td></tr>
                                         ${feeInfo}
                                         <tr><td>HOLD REF:</td><td class="mono">${data.hold_reference ? data.hold_reference.substring(0, 8) + '…' : 'N/A'}</td></tr>
@@ -1951,6 +2557,19 @@ ob_start();
                                     </div>
                                 </div>
                                 ` : ''}
+                                ${data.voucher ? `
+                                <div>
+                                    <h4 style="color: #888; margin-bottom: 1rem;">VOUCHER DETAILS</h4>
+                                    <div style="background: #000; padding: 1rem;">
+                                        <div>CODE: ****-${data.voucher.code_suffix}</div>
+                                        <div>EXPIRY: ${data.voucher.expiry}</div>
+                                        <div>AMOUNT: ${data.voucher.amount} BWP</div>
+                                    </div>
+                                </div>
+                                ` : ''}
+                            </div>
+                            <div style="margin-top: 1rem; padding: 1rem; background: #000; border: 1px solid #333;">
+                                <div style="color: #0f0;">✓ Added to settlement queue for netting</div>
                             </div>
                         </div>
                     `;
@@ -1965,6 +2584,89 @@ ob_start();
                 btn.disabled = false;
                 btn.textContent = 'EXECUTE';
             }
+        }
+
+        async function generateSettlementReport() {
+            const reportType = document.getElementById('reportType').value;
+            const reportDate = document.getElementById('reportDate').value;
+            
+            const formData = new FormData();
+            formData.append('generate_settlement_report', '1');
+            formData.append('report_type', reportType);
+            formData.append('report_date', reportDate);
+            
+            try {
+                const response = await fetch(window.location.href, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    displaySettlementReport(data);
+                } else {
+                    alert('Report generation failed: ' + data.error);
+                }
+            } catch (error) {
+                alert('Error: ' + error.message);
+            }
+        }
+
+        function displaySettlementReport(data) {
+            const container = document.getElementById('settlementReport');
+            container.style.display = 'block';
+            
+            let html = `
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title">${data.report_type.toUpperCase()} SETTLEMENT REPORT - ${data.report_date}</div>
+                        <div class="card-badge">NETTED</div>
+                    </div>
+                    <div class="settlement-summary">
+                        <div class="summary-item">
+                            <div class="summary-label">TOTAL SETTLEMENTS</div>
+                            <div class="summary-value">${data.total_settlements}</div>
+                        </div>
+                        <div class="summary-item">
+                            <div class="summary-label">TOTAL AMOUNT</div>
+                            <div class="summary-value">${data.total_amount?.toFixed(2) || data.total_gross_amount?.toFixed(2)} BWP</div>
+                        </div>
+                    </div>
+                    <div class="table-responsive">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>DEBTOR</th>
+                                    <th>CREDITOR</th>
+                                    <th class="text-right">AMOUNT</th>
+                                    <th>POSITION</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+            `;
+            
+            if (data.settlements) {
+                data.settlements.forEach(s => {
+                    html += `
+                        <tr>
+                            <td>${s.debtor_name || s.debtor}</td>
+                            <td>${s.creditor_name || s.creditor}</td>
+                            <td class="text-right positive">${(s.total_amount || s.gross_amount).toFixed(2)} BWP</td>
+                            <td><span class="status status-pending">SETTLE</span></td>
+                        </tr>
+                    `;
+                });
+            }
+            
+            html += `
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            `;
+            
+            container.innerHTML = html;
         }
 
         // INIT
@@ -1999,13 +2701,3 @@ ob_start();
     </script>
 </body>
 </html>
-
-
-
-
-
-
-
-
-
-
