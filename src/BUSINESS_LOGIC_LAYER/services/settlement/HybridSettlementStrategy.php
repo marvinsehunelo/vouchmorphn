@@ -5,6 +5,7 @@ namespace BUSINESS_LOGIC_LAYER\services\settlement;
 
 use PDO;
 use DateTimeImmutable;
+use Exception;
 
 /**
  * Ledger-Based Hybrid Settlement Strategy
@@ -14,6 +15,10 @@ class HybridSettlementStrategy
 {
     private PDO $db;
     private string $currency = 'BWP';
+    
+    // Settlement constants
+    private const SETTLEMENT_BATCH_SIZE = 100;
+    private const MAX_RETRY_ATTEMPTS = 3;
 
     public function __construct(PDO $db)
     {
@@ -202,12 +207,12 @@ class HybridSettlementStrategy
     }
 
     /* =====================================================
-       UPDATE NET POSITIONS TABLE - FIXED FOR YOUR TABLE STRUCTURE
+       UPDATE NET POSITIONS TABLE
     ===================================================== */
 
     private function updateNetPositionsTable(
-        string $debtorInstitution,  // The one that owes money (source)
-        string $creditorInstitution, // The one to be paid (destination)
+        string $debtorInstitution,
+        string $creditorInstitution,
         float $amount
     ): void {
         try {
@@ -363,7 +368,7 @@ class HybridSettlementStrategy
     }
 
     /* =====================================================
-       SETTLEMENT MESSAGE (NEW STRUCTURE)
+       SETTLEMENT MESSAGE
     ===================================================== */
 
     private function enqueueSettlementMessage(
@@ -391,397 +396,378 @@ class HybridSettlementStrategy
         ]);
     }
 
-// ============================================================================
-// ADD THESE CONSTANTS to your class
-// ============================================================================
-private const SETTLEMENT_BATCH_SIZE = 100;
-private const MAX_RETRY_ATTEMPTS = 3;
+    // ============================================================================
+    // SETTLEMENT FINALIZATION METHODS
+    // ============================================================================
 
-// ============================================================================
-// ADD THESE METHODS for settlement finalization
-// ============================================================================
-
-/**
- * Process pending settlement messages and finalize them
- * This should be called by a cron job every 15-30 minutes
- * 
- * @return array Statistics of processed settlements
- */
-public function finalizePendingSettlements(): array
-{
-    $stats = [
-        'processed' => 0,
-        'failed' => 0,
-        'errors' => [],
-        'net_positions_updated' => 0,
-        'total_amount' => 0
-    ];
-    
-    try {
-        // Get pending settlements, grouped by participant pair
-        $pending = $this->db->prepare("
-            SELECT 
-                from_participant,
-                to_participant,
-                COUNT(*) as message_count,
-                SUM(amount) as total_amount,
-                MIN(created_at) as oldest_message,
-                MAX(created_at) as newest_message
-            FROM settlement_messages
-            WHERE status = 'PENDING'
-            GROUP BY from_participant, to_participant
-            ORDER BY oldest_message ASC
-            LIMIT :limit
-        ");
-        $pending->bindValue(':limit', self::SETTLEMENT_BATCH_SIZE, PDO::PARAM_INT);
-        $pending->execute();
+    /**
+     * Process pending settlement messages and finalize them
+     * This should be called by a cron job every 15-30 minutes
+     * 
+     * @return array Statistics of processed settlements
+     */
+    public function finalizePendingSettlements(): array
+    {
+        $stats = [
+            'processed' => 0,
+            'failed' => 0,
+            'errors' => [],
+            'net_positions_updated' => 0,
+            'total_amount' => 0
+        ];
         
-        while ($group = $pending->fetch(PDO::FETCH_ASSOC)) {
-            try {
-                $this->db->beginTransaction();
-                
-                $fromParticipant = $group['from_participant'];
-                $toParticipant = $group['to_participant'];
-                $totalAmount = (float)$group['total_amount'];
-                
-                $this->logSettlementEvent('SETTLEMENT_GROUP_PROCESSING', [
-                    'from' => $fromParticipant,
-                    'to' => $toParticipant,
-                    'amount' => $totalAmount,
-                    'message_count' => $group['message_count']
-                ]);
-                
-                // 1. Create ledger entry for this settlement
-                $debitAccount = $this->getOrCreateSettlementAccount($fromParticipant);
-                $creditAccount = $this->getOrCreateSettlementAccount($toParticipant);
-                
-                $txStmt = $this->db->prepare("
-                    INSERT INTO transactions 
-                    (transaction_type, amount, status, created_at)
-                    VALUES ('SETTLEMENT_FINAL', :amount, 'COMPLETED', NOW())
-                    RETURNING transaction_id
-                ");
-                $txStmt->execute([':amount' => $totalAmount]);
-                $transactionId = $txStmt->fetchColumn();
-                
-                $ledgerStmt = $this->db->prepare("
-                    INSERT INTO ledger_entries
-                    (transaction_id, debit_account_id, credit_account_id, 
-                     amount, currency_code, reference, created_at)
-                    VALUES (:tx, :debit, :credit, :amount, :currency, 
-                             'SETTLEMENT_FINAL', NOW())
-                ");
-                $ledgerStmt->execute([
-                    ':tx' => $transactionId,
-                    ':debit' => $debitAccount,
-                    ':credit' => $creditAccount,
-                    ':amount' => $totalAmount,
-                    ':currency' => $this->currency
-                ]);
-                
-                // 2. Update all settlement messages in this group to COMPLETED
-                $updateMsg = $this->db->prepare("
-                    UPDATE settlement_messages 
-                    SET status = 'COMPLETED', 
-                        processed_at = NOW(),
-                        metadata = jsonb_set(
-                            COALESCE(metadata, '{}'::jsonb),
-                            '{settlement_details}',
-                            jsonb_build_object(
-                                'finalized_at', to_jsonb(NOW()),
-                                'transaction_id', to_jsonb(?),
-                                'batch_total', to_jsonb(?)
+        try {
+            // Get pending settlements, grouped by participant pair
+            $pending = $this->db->prepare("
+                SELECT 
+                    from_participant,
+                    to_participant,
+                    COUNT(*) as message_count,
+                    SUM(amount) as total_amount,
+                    MIN(created_at) as oldest_message,
+                    MAX(created_at) as newest_message
+                FROM settlement_messages
+                WHERE status = 'PENDING'
+                GROUP BY from_participant, to_participant
+                ORDER BY oldest_message ASC
+                LIMIT :limit
+            ");
+            $pending->bindValue(':limit', self::SETTLEMENT_BATCH_SIZE, PDO::PARAM_INT);
+            $pending->execute();
+            
+            while ($group = $pending->fetch(PDO::FETCH_ASSOC)) {
+                try {
+                    $this->db->beginTransaction();
+                    
+                    $fromParticipant = $group['from_participant'];
+                    $toParticipant = $group['to_participant'];
+                    $totalAmount = (float)$group['total_amount'];
+                    
+                    $this->logSettlementEvent('SETTLEMENT_GROUP_PROCESSING', [
+                        'from' => $fromParticipant,
+                        'to' => $toParticipant,
+                        'amount' => $totalAmount,
+                        'message_count' => $group['message_count']
+                    ]);
+                    
+                    // 1. Create ledger entry for this settlement
+                    $debitAccount = $this->getOrCreateSettlementAccount($fromParticipant);
+                    $creditAccount = $this->getOrCreateSettlementAccount($toParticipant);
+                    
+                    $txStmt = $this->db->prepare("
+                        INSERT INTO transactions 
+                        (transaction_type, amount, status, created_at)
+                        VALUES ('SETTLEMENT_FINAL', :amount, 'COMPLETED', NOW())
+                        RETURNING transaction_id
+                    ");
+                    $txStmt->execute([':amount' => $totalAmount]);
+                    $transactionId = $txStmt->fetchColumn();
+                    
+                    $ledgerStmt = $this->db->prepare("
+                        INSERT INTO ledger_entries
+                        (transaction_id, debit_account_id, credit_account_id, 
+                         amount, currency_code, reference, created_at)
+                        VALUES (:tx, :debit, :credit, :amount, :currency, 
+                                 'SETTLEMENT_FINAL', NOW())
+                    ");
+                    $ledgerStmt->execute([
+                        ':tx' => $transactionId,
+                        ':debit' => $debitAccount,
+                        ':credit' => $creditAccount,
+                        ':amount' => $totalAmount,
+                        ':currency' => $this->currency
+                    ]);
+                    
+                    // 2. Update all settlement messages in this group to COMPLETED
+                    $updateMsg = $this->db->prepare("
+                        UPDATE settlement_messages 
+                        SET status = 'COMPLETED', 
+                            processed_at = NOW(),
+                            metadata = jsonb_set(
+                                COALESCE(metadata, '{}'::jsonb),
+                                '{settlement_details}',
+                                jsonb_build_object(
+                                    'finalized_at', to_jsonb(NOW()),
+                                    'transaction_id', to_jsonb(?),
+                                    'batch_total', to_jsonb(?)
+                                )
                             )
-                        )
-                    WHERE from_participant = ? 
-                    AND to_participant = ? 
-                    AND status = 'PENDING'
-                ");
-                $updateMsg->execute([
-                    $transactionId,
-                    $totalAmount,
-                    $fromParticipant,
-                    $toParticipant
-                ]);
-                
-                // 3. Update net positions (add to existing or create new)
-                $this->updateNetPositionsForSettlement($fromParticipant, $toParticipant, $totalAmount);
-                
-                // 4. Update swap_ledgers if needed
-                $updateLedgers = $this->db->prepare("
-                    UPDATE swap_ledgers 
-                    SET settled_at = NOW(),
-                        status = 'settled'
-                    WHERE from_institution = ? 
-                    AND to_institution = ?
-                    AND status = 'pending'
-                ");
-                $updateLedgers->execute([$fromParticipant, $toParticipant]);
-                
-                $this->db->commit();
-                
-                $stats['processed']++;
-                $stats['net_positions_updated']++;
-                $stats['total_amount'] += $totalAmount;
-                
-                $this->logSettlementEvent('SETTLEMENT_GROUP_COMPLETED', [
-                    'from' => $fromParticipant,
-                    'to' => $toParticipant,
-                    'amount' => $totalAmount,
-                    'message_count' => $group['message_count']
-                ]);
-                
-            } catch (Exception $e) {
-                $this->db->rollBack();
-                $stats['failed']++;
-                $stats['errors'][] = $fromParticipant . '→' . $toParticipant . ': ' . $e->getMessage();
-                
-                $this->logSettlementEvent('SETTLEMENT_GROUP_FAILED', [
-                    'from' => $fromParticipant,
-                    'to' => $toParticipant,
-                    'error' => $e->getMessage()
-                ], 'error');
+                        WHERE from_participant = ? 
+                        AND to_participant = ? 
+                        AND status = 'PENDING'
+                    ");
+                    $updateMsg->execute([
+                        $transactionId,
+                        $totalAmount,
+                        $fromParticipant,
+                        $toParticipant
+                    ]);
+                    
+                    // 3. Update net positions (add to existing or create new)
+                    $this->updateNetPositionsForSettlement($fromParticipant, $toParticipant, $totalAmount);
+                    
+                    // 4. Update swap_ledgers if needed
+                    $updateLedgers = $this->db->prepare("
+                        UPDATE swap_ledgers 
+                        SET settled_at = NOW(),
+                            status = 'settled'
+                        WHERE from_institution = ? 
+                        AND to_institution = ?
+                        AND status = 'pending'
+                    ");
+                    $updateLedgers->execute([$fromParticipant, $toParticipant]);
+                    
+                    $this->db->commit();
+                    
+                    $stats['processed']++;
+                    $stats['net_positions_updated']++;
+                    $stats['total_amount'] += $totalAmount;
+                    
+                    $this->logSettlementEvent('SETTLEMENT_GROUP_COMPLETED', [
+                        'from' => $fromParticipant,
+                        'to' => $toParticipant,
+                        'amount' => $totalAmount,
+                        'message_count' => $group['message_count']
+                    ]);
+                    
+                } catch (Exception $e) {
+                    $this->db->rollBack();
+                    $stats['failed']++;
+                    $stats['errors'][] = $fromParticipant . '→' . $toParticipant . ': ' . $e->getMessage();
+                    
+                    $this->logSettlementEvent('SETTLEMENT_GROUP_FAILED', [
+                        'from' => $fromParticipant,
+                        'to' => $toParticipant,
+                        'error' => $e->getMessage()
+                    ], 'error');
+                }
             }
+            
+        } catch (Exception $e) {
+            error_log("[SETTLEMENT] Fatal error in finalizePendingSettlements: " . $e->getMessage());
+            $stats['fatal_error'] = $e->getMessage();
         }
         
-    } catch (Exception $e) {
-        error_log("[SETTLEMENT] Fatal error in finalizePendingSettlements: " . $e->getMessage());
-        $stats['fatal_error'] = $e->getMessage();
+        return $stats;
     }
-    
-    return $stats;
-}
 
-/**
- * Update net positions table specifically for settlement finalization
- */
-private function updateNetPositionsForSettlement(string $debtor, string $creditor, float $amount): void
-{
-    try {
-        // Check if record exists
-        $checkStmt = $this->db->prepare("
-            SELECT amount FROM net_positions 
-            WHERE debtor = :debtor AND creditor = :creditor
-        ");
-        $checkStmt->execute([
-            ':debtor' => $debtor,
-            ':creditor' => $creditor
-        ]);
-        $existing = $checkStmt->fetch(PDO::FETCH_ASSOC);
-        
-        if ($existing) {
-            // Add to existing (this is a DEBIT for debtor, CREDIT for creditor)
-            $stmt = $this->db->prepare("
-                UPDATE net_positions 
-                SET amount = amount + :amount,
-                    updated_at = NOW()
+    /**
+     * Update net positions table specifically for settlement finalization
+     */
+    private function updateNetPositionsForSettlement(string $debtor, string $creditor, float $amount): void
+    {
+        try {
+            // Check if record exists
+            $checkStmt = $this->db->prepare("
+                SELECT amount FROM net_positions 
                 WHERE debtor = :debtor AND creditor = :creditor
             ");
-            $stmt->execute([
+            $checkStmt->execute([
                 ':debtor' => $debtor,
-                ':creditor' => $creditor,
-                ':amount' => $amount
+                ':creditor' => $creditor
             ]);
-        } else {
-            // Create new record
-            $stmt = $this->db->prepare("
-                INSERT INTO net_positions 
-                    (debtor, creditor, amount, currency_code, created_at, updated_at)
-                VALUES 
-                    (:debtor, :creditor, :amount, :currency, NOW(), NOW())
+            $existing = $checkStmt->fetch(PDO::FETCH_ASSOC);
+            
+            if ($existing) {
+                // Add to existing (this is a DEBIT for debtor, CREDIT for creditor)
+                $stmt = $this->db->prepare("
+                    UPDATE net_positions 
+                    SET amount = amount + :amount,
+                        updated_at = NOW()
+                    WHERE debtor = :debtor AND creditor = :creditor
+                ");
+                $stmt->execute([
+                    ':debtor' => $debtor,
+                    ':creditor' => $creditor,
+                    ':amount' => $amount
+                ]);
+            } else {
+                // Create new record
+                $stmt = $this->db->prepare("
+                    INSERT INTO net_positions 
+                        (debtor, creditor, amount, currency_code, created_at, updated_at)
+                    VALUES 
+                        (:debtor, :creditor, :amount, :currency, NOW(), NOW())
+                ");
+                $stmt->execute([
+                    ':debtor' => $debtor,
+                    ':creditor' => $creditor,
+                    ':amount' => $amount,
+                    ':currency' => $this->currency
+                ]);
+            }
+            
+        } catch (Exception $e) {
+            error_log("Failed to update net positions for settlement: " . $e->getMessage());
+            throw $e; // Re-throw because settlement should fail if net positions can't be updated
+        }
+    }
+
+    /**
+     * Calculate net positions for all participants (for reporting)
+     */
+    public function calculateAllNetPositions(): array
+    {
+        $result = [];
+        
+        try {
+            $stmt = $this->db->query("
+                SELECT 
+                    debtor,
+                    creditor,
+                    SUM(amount) as net_amount
+                FROM net_positions
+                GROUP BY debtor, creditor
+                ORDER BY debtor, creditor
             ");
-            $stmt->execute([
-                ':debtor' => $debtor,
-                ':creditor' => $creditor,
-                ':amount' => $amount,
-                ':currency' => $this->currency
+            
+            while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                $result[] = [
+                    'debtor' => $row['debtor'],
+                    'creditor' => $row['creditor'],
+                    'amount' => (float)$row['net_amount']
+                ];
+            }
+            
+        } catch (Exception $e) {
+            error_log("Failed to calculate net positions: " . $e->getMessage());
+        }
+        
+        return $result;
+    }
+
+    /**
+     * Reset net positions after settlement (end of day)
+     */
+    public function resetNetPositions(): array
+    {
+        $stats = ['reset_count' => 0];
+        
+        try {
+            $this->db->beginTransaction();
+            
+            // Check if archive table exists, create if not
+            $this->db->exec("
+                CREATE TABLE IF NOT EXISTS net_positions_archive (
+                    id BIGSERIAL PRIMARY KEY,
+                    debtor VARCHAR(100),
+                    creditor VARCHAR(100),
+                    amount NUMERIC(20,8),
+                    currency_code CHAR(3),
+                    archived_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            ");
+            
+            // Archive current positions (optional - for audit)
+            $archiveStmt = $this->db->query("
+                INSERT INTO net_positions_archive 
+                    (debtor, creditor, amount, currency_code, archived_at)
+                SELECT 
+                    debtor, creditor, amount, currency_code, NOW()
+                FROM net_positions
+                WHERE amount != 0
+            ");
+            
+            // Reset all positions to zero
+            $resetStmt = $this->db->prepare("
+                UPDATE net_positions 
+                SET amount = 0, updated_at = NOW()
+                WHERE amount != 0
+            ");
+            $resetStmt->execute();
+            $stats['reset_count'] = $resetStmt->rowCount();
+            
+            $this->db->commit();
+            
+            $this->logSettlementEvent('NET_POSITIONS_RESET', [
+                'count' => $stats['reset_count']
             ]);
+            
+        } catch (Exception $e) {
+            $this->db->rollBack();
+            error_log("Failed to reset net positions: " . $e->getMessage());
+            $stats['error'] = $e->getMessage();
         }
         
-    } catch (Exception $e) {
-        error_log("Failed to update net positions for settlement: " . $e->getMessage());
-        throw $e; // Re-throw because settlement should fail if net positions can't be updated
+        return $stats;
     }
-}
 
-/**
- * Calculate net positions for all participants (for reporting)
- */
-public function calculateAllNetPositions(): array
-{
-    $result = [];
-    
-    try {
-        $stmt = $this->db->query("
-            SELECT 
-                debtor,
-                creditor,
-                SUM(amount) as net_amount
-            FROM net_positions
-            GROUP BY debtor, creditor
-            ORDER BY debtor, creditor
-        ");
+    /**
+     * Log settlement events for audit trail
+     */
+    private function logSettlementEvent(string $event, array $data, string $severity = 'info'): void
+    {
+        $logEntry = json_encode([
+            'timestamp' => date('c'),
+            'event' => $event,
+            'severity' => $severity,
+            'data' => $data
+        ]);
         
-        while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-            $result[] = [
-                'debtor' => $row['debtor'],
-                'creditor' => $row['creditor'],
-                'amount' => (float)$row['net_amount']
-            ];
+        file_put_contents('/tmp/vouchmorph_settlement.log', $logEntry . PHP_EOL, FILE_APPEND);
+        
+        // Also log to database audit_logs if available
+        try {
+            $stmt = $this->db->prepare("
+                INSERT INTO audit_logs 
+                (entity, action, category, severity, performed_at, new_value)
+                VALUES ('SETTLEMENT', ?, 'SETTLEMENT', ?, NOW(), ?::jsonb)
+            ");
+            $stmt->execute([$event, $severity, json_encode($data)]);
+        } catch (Exception $e) {
+            // Non-critical, just log
+            error_log("Failed to write settlement audit log: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * Get settlement summary for dashboard
+     */
+    public function getSettlementSummary(): array
+    {
+        $summary = [];
+        
+        try {
+            // Pending settlements count and value
+            $pendingStmt = $this->db->query("
+                SELECT 
+                    COUNT(*) as pending_count,
+                    COALESCE(SUM(amount), 0) as pending_value
+                FROM settlement_messages
+                WHERE status = 'PENDING'
+            ");
+            $summary['pending'] = $pendingStmt->fetch(PDO::FETCH_ASSOC);
+            
+            // Net positions
+            $netStmt = $this->db->query("
+                SELECT 
+                    COUNT(DISTINCT debtor) as debtor_count,
+                    COUNT(DISTINCT creditor) as creditor_count,
+                    COALESCE(SUM(amount), 0) as total_exposure
+                FROM net_positions
+                WHERE amount != 0
+            ");
+            $summary['net_positions'] = $netStmt->fetch(PDO::FETCH_ASSOC);
+            
+            // Today's settlements
+            $todayStmt = $this->db->prepare("
+                SELECT 
+                    COUNT(*) as today_count,
+                    COALESCE(SUM(amount), 0) as today_value
+                FROM settlement_messages
+                WHERE DATE(created_at) = CURRENT_DATE
+                AND status = 'COMPLETED'
+            ");
+            $todayStmt->execute();
+            $summary['today'] = $todayStmt->fetch(PDO::FETCH_ASSOC);
+            
+        } catch (Exception $e) {
+            error_log("Failed to get settlement summary: " . $e->getMessage());
         }
         
-    } catch (Exception $e) {
-        error_log("Failed to calculate net positions: " . $e->getMessage());
+        return $summary;
     }
-    
-    return $result;
-}
 
-/**
- * Get net position for a specific participant pair
- */
-public function getNetPosition(string $debtor, string $creditor): float
-{
-    try {
-        $stmt = $this->db->prepare("
-            SELECT amount FROM net_positions
-            WHERE debtor = :debtor AND creditor = :creditor
-        ");
-        $stmt->execute([
-            ':debtor' => $debtor,
-            ':creditor' => $creditor
-        ]);
-        
-        $result = $stmt->fetch(PDO::FETCH_ASSOC);
-        return $result ? (float)$result['amount'] : 0.0;
-        
-    } catch (Exception $e) {
-        error_log("Failed to get net position: " . $e->getMessage());
-        return 0.0;
-    }
-}
-
-/**
- * Reset net positions after settlement (end of day)
- */
-public function resetNetPositions(): array
-{
-    $stats = ['reset_count' => 0];
-    
-    try {
-        $this->db->beginTransaction();
-        
-        // Archive current positions (optional - for audit)
-        $archiveStmt = $this->db->query("
-            INSERT INTO net_positions_archive 
-                (debtor, creditor, amount, currency_code, archived_at)
-            SELECT 
-                debtor, creditor, amount, currency_code, NOW()
-            FROM net_positions
-            WHERE amount != 0
-        ");
-        
-        // Reset all positions to zero
-        $resetStmt = $this->db->prepare("
-            UPDATE net_positions 
-            SET amount = 0, updated_at = NOW()
-            WHERE amount != 0
-        ");
-        $resetStmt->execute();
-        $stats['reset_count'] = $resetStmt->rowCount();
-        
-        $this->db->commit();
-        
-        $this->logSettlementEvent('NET_POSITIONS_RESET', [
-            'count' => $stats['reset_count']
-        ]);
-        
-    } catch (Exception $e) {
-        $this->db->rollBack();
-        error_log("Failed to reset net positions: " . $e->getMessage());
-        $stats['error'] = $e->getMessage();
-    }
-    
-    return $stats;
-}
-
-/**
- * Log settlement events for audit trail
- */
-private function logSettlementEvent(string $event, array $data, string $severity = 'info'): void
-{
-    $logEntry = json_encode([
-        'timestamp' => date('c'),
-        'event' => $event,
-        'severity' => $severity,
-        'data' => $data
-    ]);
-    
-    file_put_contents('/tmp/vouchmorph_settlement.log', $logEntry . PHP_EOL, FILE_APPEND);
-    
-    // Also log to database audit_logs if available
-    try {
-        $stmt = $this->db->prepare("
-            INSERT INTO audit_logs 
-            (entity, action, category, severity, performed_at, new_value)
-            VALUES ('SETTLEMENT', ?, 'SETTLEMENT', ?, NOW(), ?::jsonb)
-        ");
-        $stmt->execute([$event, $severity, json_encode($data)]);
-    } catch (Exception $e) {
-        // Non-critical, just log
-        error_log("Failed to write settlement audit log: " . $e->getMessage());
-    }
-}
-
-/**
- * Get settlement summary for dashboard
- */
-public function getSettlementSummary(): array
-{
-    $summary = [];
-    
-    try {
-        // Pending settlements count and value
-        $pendingStmt = $this->db->query("
-            SELECT 
-                COUNT(*) as pending_count,
-                COALESCE(SUM(amount), 0) as pending_value
-            FROM settlement_messages
-            WHERE status = 'PENDING'
-        ");
-        $summary['pending'] = $pendingStmt->fetch(PDO::FETCH_ASSOC);
-        
-        // Net positions
-        $netStmt = $this->db->query("
-            SELECT 
-                COUNT(DISTINCT debtor) as debtor_count,
-                COUNT(DISTINCT creditor) as creditor_count,
-                COALESCE(SUM(amount), 0) as total_exposure
-            FROM net_positions
-            WHERE amount != 0
-        ");
-        $summary['net_positions'] = $netStmt->fetch(PDO::FETCH_ASSOC);
-        
-        // Today's settlements
-        $todayStmt = $this->db->prepare("
-            SELECT 
-                COUNT(*) as today_count,
-                COALESCE(SUM(amount), 0) as today_value
-            FROM settlement_messages
-            WHERE DATE(created_at) = CURRENT_DATE
-            AND status = 'COMPLETED'
-        ");
-        $todayStmt->execute();
-        $summary['today'] = $todayStmt->fetch(PDO::FETCH_ASSOC);
-        
-    } catch (Exception $e) {
-        error_log("Failed to get settlement summary: " . $e->getMessage());
-    }
-    
-    return $summary;
-}
-
-    
     /* =====================================================
        GET OR CREATE SETTLEMENT ACCOUNT
     ===================================================== */
@@ -822,4 +808,3 @@ public function getSettlementSummary(): array
         return (int)$insert->fetchColumn();
     }
 }
-
