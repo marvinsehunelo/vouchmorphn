@@ -24,7 +24,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 }
 
 // Bootstrap
-require_once __DIR__ . '/../../../bootstrap.php';
+require_once __DIR__ . '/../../../../src/bootstrap.php';
 
 use BUSINESS_LOGIC_LAYER\services\CardService;
 
