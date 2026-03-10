@@ -1,3 +1,12 @@
-RewriteEngine On
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    
+    # If the requested file exists, serve it directly
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteCond %{REQUEST_FILENAME} !-d
+    
+    # Otherwise, add .php extension and try again
+    RewriteRule ^(.*)$ $1.php [L,QSA]
+</IfModule>RewriteEngine On
 RewriteCond %{REQUEST_FILENAME} !-f
 RewriteRule ^(.*)$ $1.php [L,QSA]
