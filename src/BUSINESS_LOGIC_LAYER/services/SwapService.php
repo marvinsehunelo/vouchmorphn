@@ -7,6 +7,7 @@ require_once __DIR__ . '/settlement/HybridSettlementStrategy.php';
 require_once __DIR__ . '/../Helpers/SwapStatusResolver.php';
 require_once __DIR__ . '/../../INTEGRATION_LAYER/CLIENTS/BankClients/GenericBankClient.php';
 require_once __DIR__ . '/SmsNotificationService.php';
+require_once __DIR__ . '/CardService.php';
 
 use PDO;
 use Exception;
@@ -15,6 +16,7 @@ use SECURITY_LAYER\Encryption\TokenEncryptor;
 use BUSINESS_LOGIC_LAYER\Helpers\SwapStatusResolver;
 use BUSINESS_LOGIC_LAYER\services\settlement\HybridSettlementStrategy;
 use BUSINESS_LOGIC_LAYER\services\SmsNotificationService;
+use BUSINESS_LOGIC_LAYER\services\CardService;
 use RuntimeException;
 use INTEGRATION_LAYER\CLIENTS\BankClients\GenericBankClient;
 
@@ -37,9 +39,14 @@ class SwapService
     private array $atmNotes = [];
     private HybridSettlementStrategy $settlement;
     private ?SmsNotificationService $smsService = null;
+    private ?CardService $cardService = null;
 
     private const LOG_FILE = '/tmp/vouchmorphn_swap_audit.log';
     private const DEBUG_FILE = '/tmp/hold_debug.log';
+    
+    private const HOLD_EXPIRY_HOURS = 24;
+    private const VOUCHER_EXPIRY_HOURS = 24;
+    private const EXPIRY_BATCH_SIZE = 100;
     
     private const PHONE_FIELDS = [
         'phone',
@@ -124,6 +131,14 @@ class SwapService
             error_log("[SwapService] SMS Service initialized successfully");
         } catch (\Exception $e) {
             error_log("[SwapService] WARNING: SMS Service initialization failed: " . $e->getMessage());
+        }
+        
+        // Initialize Card Service
+        try {
+            $this->cardService = new CardService($this->swapDB, $this->countryCode, $this->config);
+            error_log("[SwapService] Card Service initialized successfully");
+        } catch (\Exception $e) {
+            error_log("[SwapService] WARNING: Card Service initialization failed: " . $e->getMessage());
         }
         
         error_log("=== SWAPSERVICE CONSTRUCTOR COMPLETE ===");
@@ -725,14 +740,27 @@ class SwapService
                 'debug_steps' => $debugSteps
             ]);
 
-            return [
+            // Prepare response
+            $response = [
                 'status' => 'success',
                 'swap_reference' => $swapRef,
                 'message' => 'Swap initiated successfully',
                 'hold_reference' => $holdResult['hold_reference'] ?? null,
-                'dispensed_notes' => $atmResult['notes'] ?? [],
                 'debug' => $debugSteps
             ];
+
+            // Add card details if this was a card issuance
+            if (isset($destination['delivery_mode']) && $destination['delivery_mode'] === 'card') {
+                $metadata = $this->getSwapMetadata($swapRef);
+                if (isset($metadata['card_issuance_result'])) {
+                    $response['card_details'] = $metadata['card_issuance_result'];
+                    $response['message'] = 'Card issued successfully';
+                }
+            } else {
+                $response['dispensed_notes'] = $atmResult['notes'] ?? [];
+            }
+
+            return $response;
 
         } catch (Exception $e) {
             $debugSteps[] = ['time' => microtime(true), 'step' => 'EXCEPTION_CAUGHT', 
@@ -993,7 +1021,7 @@ class SwapService
             'asset_type' => $assetType,
             'amount' => $source['amount'],
             'action' => 'PLACE_HOLD',
-            'expiry' => (new DateTimeImmutable('+24 hours'))->format('Y-m-d H:i:s'),
+            'expiry' => (new DateTimeImmutable('+' . self::HOLD_EXPIRY_HOURS . ' hours'))->format('Y-m-d H:i:s'),
             'hold_reason' => 'PENDING_TRANSACTION'
         ];
 
@@ -1133,6 +1161,9 @@ class SwapService
         ];
     }
 
+    /**
+     * Process cashout to ATM/Agent or issue Message Card
+     */
     private function processCashout(int $swapId, string $swapRef, array $source, array $destination, string $currency, array $holdResult): void
     {
         $debug = [];
@@ -1152,8 +1183,11 @@ class SwapService
             $debug[] = ['time' => microtime(true), 'step' => 'FEE_DEDUCTED', 'fee' => $feeDetails['fee_amount'], 'net' => $feeDetails['net_amount']];
             
             $netAmount = $feeDetails['net_amount'];
-            $cashoutData = $destination['cashout'];
             
+            // Determine delivery mode
+            $deliveryMode = $destination['delivery_mode'] ?? 'cashout';
+            
+            // Find destination institution
             $destInstitutionKey = $this->findInstitutionKey($destination['institution']);
             if (!$destInstitutionKey) {
                 throw new RuntimeException("Destination institution not found: {$destination['institution']}");
@@ -1161,30 +1195,100 @@ class SwapService
             $destParticipant = $this->participants[$destInstitutionKey];
             $debug[] = ['time' => microtime(true), 'step' => 'DEST_FOUND', 'participant' => $destParticipant['provider_code'] ?? $destInstitutionKey];
             
-            if (isset($cashoutData['beneficiary_phone'])) {
-                $originalPhone = $cashoutData['beneficiary_phone'];
-                $cashoutData['beneficiary_phone'] = $this->formatPhoneForInstitution(
-                    $cashoutData['beneficiary_phone'], $destParticipant
+            // Handle different delivery modes
+            if ($deliveryMode === 'card' && $this->cardService) {
+                // MESSAGE CARD ISSUANCE
+                $debug[] = ['time' => microtime(true), 'step' => 'CARD_ISSUANCE_START'];
+                
+                $cardData = $destination['card'] ?? [];
+                $cardholderName = $cardData['cardholder_name'] ?? $destination['beneficiary_name'] ?? $source['cardholder_name'] ?? 'Cardholder';
+                $studentId = $cardData['student_id'] ?? $destination['student_id'] ?? null;
+                $cardPurpose = $cardData['purpose'] ?? 'student';
+                
+                $cardResult = $this->cardService->issueCard([
+                    'hold_reference' => $holdResult['hold_reference'],
+                    'swap_reference' => $swapRef,
+                    'student_id' => $studentId,
+                    'user_id' => $source['user_id'] ?? null,
+                    'cardholder_name' => $cardholderName,
+                    'initial_amount' => $netAmount,
+                    'purpose' => $cardPurpose,
+                    'daily_limit' => $cardData['daily_limit'] ?? null,
+                    'monthly_limit' => $cardData['monthly_limit'] ?? null,
+                    'atm_daily_limit' => $cardData['atm_daily_limit'] ?? null,
+                    'issued_by' => 'swap_service',
+                    'notes' => "Issued from swap $swapRef",
+                    'metadata' => [
+                        'source_institution' => $source['institution'],
+                        'source_asset_type' => $source['asset_type'],
+                        'destination_institution' => $destination['institution']
+                    ]
+                ]);
+                
+                $debug[] = ['time' => microtime(true), 'step' => 'CARD_ISSUED', 
+                           'card_suffix' => $cardResult['card_suffix'],
+                           'card_id' => $cardResult['card_id']];
+                
+                $this->updateSwapMetadata($swapRef, [
+                    'issued_card_id' => $cardResult['card_id'],
+                    'card_suffix' => $cardResult['card_suffix'],
+                    'card_expiry' => $cardResult['expiry']
+                ]);
+                
+                $this->logEvent($swapRef, 'CARD_ISSUED', [
+                    'card_suffix' => $cardResult['card_suffix'],
+                    'amount' => $netAmount,
+                    'expiry' => $cardResult['expiry']
+                ]);
+                
+                $this->sendCardDetailsSms(
+                    $destination['beneficiary_phone'] ?? $source['phone'] ?? null,
+                    $cardResult['card_number'],
+                    $cardResult['cvv'],
+                    $cardResult['expiry'],
+                    $netAmount,
+                    $currency
                 );
-                $debug[] = ['time' => microtime(true), 'step' => 'PHONE_FORMATTED', 'original' => $originalPhone, 'formatted' => $cashoutData['beneficiary_phone']];
+                
+                $debug[] = ['time' => microtime(true), 'step' => 'CARD_DETAILS_SENT'];
+                
+                $this->setCardResult($swapRef, $cardResult);
+                
+            } else {
+                // TRADITIONAL ATM/AGENT CASHOUT
+                $cashoutData = $destination['cashout'] ?? [];
+                
+                if (isset($cashoutData['beneficiary_phone'])) {
+                    $originalPhone = $cashoutData['beneficiary_phone'];
+                    $cashoutData['beneficiary_phone'] = $this->formatPhoneForInstitution(
+                        $cashoutData['beneficiary_phone'], $destParticipant
+                    );
+                    $debug[] = ['time' => microtime(true), 'step' => 'PHONE_FORMATTED', 
+                               'original' => $originalPhone, 
+                               'formatted' => $cashoutData['beneficiary_phone']];
+                }
+                
+                $rawCode = (string)random_int(100000, 999999);
+                $codeHash = password_hash($rawCode, PASSWORD_BCRYPT);
+                $debug[] = ['time' => microtime(true), 'step' => 'CODE_GENERATED', 
+                           'raw_length' => strlen($rawCode), 
+                           'hash_length' => strlen($codeHash)];
+
+                $debug[] = ['time' => microtime(true), 'step' => 'CREATING_VOUCHER'];
+                $this->createCashoutVoucher($swapId, $codeHash, $destination, $rawCode, $cashoutData);
+                $debug[] = ['time' => microtime(true), 'step' => 'VOUCHER_CREATED'];
+                
+                $debug[] = ['time' => microtime(true), 'step' => 'REQUESTING_ATM_TOKEN'];
+                $atmToken = $this->requestAtmToken($swapRef, $source, $destination, $codeHash, $holdResult, $destParticipant, $netAmount);
+                $debug[] = ['time' => microtime(true), 'step' => 'ATM_TOKEN_RECEIVED', 
+                           'token_reference' => $atmToken['token_reference'] ?? null];
+
+                $debug[] = ['time' => microtime(true), 'step' => 'SENDING_SMS'];
+                $this->sendWithdrawalSms($cashoutData['beneficiary_phone'] ?? '', $rawCode, $atmToken, $netAmount, $currency);
+                $debug[] = ['time' => microtime(true), 'step' => 'SMS_SENT'];
             }
-            
-            $rawCode = (string)random_int(100000, 999999);
-            $codeHash = password_hash($rawCode, PASSWORD_BCRYPT);
-            $debug[] = ['time' => microtime(true), 'step' => 'CODE_GENERATED', 'raw_length' => strlen($rawCode), 'hash_length' => strlen($codeHash)];
 
-            $debug[] = ['time' => microtime(true), 'step' => 'CREATING_VOUCHER'];
-            $this->createCashoutVoucher($swapId, $codeHash, $destination, $rawCode, $cashoutData);
-            $debug[] = ['time' => microtime(true), 'step' => 'VOUCHER_CREATED'];
-            
-            $debug[] = ['time' => microtime(true), 'step' => 'REQUESTING_ATM_TOKEN'];
-            $atmToken = $this->requestAtmToken($swapRef, $source, $destination, $codeHash, $holdResult, $destParticipant, $netAmount);
-            $debug[] = ['time' => microtime(true), 'step' => 'ATM_TOKEN_RECEIVED', 'token_reference' => $atmToken['token_reference'] ?? null];
-
-            $debug[] = ['time' => microtime(true), 'step' => 'SENDING_SMS'];
-            $this->sendWithdrawalSms($cashoutData['beneficiary_phone'], $rawCode, $atmToken, $netAmount, $currency);
-            $debug[] = ['time' => microtime(true), 'step' => 'SMS_SENT'];
-            
+            // COMMON STEPS FOR BOTH MODES
             $debug[] = ['time' => microtime(true), 'step' => 'QUEUEING_SETTLEMENT'];
             $this->queueSettlementMessage($swapRef, $source, $destination, $grossAmount, $holdResult, $feeDetails);
             $debug[] = ['time' => microtime(true), 'step' => 'SETTLEMENT_QUEUED'];
@@ -1235,103 +1339,98 @@ class SwapService
         ]);
     }
 
-   /**
- * Request ATM token from destination institution - ENHANCED WITH DEBUGGING
- */
-private function requestAtmToken(string $swapRef, array $source, array $destination, string $codeHash, array $holdResult, array $participant, ?float $netAmount = null): array
-{
-    $debug = [];
-    $debug[] = ['time' => microtime(true), 'step' => 'REQUEST_TOKEN_START'];
-    
-    try {
-        $bankClient = new GenericBankClient($participant);
-        $debug[] = ['time' => microtime(true), 'step' => 'BANK_CLIENT_CREATED'];
-
-        $payload = [
-            'reference' => $swapRef,
-            'source_institution' => $source['institution'],
-            'source_hold_reference' => $holdResult['hold_reference'] ?? null,
-            'source_asset_type' => $source['asset_type'],
-            'beneficiary_phone' => $destination['cashout']['beneficiary_phone'],
-            'amount' => $netAmount ?? $destination['amount'],
-            'code_hash' => $codeHash,
-            'action' => 'GENERATE_ATM_TOKEN'
-        ];
+    /**
+     * Request ATM token from destination institution
+     */
+    private function requestAtmToken(string $swapRef, array $source, array $destination, string $codeHash, array $holdResult, array $participant, ?float $netAmount = null): array
+    {
+        $debug = [];
+        $debug[] = ['time' => microtime(true), 'step' => 'REQUEST_TOKEN_START'];
         
-        $debug[] = ['time' => microtime(true), 'step' => 'PAYLOAD_PREPARED', 'payload' => $payload];
+        try {
+            $bankClient = new GenericBankClient($participant);
+            $debug[] = ['time' => microtime(true), 'step' => 'BANK_CLIENT_CREATED'];
 
-        // Log before API call
-        error_log("REQUEST_TOKEN: About to call bankClient->transfer with payload: " . json_encode($payload));
-        
-        $result = $bankClient->transfer($payload, 'generate_atm_code');
-        
-        $debug[] = ['time' => microtime(true), 'step' => 'API_CALL_COMPLETE', 'result_success' => $result['success'] ?? false];
-        error_log("REQUEST_TOKEN: API call result: " . json_encode($result));
+            $payload = [
+                'reference' => $swapRef,
+                'source_institution' => $source['institution'],
+                'source_hold_reference' => $holdResult['hold_reference'] ?? null,
+                'source_asset_type' => $source['asset_type'],
+                'beneficiary_phone' => $destination['cashout']['beneficiary_phone'],
+                'amount' => $netAmount ?? $destination['amount'],
+                'code_hash' => $codeHash,
+                'action' => 'GENERATE_ATM_TOKEN'
+            ];
+            
+            $debug[] = ['time' => microtime(true), 'step' => 'PAYLOAD_PREPARED', 'payload' => $payload];
 
-        $this->debugApiCall('generate_token', ['reference' => $swapRef], $result);
+            error_log("REQUEST_TOKEN: About to call bankClient->transfer with payload: " . json_encode($payload));
+            
+            $result = $bankClient->transfer($payload, 'generate_atm_code');
+            
+            $debug[] = ['time' => microtime(true), 'step' => 'API_CALL_COMPLETE', 'result_success' => $result['success'] ?? false];
+            error_log("REQUEST_TOKEN: API call result: " . json_encode($result));
 
-        // Log the API call
-        $this->logApiMessage(
-            $swapRef,
-            'generate_token',
-            'outgoing',
-            $participant,
-            '/api/generate-atm-code',
-            $payload,
-            $result,
-            null
-        );
+            $this->debugApiCall('generate_token', ['reference' => $swapRef], $result);
 
-        // Check if HTTP request was successful
-        if (!isset($result['success']) || $result['success'] !== true) {
-            $errorMsg = 'Bank communication failed';
-            if (isset($result['curl_error']) && !empty($result['curl_error'])) {
-                $errorMsg .= ': ' . $result['curl_error'];
-                $debug[] = ['time' => microtime(true), 'step' => 'CURL_ERROR', 'error' => $result['curl_error']];
-            } elseif (isset($result['status_code'])) {
-                $errorMsg .= ': HTTP ' . $result['status_code'];
-                $debug[] = ['time' => microtime(true), 'step' => 'HTTP_ERROR', 'code' => $result['status_code']];
+            $this->logApiMessage(
+                $swapRef,
+                'generate_token',
+                'outgoing',
+                $participant,
+                '/api/generate-atm-code',
+                $payload,
+                $result,
+                null
+            );
+
+            if (!isset($result['success']) || $result['success'] !== true) {
+                $errorMsg = 'Bank communication failed';
+                if (isset($result['curl_error']) && !empty($result['curl_error'])) {
+                    $errorMsg .= ': ' . $result['curl_error'];
+                    $debug[] = ['time' => microtime(true), 'step' => 'CURL_ERROR', 'error' => $result['curl_error']];
+                } elseif (isset($result['status_code'])) {
+                    $errorMsg .= ': HTTP ' . $result['status_code'];
+                    $debug[] = ['time' => microtime(true), 'step' => 'HTTP_ERROR', 'code' => $result['status_code']];
+                }
+                error_log("REQUEST_TOKEN ERROR: " . $errorMsg);
+                error_log("REQUEST_TOKEN DEBUG: " . json_encode($debug));
+                throw new RuntimeException("Failed to generate ATM token: " . $errorMsg);
             }
-            error_log("REQUEST_TOKEN ERROR: " . $errorMsg);
-            error_log("REQUEST_TOKEN DEBUG: " . json_encode($debug));
-            throw new RuntimeException("Failed to generate ATM token: " . $errorMsg);
+
+            $bankResponse = $result['data'] ?? [];
+            $debug[] = ['time' => microtime(true), 'step' => 'BANK_RESPONSE_RECEIVED', 'bank_response' => $bankResponse];
+
+            $this->logEvent($swapRef, 'ATM_TOKEN_BANK_RESPONSE', [
+                'bank_response' => $bankResponse
+            ]);
+
+            if (!isset($bankResponse['token_generated']) || $bankResponse['token_generated'] !== true) {
+                $errorMsg = $bankResponse['message'] ?? $bankResponse['error'] ?? 'Unknown error';
+                $debug[] = ['time' => microtime(true), 'step' => 'TOKEN_NOT_GENERATED', 'error' => $errorMsg];
+                error_log("REQUEST_TOKEN ERROR: Token not generated - " . $errorMsg);
+                error_log("REQUEST_TOKEN DEBUG: " . json_encode($debug));
+                throw new RuntimeException("Failed to generate ATM token: " . $errorMsg);
+            }
+
+            $this->logEvent($swapRef, 'ATM_TOKEN_GENERATED', [
+                'institution' => $participant['provider_code'] ?? $destination['institution'],
+                'token_reference' => $bankResponse['token_reference'] ?? null
+            ]);
+            
+            $debug[] = ['time' => microtime(true), 'step' => 'TOKEN_GENERATED_SUCCESS', 'token_ref' => $bankResponse['token_reference'] ?? null];
+            error_log("REQUEST_TOKEN SUCCESS: " . json_encode($debug));
+
+        } catch (Exception $e) {
+            $debug[] = ['time' => microtime(true), 'step' => 'REQUEST_TOKEN_EXCEPTION', 'error' => $e->getMessage()];
+            error_log("REQUEST_TOKEN EXCEPTION: " . $e->getMessage());
+            error_log("REQUEST_TOKEN EXCEPTION DEBUG: " . json_encode($debug));
+            error_log("REQUEST_TOKEN EXCEPTION TRACE: " . $e->getTraceAsString());
+            throw $e;
         }
 
-        // Extract the actual bank response from the 'data' field
-        $bankResponse = $result['data'] ?? [];
-        $debug[] = ['time' => microtime(true), 'step' => 'BANK_RESPONSE_RECEIVED', 'bank_response' => $bankResponse];
-
-        $this->logEvent($swapRef, 'ATM_TOKEN_BANK_RESPONSE', [
-            'bank_response' => $bankResponse
-        ]);
-
-        // Check if token was generated successfully
-        if (!isset($bankResponse['token_generated']) || $bankResponse['token_generated'] !== true) {
-            $errorMsg = $bankResponse['message'] ?? $bankResponse['error'] ?? 'Unknown error';
-            $debug[] = ['time' => microtime(true), 'step' => 'TOKEN_NOT_GENERATED', 'error' => $errorMsg];
-            error_log("REQUEST_TOKEN ERROR: Token not generated - " . $errorMsg);
-            error_log("REQUEST_TOKEN DEBUG: " . json_encode($debug));
-            throw new RuntimeException("Failed to generate ATM token: " . $errorMsg);
-        }
-
-        $this->logEvent($swapRef, 'ATM_TOKEN_GENERATED', [
-            'institution' => $participant['provider_code'] ?? $destination['institution'],
-            'token_reference' => $bankResponse['token_reference'] ?? null
-        ]);
-        
-        $debug[] = ['time' => microtime(true), 'step' => 'TOKEN_GENERATED_SUCCESS', 'token_ref' => $bankResponse['token_reference'] ?? null];
-        error_log("REQUEST_TOKEN SUCCESS: " . json_encode($debug));
-
-    } catch (Exception $e) {
-        $debug[] = ['time' => microtime(true), 'step' => 'REQUEST_TOKEN_EXCEPTION', 'error' => $e->getMessage()];
-        error_log("REQUEST_TOKEN EXCEPTION: " . $e->getMessage());
-        error_log("REQUEST_TOKEN EXCEPTION DEBUG: " . json_encode($debug));
-        error_log("REQUEST_TOKEN EXCEPTION TRACE: " . $e->getTraceAsString());
-        throw $e;
+        return $bankResponse;
     }
-
-    return $bankResponse;
-}
 
     private function sendBankAuthorization(string $swapRef, array $source, array $destination, string $codeHash, array $participant): void
     {
@@ -1361,136 +1460,422 @@ private function requestAtmToken(string $swapRef, array $source, array $destinat
     }
 
     /**
- * Cancel a pending cashout swap
- * @param string $swapRef The swap reference to cancel
- * @param string $reason Reason for cancellation
- * @param int|null $cancelledBy User ID if user-initiated
- */
-public function cancelSwap(string $swapRef, string $reason = 'User requested cancellation', ?int $cancelledBy = null): array
-{
-    $this->swapDB->beginTransaction();
-    
-    try {
-        // Get swap and hold details
-        $stmt = $this->swapDB->prepare("
-            SELECT 
-                sr.*,
-                ht.hold_reference,
-                ht.status as hold_status,
-                ht.participant_id,
-                p.config as participant_config,
-                sv.voucher_id,
-                sv.status as voucher_status
-            FROM swap_requests sr
-            LEFT JOIN hold_transactions ht ON sr.swap_uuid = ht.swap_reference
-            LEFT JOIN participants p ON ht.participant_id = p.participant_id
-            LEFT JOIN swap_vouchers sv ON sr.swap_id = sv.swap_id
-            WHERE sr.swap_uuid = ?
-            AND sr.status IN ('pending', 'processing')
-            FOR UPDATE
-        ");
-        $stmt->execute([$swapRef]);
-        $swap = $stmt->fetch(PDO::FETCH_ASSOC);
+     * Cancel a pending cashout swap
+     */
+    public function cancelSwap(string $swapRef, string $reason = 'User requested cancellation', ?int $cancelledBy = null): array
+    {
+        $this->swapDB->beginTransaction();
         
-        if (!$swap) {
-            throw new RuntimeException("Swap not found or already completed/cancelled");
-        }
-        
-        error_log("[CANCEL] Cancelling swap: $swapRef, Reason: $reason");
-        
-        // 1. Release the hold if it exists and is ACTIVE
-        if ($swap['hold_reference'] && $swap['hold_status'] === 'ACTIVE' && $swap['participant_config']) {
-            $participant = json_decode($swap['participant_config'], true);
-            $bankClient = new GenericBankClient($participant);
+        try {
+            $stmt = $this->swapDB->prepare("
+                SELECT 
+                    sr.*,
+                    ht.hold_reference,
+                    ht.status as hold_status,
+                    ht.participant_id,
+                    p.config as participant_config,
+                    sv.voucher_id,
+                    sv.status as voucher_status
+                FROM swap_requests sr
+                LEFT JOIN hold_transactions ht ON sr.swap_uuid = ht.swap_reference
+                LEFT JOIN participants p ON ht.participant_id = p.participant_id
+                LEFT JOIN swap_vouchers sv ON sr.swap_id = sv.swap_id
+                WHERE sr.swap_uuid = ?
+                AND sr.status IN ('pending', 'processing')
+                FOR UPDATE
+            ");
+            $stmt->execute([$swapRef]);
+            $swap = $stmt->fetch(PDO::FETCH_ASSOC);
             
-            $releaseResult = $bankClient->releaseHold([
-                'hold_reference' => $swap['hold_reference'],
-                'reason' => $reason
-            ]);
-            
-            if (!isset($releaseResult['success']) || $releaseResult['success'] !== true) {
-                throw new RuntimeException("Failed to release hold: " . ($releaseResult['message'] ?? 'Unknown error'));
+            if (!$swap) {
+                throw new RuntimeException("Swap not found or already completed/cancelled");
             }
             
-            // Update hold status
-            $this->updateHoldStatus($swap['hold_reference'], 'RELEASED');
-        }
-        
-        // 2. Void any associated voucher
-        if ($swap['voucher_id'] && $swap['voucher_status'] === 'ACTIVE') {
-            $voidStmt = $this->swapDB->prepare("
-                UPDATE swap_vouchers 
-                SET status = 'VOIDED',
-                    voided_at = NOW(),
-                    void_reason = ?
-                WHERE voucher_id = ?
-            ");
-            $voidStmt->execute([$reason, $swap['voucher_id']]);
-        }
-        
-        // 3. Update swap status to CANCELLED
-        $updateStmt = $this->swapDB->prepare("
-            UPDATE swap_requests 
-            SET status = 'cancelled',
-                metadata = jsonb_set(
-                    COALESCE(metadata, '{}'::jsonb),
-                    '{cancellation}',
-                    jsonb_build_object(
-                        'cancelled_at', to_jsonb(NOW()),
-                        'cancelled_by', to_jsonb(?),
-                        'reason', to_jsonb(?)
+            error_log("[CANCEL] Cancelling swap: $swapRef, Reason: $reason");
+            
+            if ($swap['hold_reference'] && $swap['hold_status'] === 'ACTIVE' && $swap['participant_config']) {
+                $participant = json_decode($swap['participant_config'], true);
+                $bankClient = new GenericBankClient($participant);
+                
+                $releaseResult = $bankClient->releaseHold([
+                    'hold_reference' => $swap['hold_reference'],
+                    'reason' => $reason
+                ]);
+                
+                if (!isset($releaseResult['success']) || $releaseResult['success'] !== true) {
+                    throw new RuntimeException("Failed to release hold: " . ($releaseResult['message'] ?? 'Unknown error'));
+                }
+                
+                $this->updateHoldStatus($swap['hold_reference'], 'RELEASED');
+            }
+            
+            if ($swap['voucher_id'] && $swap['voucher_status'] === 'ACTIVE') {
+                $voidStmt = $this->swapDB->prepare("
+                    UPDATE swap_vouchers 
+                    SET status = 'VOIDED',
+                        voided_at = NOW(),
+                        void_reason = ?
+                    WHERE voucher_id = ?
+                ");
+                $voidStmt->execute([$reason, $swap['voucher_id']]);
+            }
+            
+            $updateStmt = $this->swapDB->prepare("
+                UPDATE swap_requests 
+                SET status = 'cancelled',
+                    metadata = jsonb_set(
+                        COALESCE(metadata, '{}'::jsonb),
+                        '{cancellation}',
+                        jsonb_build_object(
+                            'cancelled_at', to_jsonb(NOW()),
+                            'cancelled_by', to_jsonb(?),
+                            'reason', to_jsonb(?)
+                        )
                     )
-                )
-            WHERE swap_uuid = ?
-            RETURNING swap_id
-        ");
-        $updateStmt->execute([$cancelledBy ?? 'system', $reason, $swapRef]);
-        
-        // 4. Remove from settlement queue if any
-        if ($swap['hold_reference']) {
-            $queueStmt = $this->swapDB->prepare("
-                DELETE FROM settlement_queue 
-                WHERE hold_reference = ? AND status = 'PENDING'
+                WHERE swap_uuid = ?
+                RETURNING swap_id
             ");
-            $queueStmt->execute([$swap['hold_reference']]);
+            $updateStmt->execute([$cancelledBy ?? 'system', $reason, $swapRef]);
+            
+            if ($swap['hold_reference']) {
+                $queueStmt = $this->swapDB->prepare("
+                    DELETE FROM settlement_queue 
+                    WHERE hold_reference = ? AND status = 'PENDING'
+                ");
+                $queueStmt->execute([$swap['hold_reference']]);
+            }
+            
+            $this->logApiMessage(
+                $swapRef,
+                'swap_cancelled',
+                'internal',
+                null,
+                '/api/swap/cancel',
+                ['reason' => $reason],
+                ['success' => true],
+                null
+            );
+            
+            $this->logEvent($swapRef, 'SWAP_CANCELLED', [
+                'reason' => $reason,
+                'cancelled_by' => $cancelledBy ?? 'system'
+            ]);
+            
+            $this->swapDB->commit();
+            
+            return [
+                'success' => true,
+                'message' => 'Swap cancelled successfully',
+                'swap_reference' => $swapRef,
+                'hold_released' => !empty($swap['hold_reference'])
+            ];
+            
+        } catch (Exception $e) {
+            $this->swapDB->rollBack();
+            error_log("[CANCEL] Failed for $swapRef: " . $e->getMessage());
+            
+            return [
+                'success' => false,
+                'error' => $e->getMessage()
+            ];
+        }
+    }
+
+    // ============================================================================
+    // NEW HELPER METHODS FOR CARD ISSUANCE
+    // ============================================================================
+
+    private function sendCardDetailsSms(?string $phone, string $cardNumber, string $cvv, string $expiry, float $amount, string $currency): void
+    {
+        if (!$phone) {
+            error_log("No phone number provided for card details");
+            return;
         }
         
-        // 5. Log the cancellation
-        $this->logApiMessage(
-            $swapRef,
-            'swap_cancelled',
-            'internal',
-            null,
-            '/api/swap/cancel',
-            ['reason' => $reason],
-            ['success' => true],
-            null
-        );
+        $message = "🔐 VOUCHMORPH MESSAGE CARD\n\n"
+            . "Card: {$cardNumber}\n"
+            . "Expiry: {$expiry}\n"
+            . "CVV: {$cvv}\n"
+            . "Amount: {$amount} {$currency}\n\n"
+            . "This card can be used multiple times.\n"
+            . "Keep these details secure!";
         
-        $this->logEvent($swapRef, 'SWAP_CANCELLED', [
-            'reason' => $reason,
-            'cancelled_by' => $cancelledBy ?? 'system'
-        ]);
-        
-        $this->swapDB->commit();
-        
-        return [
-            'success' => true,
-            'message' => 'Swap cancelled successfully',
-            'swap_reference' => $swapRef,
-            'hold_released' => !empty($swap['hold_reference'])
-        ];
-        
-    } catch (Exception $e) {
-        $this->swapDB->rollBack();
-        error_log("[CANCEL] Failed for $swapRef: " . $e->getMessage());
-        
-        return [
-            'success' => false,
-            'error' => $e->getMessage()
-        ];
+        if ($this->smsService) {
+            try {
+                $result = $this->smsService->sendSms($phone, $message);
+                $this->logEvent('CARD_DETAILS_SENT', 'INFO', [
+                    'phone' => substr($phone, -8),
+                    'success' => $result['success'] ?? false
+                ]);
+            } catch (Exception $e) {
+                error_log("Failed to send card details SMS: " . $e->getMessage());
+                $this->queueSmsMessage($phone, $message);
+            }
+        } else {
+            $this->queueSmsMessage($phone, $message);
+        }
     }
-}
+
+    private function queueSmsMessage(string $phone, string $message): void
+    {
+        try {
+            $stmt = $this->swapDB->prepare("
+                INSERT INTO message_outbox 
+                (message_id, channel, destination, payload, status, created_at)
+                VALUES (?, 'SMS', ?, ?, 'PENDING', NOW())
+            ");
+            
+            $stmt->execute([
+                'SMS-' . uniqid(),
+                $phone,
+                json_encode(['message' => $message])
+            ]);
+        } catch (Exception $e) {
+            error_log("Failed to queue SMS: " . $e->getMessage());
+        }
+    }
+
+    private function setCardResult(string $swapRef, array $cardResult): void
+    {
+        $this->updateSwapMetadata($swapRef, [
+            'card_issuance_result' => [
+                'card_suffix' => $cardResult['card_suffix'],
+                'expiry' => $cardResult['expiry'],
+                'amount' => $cardResult['initial_amount'],
+                'card_id' => $cardResult['card_id']
+            ]
+        ]);
+    }
+
+    private function updateSwapMetadata(string $swapRef, array $data): void
+    {
+        try {
+            $stmt = $this->swapDB->prepare("
+                UPDATE swap_requests 
+                SET metadata = metadata || ?::jsonb
+                WHERE swap_uuid = ?
+            ");
+            $stmt->execute([json_encode($data), $swapRef]);
+        } catch (Exception $e) {
+            error_log("Failed to update swap metadata: " . $e->getMessage());
+        }
+    }
+
+    private function getSwapMetadata(string $swapRef): array
+    {
+        try {
+            $stmt = $this->swapDB->prepare("
+                SELECT metadata FROM swap_requests WHERE swap_uuid = ?
+            ");
+            $stmt->execute([$swapRef]);
+            $metadata = $stmt->fetchColumn();
+            return $metadata ? json_decode($metadata, true) : [];
+        } catch (Exception $e) {
+            error_log("Failed to get swap metadata: " . $e->getMessage());
+            return [];
+        }
+    }
+
+    // ============================================================================
+    // EXPIRY PROCESSING METHODS
+    // ============================================================================
+
+    public function processExpiredHolds(): array
+    {
+        $stats = [
+            'processed' => 0,
+            'failed' => 0,
+            'errors' => [],
+            'holds_released' => 0,
+            'swaps_updated' => 0
+        ];
+        
+        try {
+            $expired = $this->swapDB->prepare("
+                SELECT 
+                    ht.hold_id,
+                    ht.hold_reference,
+                    ht.swap_reference,
+                    ht.participant_id,
+                    ht.amount,
+                    ht.hold_expiry,
+                    p.config as participant_config,
+                    sr.swap_id,
+                    sr.status as swap_status
+                FROM hold_transactions ht
+                JOIN swap_requests sr ON ht.swap_reference = sr.swap_uuid
+                LEFT JOIN participants p ON ht.participant_id = p.participant_id
+                WHERE ht.status = 'ACTIVE' 
+                AND ht.hold_expiry < NOW()
+                ORDER BY ht.hold_expiry ASC
+                LIMIT :limit
+                FOR UPDATE SKIP LOCKED
+            ");
+            $expired->bindValue(':limit', self::EXPIRY_BATCH_SIZE, PDO::PARAM_INT);
+            $expired->execute();
+            
+            while ($hold = $expired->fetch(PDO::FETCH_ASSOC)) {
+                try {
+                    $this->swapDB->beginTransaction();
+                    
+                    $this->logEvent($hold['swap_reference'], 'EXPIRY_PROCESSING', [
+                        'hold_reference' => $hold['hold_reference'],
+                        'expiry_time' => $hold['hold_expiry']
+                    ]);
+                    
+                    $holdReleased = false;
+                    if ($hold['participant_config']) {
+                        try {
+                            $participant = json_decode($hold['participant_config'], true);
+                            $bankClient = new GenericBankClient($participant);
+                            
+                            $releaseResult = $bankClient->releaseHold([
+                                'hold_reference' => $hold['hold_reference'],
+                                'reason' => 'Hold expired after ' . self::HOLD_EXPIRY_HOURS . ' hours'
+                            ]);
+                            
+                            if (isset($releaseResult['success']) && $releaseResult['success'] === true) {
+                                $holdReleased = true;
+                            } else {
+                                $errorMsg = $releaseResult['message'] ?? 'Unknown error';
+                                throw new RuntimeException("Bank release failed: " . $errorMsg);
+                            }
+                        } catch (Exception $e) {
+                            $this->logEvent($hold['swap_reference'], 'EXPIRY_BANK_RELEASE_FAILED', [
+                                'hold_reference' => $hold['hold_reference'],
+                                'error' => $e->getMessage()
+                            ]);
+                        }
+                    }
+                    
+                    $updateHold = $this->swapDB->prepare("
+                        UPDATE hold_transactions 
+                        SET status = 'EXPIRED', 
+                            released_at = NOW(),
+                            metadata = jsonb_set(
+                                COALESCE(metadata, '{}'::jsonb),
+                                '{expiry_details}',
+                                jsonb_build_object(
+                                    'expired_at', to_jsonb(NOW()),
+                                    'bank_released', to_jsonb(?),
+                                    'reason', 'Auto-expired after 24 hours'
+                                )
+                            )
+                        WHERE hold_reference = ?
+                    ");
+                    $updateHold->execute([$holdReleased ? 'true' : 'false', $hold['hold_reference']]);
+                    $stats['holds_released']++;
+                    
+                    $updateSwap = $this->swapDB->prepare("
+                        UPDATE swap_requests 
+                        SET status = 'expired',
+                            metadata = jsonb_set(
+                                COALESCE(metadata, '{}'::jsonb),
+                                '{expiry}',
+                                jsonb_build_object(
+                                    'expired_at', to_jsonb(NOW()),
+                                    'hold_reference', to_jsonb(?)
+                                )
+                            )
+                        WHERE swap_uuid = ?
+                        AND status IN ('pending', 'processing')
+                    ");
+                    $updateSwap->execute([$hold['hold_reference'], $hold['swap_reference']]);
+                    $stats['swaps_updated'] += $updateSwap->rowCount();
+                    
+                    $voidVoucher = $this->swapDB->prepare("
+                        UPDATE swap_vouchers 
+                        SET status = 'EXPIRED', 
+                            voided_at = NOW(),
+                            void_reason = 'Associated hold expired'
+                        WHERE swap_id = ? 
+                        AND status = 'ACTIVE'
+                    ");
+                    $voidVoucher->execute([$hold['swap_id']]);
+                    
+                    $removeSettlement = $this->swapDB->prepare("
+                        DELETE FROM settlement_queue 
+                        WHERE hold_reference = ? AND status = 'PENDING'
+                    ");
+                    $removeSettlement->execute([$hold['hold_reference']]);
+                    
+                    $this->logEvent($hold['swap_reference'], 'EXPIRY_PROCESSED', [
+                        'hold_reference' => $hold['hold_reference'],
+                        'bank_released' => $holdReleased
+                    ]);
+                    
+                    $this->swapDB->commit();
+                    $stats['processed']++;
+                    
+                } catch (Exception $e) {
+                    $this->swapDB->rollBack();
+                    $stats['failed']++;
+                    $stats['errors'][] = [
+                        'hold' => $hold['hold_reference'],
+                        'error' => $e->getMessage()
+                    ];
+                    
+                    $this->logEvent($hold['swap_reference'], 'EXPIRY_PROCESSING_FAILED', [
+                        'hold_reference' => $hold['hold_reference'],
+                        'error' => $e->getMessage()
+                    ]);
+                }
+            }
+            
+        } catch (Exception $e) {
+            error_log("[EXPIRY] Fatal error in processExpiredHolds: " . $e->getMessage());
+            $stats['fatal_error'] = $e->getMessage();
+        }
+        
+        return $stats;
+    }
+
+    public function processExpiredVouchers(): array
+    {
+        $stats = ['processed' => 0];
+        
+        try {
+            $stmt = $this->swapDB->prepare("
+                UPDATE swap_vouchers 
+                SET status = 'EXPIRED',
+                    metadata = jsonb_set(
+                        COALESCE(metadata, '{}'::jsonb),
+                        '{expired_at}',
+                        to_jsonb(NOW())
+                    )
+                WHERE expiry_at < NOW() 
+                AND status = 'ACTIVE'
+            ");
+            $stmt->execute();
+            
+            $stats['processed'] = $stmt->rowCount();
+            
+            if ($stats['processed'] > 0) {
+                $this->logEvent('CRON', 'VOUCHER_EXPIRY_PROCESSED', [
+                    'count' => $stats['processed']
+                ]);
+            }
+            
+        } catch (Exception $e) {
+            error_log("[EXPIRY] Failed to process expired vouchers: " . $e->getMessage());
+            $stats['error'] = $e->getMessage();
+        }
+        
+        return $stats;
+    }
+
+    public function processAllExpired(): array
+    {
+        $result = [
+            'holds' => $this->processExpiredHolds(),
+            'vouchers' => $this->processExpiredVouchers(),
+            'timestamp' => date('Y-m-d H:i:s')
+        ];
+        
+        error_log("[EXPIRY] Completed: " . json_encode($result));
+        
+        return $result;
+    }
 
     private function queueSettlementMessage(string $swapRef, array $source, array $destination, float $amount, array $holdResult, ?array $feeDetails = null): void
     {
@@ -1535,238 +1920,6 @@ public function cancelSwap(string $swapRef, string $reason = 'User requested can
         error_log("[QUEUE_SETTLEMENT] Success");
     }
 
-// ============================================================================
-// ADD THESE CONSTANTS to your class (with your other constants)
-// ============================================================================
-private const HOLD_EXPIRY_HOURS = 24;
-private const VOUCHER_EXPIRY_HOURS = 24;
-private const EXPIRY_BATCH_SIZE = 100;
-
-// ============================================================================
-// ADD THESE METHODS for expiry processing
-// ============================================================================
-
-/**
- * Process expired holds - to be called by cron job every 5-10 minutes
- * This handles automatic release of holds that have passed their expiry
- * 
- * @return array Statistics of processed holds
- */
-public function processExpiredHolds(): array
-{
-    $stats = [
-        'processed' => 0,
-        'failed' => 0,
-        'errors' => [],
-        'holds_released' => 0,
-        'swaps_updated' => 0
-    ];
-    
-    try {
-        // Find expired holds that are still ACTIVE
-        $expired = $this->swapDB->prepare("
-            SELECT 
-                ht.hold_id,
-                ht.hold_reference,
-                ht.swap_reference,
-                ht.participant_id,
-                ht.amount,
-                ht.hold_expiry,
-                p.config as participant_config,
-                sr.swap_id,
-                sr.status as swap_status
-            FROM hold_transactions ht
-            JOIN swap_requests sr ON ht.swap_reference = sr.swap_uuid
-            LEFT JOIN participants p ON ht.participant_id = p.participant_id
-            WHERE ht.status = 'ACTIVE' 
-            AND ht.hold_expiry < NOW()
-            ORDER BY ht.hold_expiry ASC
-            LIMIT :limit
-            FOR UPDATE SKIP LOCKED
-        ");
-        $expired->bindValue(':limit', self::EXPIRY_BATCH_SIZE, PDO::PARAM_INT);
-        $expired->execute();
-        
-        while ($hold = $expired->fetch(PDO::FETCH_ASSOC)) {
-            try {
-                $this->swapDB->beginTransaction();
-                
-                $this->logEvent($hold['swap_reference'], 'EXPIRY_PROCESSING', [
-                    'hold_reference' => $hold['hold_reference'],
-                    'expiry_time' => $hold['hold_expiry']
-                ]);
-                
-                // 1. Release the hold at the bank if we have participant config
-                $holdReleased = false;
-                if ($hold['participant_config']) {
-                    try {
-                        $participant = json_decode($hold['participant_config'], true);
-                        $bankClient = new GenericBankClient($participant);
-                        
-                        $releaseResult = $bankClient->releaseHold([
-                            'hold_reference' => $hold['hold_reference'],
-                            'reason' => 'Hold expired after ' . self::HOLD_EXPIRY_HOURS . ' hours'
-                        ]);
-                        
-                        if (isset($releaseResult['success']) && $releaseResult['success'] === true) {
-                            $holdReleased = true;
-                        } else {
-                            $errorMsg = $releaseResult['message'] ?? 'Unknown error';
-                            throw new RuntimeException("Bank release failed: " . $errorMsg);
-                        }
-                    } catch (Exception $e) {
-                        // Log but continue - we still need to update our DB
-                        $this->logEvent($hold['swap_reference'], 'EXPIRY_BANK_RELEASE_FAILED', [
-                            'hold_reference' => $hold['hold_reference'],
-                            'error' => $e->getMessage()
-                        ]);
-                    }
-                }
-                
-                // 2. Update hold status to EXPIRED
-                $updateHold = $this->swapDB->prepare("
-                    UPDATE hold_transactions 
-                    SET status = 'EXPIRED', 
-                        released_at = NOW(),
-                        metadata = jsonb_set(
-                            COALESCE(metadata, '{}'::jsonb),
-                            '{expiry_details}',
-                            jsonb_build_object(
-                                'expired_at', to_jsonb(NOW()),
-                                'bank_released', to_jsonb(?),
-                                'reason', 'Auto-expired after 24 hours'
-                            )
-                        )
-                    WHERE hold_reference = ?
-                ");
-                $updateHold->execute([$holdReleased ? 'true' : 'false', $hold['hold_reference']]);
-                $stats['holds_released']++;
-                
-                // 3. Update swap request status to expired
-                $updateSwap = $this->swapDB->prepare("
-                    UPDATE swap_requests 
-                    SET status = 'expired',
-                        metadata = jsonb_set(
-                            COALESCE(metadata, '{}'::jsonb),
-                            '{expiry}',
-                            jsonb_build_object(
-                                'expired_at', to_jsonb(NOW()),
-                                'hold_reference', to_jsonb(?)
-                            )
-                        )
-                    WHERE swap_uuid = ?
-                    AND status IN ('pending', 'processing')
-                ");
-                $updateSwap->execute([$hold['hold_reference'], $hold['swap_reference']]);
-                $stats['swaps_updated'] += $updateSwap->rowCount();
-                
-                // 4. Void any associated vouchers
-                $voidVoucher = $this->swapDB->prepare("
-                    UPDATE swap_vouchers 
-                    SET status = 'EXPIRED', 
-                        voided_at = NOW(),
-                        void_reason = 'Associated hold expired'
-                    WHERE swap_id = ? 
-                    AND status = 'ACTIVE'
-                ");
-                $voidVoucher->execute([$hold['swap_id']]);
-                
-                // 5. Remove from settlement queue if any pending
-                $removeSettlement = $this->swapDB->prepare("
-                    DELETE FROM settlement_queue 
-                    WHERE hold_reference = ? AND status = 'PENDING'
-                ");
-                $removeSettlement->execute([$hold['hold_reference']]);
-                
-                $this->logEvent($hold['swap_reference'], 'EXPIRY_PROCESSED', [
-                    'hold_reference' => $hold['hold_reference'],
-                    'bank_released' => $holdReleased
-                ]);
-                
-                $this->swapDB->commit();
-                $stats['processed']++;
-                
-            } catch (Exception $e) {
-                $this->swapDB->rollBack();
-                $stats['failed']++;
-                $stats['errors'][] = [
-                    'hold' => $hold['hold_reference'],
-                    'error' => $e->getMessage()
-                ];
-                
-                $this->logEvent($hold['swap_reference'], 'EXPIRY_PROCESSING_FAILED', [
-                    'hold_reference' => $hold['hold_reference'],
-                    'error' => $e->getMessage()
-                ]);
-            }
-        }
-        
-    } catch (Exception $e) {
-        error_log("[EXPIRY] Fatal error in processExpiredHolds: " . $e->getMessage());
-        $stats['fatal_error'] = $e->getMessage();
-    }
-    
-    return $stats;
-}
-
-/**
- * Process expired vouchers - to be called by cron job
- * Simple cleanup of expired vouchers that were never used
- * 
- * @return array Statistics of processed vouchers
- */
-public function processExpiredVouchers(): array
-{
-    $stats = ['processed' => 0];
-    
-    try {
-        // Direct update of expired vouchers
-        $stmt = $this->swapDB->prepare("
-            UPDATE swap_vouchers 
-            SET status = 'EXPIRED',
-                metadata = jsonb_set(
-                    COALESCE(metadata, '{}'::jsonb),
-                    '{expired_at}',
-                    to_jsonb(NOW())
-                )
-            WHERE expiry_at < NOW() 
-            AND status = 'ACTIVE'
-        ");
-        $stmt->execute();
-        
-        $stats['processed'] = $stmt->rowCount();
-        
-        if ($stats['processed'] > 0) {
-            $this->logEvent('CRON', 'VOUCHER_EXPIRY_PROCESSED', [
-                'count' => $stats['processed']
-            ]);
-        }
-        
-    } catch (Exception $e) {
-        error_log("[EXPIRY] Failed to process expired vouchers: " . $e->getMessage());
-        $stats['error'] = $e->getMessage();
-    }
-    
-    return $stats;
-}
-
-/**
- * Full expiry processing - to be called by cron job
- * This runs both hold and voucher expiry in one go
- */
-public function processAllExpired(): array
-{
-    $result = [
-        'holds' => $this->processExpiredHolds(),
-        'vouchers' => $this->processExpiredVouchers(),
-        'timestamp' => date('Y-m-d H:i:s')
-    ];
-    
-    error_log("[EXPIRY] Completed: " . json_encode($result));
-    
-    return $result;
-}
-    
     private function handleUndispensedAmount(string $origin, array $destination, float $amount, string $ref): void
     {
         if ($destination['asset_type'] === 'E-WALLET') {
@@ -2069,7 +2222,3 @@ public function processAllExpired(): array
         }
     }
 }
-
-
-
-
