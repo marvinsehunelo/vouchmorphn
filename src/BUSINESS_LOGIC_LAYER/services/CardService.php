@@ -558,4 +558,164 @@ class CardService
             
         } catch (Exception $e) {
             $this->db->rollBack();
-            throw $e
+            throw $e;
+        }
+    }
+    
+    /**
+     * Split a hold (for partial card issuance)
+     */
+    private function splitHold(string $holdReference, float $cardAmount): void
+    {
+        // Create a new hold for the remaining amount
+        $stmt = $this->db->prepare("
+            INSERT INTO hold_transactions (
+                hold_reference,
+                swap_reference,
+                participant_id,
+                participant_name,
+                asset_type,
+                amount,
+                currency,
+                status,
+                hold_expiry,
+                source_details,
+                destination_institution,
+                metadata
+            )
+            SELECT 
+                concat('HOLD-', gen_random_uuid()::text),
+                swap_reference,
+                participant_id,
+                participant_name,
+                asset_type,
+                amount - ?,
+                currency,
+                'ACTIVE',
+                hold_expiry,
+                source_details,
+                destination_institution,
+                jsonb_build_object('parent_hold', ?)
+            FROM hold_transactions
+            WHERE hold_reference = ?
+            RETURNING hold_reference
+        ");
+        $stmt->execute([$cardAmount, $holdReference, $holdReference]);
+        $newHoldRef = $stmt->fetchColumn();
+        
+        // Update original hold to card amount
+        $updateStmt = $this->db->prepare("
+            UPDATE hold_transactions 
+            SET amount = ?,
+                metadata = jsonb_set(
+                    COALESCE(metadata, '{}'::jsonb),
+                    '{child_hold}',
+                    to_jsonb(?)
+                )
+            WHERE hold_reference = ?
+        ");
+        $updateStmt->execute([$cardAmount, $newHoldRef, $holdReference]);
+    }
+    
+    /**
+     * Get or create user from data
+     */
+    private function getOrCreateUser(array $data): ?int
+    {
+        if (!empty($data['user_id'])) {
+            return (int)$data['user_id'];
+        }
+        
+        if (!empty($data['student_id'])) {
+            // Check if user exists for this student
+            $stmt = $this->db->prepare("
+                SELECT user_id FROM users 
+                WHERE metadata->>'student_id' = ?
+            ");
+            $stmt->execute([$data['student_id']]);
+            $userId = $stmt->fetchColumn();
+            
+            if ($userId) {
+                return (int)$userId;
+            }
+        }
+        
+        return null; // Guest card without user account
+    }
+    
+    /**
+     * Log card transaction
+     */
+    private function logTransaction(array $data): void
+    {
+        $stmt = $this->db->prepare("
+            INSERT INTO card_transactions (
+                card_id,
+                transaction_type,
+                amount,
+                auth_code,
+                auth_status,
+                merchant_name,
+                merchant_id,
+                terminal_id,
+                atm_id,
+                channel,
+                settlement_queue_id,
+                reference,
+                response_code,
+                response_message
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ");
+        
+        $stmt->execute([
+            $data['card_id'],
+            $data['type'],
+            $data['amount'],
+            $data['auth_code'] ?? null,
+            $data['auth_status'] ?? 'APPROVED',
+            $data['merchant_name'] ?? null,
+            $data['merchant_id'] ?? null,
+            $data['terminal_id'] ?? null,
+            $data['atm_id'] ?? null,
+            $data['channel'] ?? null,
+            $data['settlement_id'] ?? null,
+            $data['reference'] ?? null,
+            $data['response_code'] ?? '00',
+            $data['response_message'] ?? 'Approved'
+        ]);
+    }
+    
+    /**
+     * Log authorization request for audit
+     */
+    private function logAuthRequest($cardId, array $request, array $response): void
+    {
+        try {
+            $stmt = $this->db->prepare("
+                INSERT INTO card_auth_logs (
+                    card_id,
+                    request_payload,
+                    response_payload,
+                    http_status_code,
+                    response_time_ms,
+                    success,
+                    error_message,
+                    created_at
+                ) VALUES (?, ?::jsonb, ?::jsonb, ?, ?, ?, ?, NOW())
+            ");
+            
+            $stmt->execute([
+                is_numeric($cardId) ? $cardId : null,
+                json_encode($request),
+                json_encode($response),
+                200,
+                $response['response_time'] ?? null,
+                $response['success'] ?? false,
+                $response['error'] ?? null
+            ]);
+        } catch (Exception $e) {
+            // Non-critical, just log
+            error_log("Failed to log auth request: " . $e->getMessage());
+        }
+    }
+}
