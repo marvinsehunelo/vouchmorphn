@@ -1,8 +1,8 @@
 <?php
 // GET /api/v1/cards/balance?card_number=4111111111111234
 
-require_once __DIR__ . '/../../../src/bootstrap.php';
-require_once __DIR__ . '/../../../src/BUSINESS_LOGIC_LAYER/services/CardService.php';
+require_once __DIR__ . '/../../../../src/bootstrap.php';
+require_once __DIR__ . '/../../../../src/BUSINESS_LOGIC_LAYER/services/CardService.php';
 
 use BUSINESS_LOGIC_LAYER\services\CardService;
 
