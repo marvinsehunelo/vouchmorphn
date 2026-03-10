@@ -23,8 +23,13 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     exit();
 }
 
-// Bootstrap
+// Bootstrap - adjust path as needed
 require_once __DIR__ . '/../../../../src/bootstrap.php';
+
+// Load required classes
+require_once __DIR__ . '/../../../../src/BUSINESS_LOGIC_LAYER/services/CardService.php';
+require_once __DIR__ . '/../../../../src/BUSINESS_LOGIC_LAYER/Helpers/CardHelper.php';
+require_once __DIR__ . '/../../../../src/INTEGRATION_LAYER/CLIENTS/CardSchemes/CardNumberGenerator.php';
 
 use BUSINESS_LOGIC_LAYER\services\CardService;
 
@@ -32,7 +37,7 @@ use BUSINESS_LOGIC_LAYER\services\CardService;
 $headers = getallheaders();
 $apiKey = $headers['X-API-Key'] ?? $headers['x-api-key'] ?? null;
 
-// Simple API key validation (enhance as needed)
+// Simple API key validation
 $validApiKeys = [
     'test_key_123' => 'TEST',
     getenv('API_KEY_CARDS') ?: 'card_key_2025' => 'PRODUCTION'
@@ -54,7 +59,10 @@ if (!$input) {
 }
 
 try {
-    $cardService = new CardService($db, $countryCode, $config);
+    // Initialize database connection (from bootstrap)
+    global $db, $countryCode, $config;
+    
+    $cardService = new CardService($db, $countryCode ?? 'BW', $config ?? []);
     $result = $cardService->issueCard($input);
     
     http_response_code(200);
