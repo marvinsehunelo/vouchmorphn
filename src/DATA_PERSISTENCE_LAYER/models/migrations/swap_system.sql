@@ -901,3 +901,152 @@ WHERE status = 'ACTIVE';
 private const HOLD_EXPIRY_HOURS = 24;  // Standard hold duration
 private const VOUCHER_EXPIRY_HOURS = 24;  // Standard voucher duration
 private const EXPIRY_BATCH_SIZE = 100;  // For cron job
+
+-- =========================================================
+-- MIGRATION: 015_create_card_tables.sql
+-- Run this on your VouchMorph database
+-- =========================================================
+
+-- 1. MESSAGE CARDS TABLE (links holds to cards)
+CREATE TABLE IF NOT EXISTS message_cards (
+    card_id BIGSERIAL PRIMARY KEY,
+    
+    -- Card identifiers (security: never store plain PAN!)
+    card_number_hash VARCHAR(255) NOT NULL UNIQUE,
+    card_suffix VARCHAR(4) NOT NULL,
+    cvv_hash VARCHAR(255) NOT NULL,
+    
+    -- Links to your existing systems
+    hold_reference VARCHAR(100) NOT NULL REFERENCES hold_transactions(hold_reference),
+    swap_reference VARCHAR(100) REFERENCES swap_requests(swap_uuid),
+    user_id BIGINT REFERENCES users(user_id),
+    
+    -- Cardholder details
+    cardholder_name VARCHAR(200) NOT NULL,
+    
+    -- Balance tracking (mirrors the hold)
+    initial_amount NUMERIC(20,4) NOT NULL,
+    remaining_amount NUMERIC(20,4) NOT NULL,
+    currency CHAR(3) DEFAULT 'BWP',
+    
+    -- Card status
+    status VARCHAR(20) DEFAULT 'ACTIVE',
+    -- 'ACTIVE', 'BLOCKED', 'EXPIRED', 'USED', 'CANCELLED'
+    
+    -- Dates
+    issued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    activated_at TIMESTAMPTZ,
+    last_used_at TIMESTAMPTZ,
+    blocked_at TIMESTAMPTZ,
+    block_reason TEXT,
+    
+    -- Expiry (standard 3 years)
+    expiry_year INT NOT NULL,
+    expiry_month INT NOT NULL,
+    
+    -- Spending controls
+    daily_limit NUMERIC(20,4) DEFAULT 10000,
+    monthly_limit NUMERIC(20,4) DEFAULT 50000,
+    atm_daily_limit NUMERIC(20,4) DEFAULT 2000,
+    
+    -- Metadata
+    metadata JSONB DEFAULT '{}'::jsonb,
+    
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Indexes for performance
+CREATE INDEX idx_message_cards_hash ON message_cards(card_number_hash);
+CREATE INDEX idx_message_cards_hold ON message_cards(hold_reference);
+CREATE INDEX idx_message_cards_user ON message_cards(user_id);
+CREATE INDEX idx_message_cards_status ON message_cards(status);
+CREATE INDEX idx_message_cards_expiry ON message_cards(expiry_year, expiry_month);
+
+-- 2. CARD TRANSACTIONS TABLE
+CREATE TABLE IF NOT EXISTS card_transactions (
+    transaction_id BIGSERIAL PRIMARY KEY,
+    card_id BIGINT NOT NULL REFERENCES message_cards(card_id),
+    
+    -- Transaction details
+    transaction_type VARCHAR(30) NOT NULL,
+    -- 'ISSUANCE', 'ATM_WITHDRAWAL', 'PURCHASE', 'REFUND', 'VOID', 'AUTHORIZATION'
+    
+    amount NUMERIC(20,4) NOT NULL,
+    currency CHAR(3) DEFAULT 'BWP',
+    
+    -- Authorization
+    auth_code VARCHAR(20),
+    auth_status VARCHAR(20) DEFAULT 'APPROVED',
+    -- 'APPROVED', 'DECLINED', 'PENDING', 'REVERSED'
+    
+    -- Merchant/ATM details
+    merchant_name VARCHAR(200),
+    merchant_id VARCHAR(50),
+    merchant_category VARCHAR(10),
+    terminal_id VARCHAR(50),
+    
+    -- ATM specific
+    atm_id VARCHAR(50),
+    atm_location VARCHAR(200),
+    
+    -- Channel
+    channel VARCHAR(20), -- 'POS', 'ATM', 'ECOMMERCE', 'MOTO'
+    
+    -- Links
+    settlement_queue_id BIGINT REFERENCES settlement_queue(id),
+    hold_reference VARCHAR(100),
+    reference VARCHAR(100),
+    
+    -- Timestamps
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    settled_at TIMESTAMPTZ,
+    
+    -- Response codes
+    response_code VARCHAR(2),
+    response_message TEXT
+);
+
+CREATE INDEX idx_card_transactions_card ON card_transactions(card_id);
+CREATE INDEX idx_card_transactions_date ON card_transactions(created_at);
+CREATE INDEX idx_card_transactions_auth ON card_transactions(auth_code);
+
+-- 3. CARD AUTHORIZATION LOGS (for debugging and audit)
+CREATE TABLE IF NOT EXISTS card_auth_logs (
+    log_id BIGSERIAL PRIMARY KEY,
+    card_id BIGINT REFERENCES message_cards(card_id),
+    request_payload JSONB,
+    response_payload JSONB,
+    http_status_code INT,
+    response_time_ms INT,
+    success BOOLEAN,
+    error_message TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 4. VIEW FOR CARD BALANCES
+CREATE OR REPLACE VIEW card_balances_view AS
+SELECT 
+    mc.card_id,
+    mc.card_suffix,
+    mc.cardholder_name,
+    mc.remaining_amount as balance,
+    mc.currency,
+    mc.expiry_month || '/' || mc.expiry_year as expiry,
+    mc.status,
+    ht.hold_reference,
+    ht.source_institution,
+    COALESCE(SUM(ct.amount) FILTER (WHERE ct.auth_status = 'APPROVED'), 0) as total_spent,
+    COUNT(ct.transaction_id) as transaction_count,
+    MAX(ct.created_at) as last_transaction
+FROM message_cards mc
+LEFT JOIN hold_transactions ht ON mc.hold_reference = ht.hold_reference
+LEFT JOIN card_transactions ct ON mc.card_id = ct.card_id
+GROUP BY mc.card_id, mc.card_suffix, mc.cardholder_name, mc.remaining_amount,
+         mc.currency, mc.expiry_month, mc.expiry_year, mc.status,
+         ht.hold_reference, ht.source_institution;
+
+-- 5. Add source_institution to hold_transactions if missing
+ALTER TABLE hold_transactions 
+ADD COLUMN IF NOT EXISTS source_institution VARCHAR(100),
+ADD COLUMN IF NOT EXISTS source_details JSONB;
