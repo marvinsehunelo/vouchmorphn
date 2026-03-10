@@ -3,6 +3,9 @@ declare(strict_types=1);
 
 namespace BUSINESS_LOGIC_LAYER\services;
 
+require_once __DIR__ . '/../../INTEGRATION_LAYER/CLIENTS/CardSchemes/CardNumberGenerator.php';
+require_once __DIR__ . '/../Helpers/CardHelper.php';
+
 use PDO;
 use Exception;
 use DateTimeImmutable;
