@@ -324,30 +324,6 @@ class HybridSettlementStrategy
         }
     }
 
-    /**
-     * Reset net position after settlement (for end-of-day)
-     */
-    public function resetNetPosition(string $debtor, string $creditor): void
-    {
-        try {
-            $stmt = $this->db->prepare("
-                UPDATE net_positions 
-                SET amount = 0, 
-                    updated_at = NOW()
-                WHERE debtor = :debtor 
-                AND creditor = :creditor
-            ");
-            $stmt->execute([
-                ':debtor' => $debtor,
-                ':creditor' => $creditor
-            ]);
-            
-            error_log("Net position reset: $debtor -> $creditor");
-            
-        } catch (Exception $e) {
-            error_log("Failed to reset net position: " . $e->getMessage());
-        }
-    }
 
     /* =====================================================
        UPDATE NET POSITION (MAIN ENTRY POINT)
@@ -808,3 +784,4 @@ class HybridSettlementStrategy
         return (int)$insert->fetchColumn();
     }
 }
+
