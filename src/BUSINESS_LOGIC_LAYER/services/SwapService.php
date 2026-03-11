@@ -133,127 +133,33 @@ class SwapService
         error_log("[SwapService] WARNING: SMS Service initialization failed: " . $e->getMessage());
     }
     
-    // ============================================================
-    // CARD SERVICE INITIALIZATION - ENHANCED FOR MULTIPLE PROVIDERS
-    // ============================================================
-    
-    // Try VouchMorph first (primary card issuer)
+    // Initialize Card Service
     try {
-        if (isset($this->participants['vouchmorph']) && 
-            is_array($this->participants['vouchmorph'])) {
-            
-            $vouchmorphConfig = $this->participants['vouchmorph'];
-            
-            // Check if VouchMorph has card capabilities
-            $walletTypes = $vouchmorphConfig['capabilities']['wallet_types'] ?? [];
-            if (in_array('CARD', $walletTypes)) {
-                
-                $this->cardService = new CardService(
-                    $this->swapDB, 
-                    $this->countryCode, 
-                    $vouchmorphConfig  // Pass VouchMorph specific config
-                );
-                
-                error_log("[SwapService] ✅ VOUCHMORPH Card Service initialized successfully");
-                error_log("[SwapService] VouchMorph card capabilities: " . implode(', ', $walletTypes));
-                
-                // Log VouchMorph endpoints if available
-                if (isset($vouchmorphConfig['resource_endpoints']['card_issue'])) {
-                    error_log("[SwapService] VouchMorph card issue endpoint: " . 
-                             $vouchmorphConfig['resource_endpoints']['card_issue']);
-                }
-            } else {
-                error_log("[SwapService] ⚠️ VouchMorph present but CARD capability not enabled");
-                error_log("[SwapService] VouchMorph wallet types: " . implode(', ', $walletTypes) ?: 'none');
-                $this->initFallbackCardService();
-            }
+        // Check if VouchMorph is in participants
+        if (isset($this->participants['vouchmorph'])) {
+            $this->cardService = new CardService(
+                $this->swapDB, 
+                $this->countryCode, 
+                $this->participants['vouchmorph']
+            );
+            error_log("[SwapService] ✅ Card Service initialized successfully");
         } else {
-            error_log("[SwapService] ⚠️ VouchMorph not found in participants, checking for alternative card issuers");
-            $this->initFallbackCardService();
+            // Fallback to default config
+            $this->cardService = new CardService(
+                $this->swapDB, 
+                $this->countryCode, 
+                []
+            );
+            error_log("[SwapService] ✅ Card Service initialized with default config");
         }
     } catch (\Exception $e) {
-        error_log("[SwapService] ❌ VouchMorph Card Service initialization failed: " . $e->getMessage());
-        error_log("[SwapService] Attempting fallback card service initialization...");
-        $this->initFallbackCardService();
+        error_log("[SwapService] ❌ Card Service initialization failed: " . $e->getMessage());
+        $this->cardService = null;
     }
     
     error_log("=== SWAPSERVICE CONSTRUCTOR COMPLETE ===");
-    error_log("Final card service status: " . ($this->cardService ? "ACTIVE" : "NOT AVAILABLE"));
+    error_log("Card service status: " . ($this->cardService ? "ACTIVE" : "NOT AVAILABLE"));
 }
-
-/**
- * Initialize fallback card service from other participants
- */
-private function initFallbackCardService(): void
-{
-    // Look for any other participant with CARD capability
-    foreach ($this->participants as $participantKey => $participant) {
-        // Skip if already checked VouchMorph
-        if ($participantKey === 'vouchmorph') {
-            continue;
-        }
-        
-        $walletTypes = $participant['capabilities']['wallet_types'] ?? [];
-        if (in_array('CARD', $walletTypes)) {
-            try {
-                $this->cardService = new CardService(
-                    $this->swapDB,
-                    $this->countryCode,
-                    $participant
-                );
-                
-                error_log("[SwapService] ✅ Fallback Card Service initialized with: " . 
-                         strtoupper($participantKey));
-                error_log("[SwapService] Card provider: " . 
-                         ($participant['provider_code'] ?? $participantKey));
-                return;
-                
-            } catch (\Exception $e) {
-                error_log("[SwapService] ⚠️ Failed to initialize card service with {$participantKey}: " . 
-                         $e->getMessage());
-                // Continue to next participant
-            }
-        }
-    }
-    
-    // No card service available
-    error_log("[SwapService] ⚠️ No card service available - card issuance will be disabled");
-    $this->cardService = null;
-}
-
-/**
- * Check if card service is available and ready
- */
-public function isCardServiceAvailable(): bool
-{
-    return $this->cardService !== null;
-}
-
-/**
- * Get current card provider info
- */
-public function getCardProviderInfo(): ?array
-{
-    if (!$this->cardService) {
-        return null;
-    }
-    
-    // Find which participant is providing card services
-    foreach ($this->participants as $key => $participant) {
-        $walletTypes = $participant['capabilities']['wallet_types'] ?? [];
-        if (in_array('CARD', $walletTypes)) {
-            return [
-                'provider' => strtoupper($key),
-                'provider_code' => $participant['provider_code'] ?? null,
-                'base_url' => $participant['base_url'] ?? null,
-                'card_endpoint' => $participant['resource_endpoints']['card_issue'] ?? null
-            ];
-        }
-    }
-    
-    return null;
-}
-    
     
 
     private function loadCountryFees(): void
@@ -817,10 +723,37 @@ public function getCardProviderInfo(): ?array
             $debugSteps[] = ['time' => microtime(true), 'step' => 'BEFORE_PROCESS_DESTINATION', 
                             'delivery_mode' => $destination['delivery_mode'] ?? 'deposit'];
 
-            if (isset($destination['delivery_mode']) && $destination['delivery_mode'] === 'cashout') {
-                $debugSteps[] = ['time' => microtime(true), 'step' => 'START_PROCESS_CASHOUT'];
-                $this->processCashout($swapId, $swapRef, $source, $destination, $currency, $holdResult);
-                $debugSteps[] = ['time' => microtime(true), 'step' => 'PROCESS_CASHOUT_COMPLETE'];
+            // ============================================================
+            // HANDLE DIFFERENT DELIVERY MODES
+            // ============================================================
+            
+            if (isset($destination['delivery_mode'])) {
+                switch ($destination['delivery_mode']) {
+                    case 'card_load':
+                        $debugSteps[] = ['time' => microtime(true), 'step' => 'START_CARD_LOAD'];
+                        $this->processCardLoad($swapId, $swapRef, $source, $destination, $currency, $holdResult);
+                        $debugSteps[] = ['time' => microtime(true), 'step' => 'CARD_LOAD_COMPLETE'];
+                        break;
+                        
+                    case 'card':
+                        $debugSteps[] = ['time' => microtime(true), 'step' => 'START_CARD_ISSUANCE'];
+                        $this->processCardIssuance($swapId, $swapRef, $source, $destination, $currency, $holdResult);
+                        $debugSteps[] = ['time' => microtime(true), 'step' => 'CARD_ISSUANCE_COMPLETE'];
+                        break;
+                        
+                    case 'cashout':
+                        $debugSteps[] = ['time' => microtime(true), 'step' => 'START_PROCESS_CASHOUT'];
+                        $this->processCashout($swapId, $swapRef, $source, $destination, $currency, $holdResult);
+                        $debugSteps[] = ['time' => microtime(true), 'step' => 'PROCESS_CASHOUT_COMPLETE'];
+                        break;
+                        
+                    case 'deposit':
+                    default:
+                        $debugSteps[] = ['time' => microtime(true), 'step' => 'START_PROCESS_DEPOSIT'];
+                        $this->processDeposit($swapId, $swapRef, $source, $destination, $currency, $holdResult);
+                        $debugSteps[] = ['time' => microtime(true), 'step' => 'PROCESS_DEPOSIT_COMPLETE'];
+                        break;
+                }
             } else {
                 $debugSteps[] = ['time' => microtime(true), 'step' => 'START_PROCESS_DEPOSIT'];
                 $this->processDeposit($swapId, $swapRef, $source, $destination, $currency, $holdResult);
@@ -867,6 +800,12 @@ public function getCardProviderInfo(): ?array
                 if (isset($metadata['card_issuance_result'])) {
                     $response['card_details'] = $metadata['card_issuance_result'];
                     $response['message'] = 'Card issued successfully';
+                }
+            } elseif (isset($destination['delivery_mode']) && $destination['delivery_mode'] === 'card_load') {
+                $metadata = $this->getSwapMetadata($swapRef);
+                if (isset($metadata['card_load_result'])) {
+                    $response['card_details'] = $metadata['card_load_result'];
+                    $response['message'] = 'Card loaded successfully';
                 }
             } else {
                 $response['dispensed_notes'] = $atmResult['notes'] ?? [];
@@ -916,404 +855,109 @@ public function getCardProviderInfo(): ?array
         }
     }
 
-    private function debitSourceFunds(string $swapRef, array $source, array $holdResult, array $participant): void
+    /**
+     * NEW METHOD: Process card load (fund existing card)
+     */
+    private function processCardLoad(int $swapId, string $swapRef, array $source, array $destination, string $currency, array $holdResult): void
     {
-        $bankClient = new GenericBankClient($participant);
+        $debug = [];
+        $debug[] = ['time' => microtime(true), 'step' => 'CARD_LOAD_START'];
         
-        $result = $bankClient->debitFunds([
-            'hold_reference' => $holdResult['hold_reference'],
-            'amount' => $source['amount'],
-            'transaction_reference' => $swapRef,
-            'final' => true
-        ]);
-        
-        $this->debugApiCall('debit_funds', ['hold_reference' => $holdResult['hold_reference']], $result);
-
-        $this->logApiMessage(
-            $swapRef,
-            'debit_funds',
-            'outgoing',
-            $participant,
-            '/api/debit',
-            ['hold_reference' => $holdResult['hold_reference']],
-            $result,
-            null
-        );
-
-        if (!isset($result['success']) || $result['success'] !== true) {
-            $errorMsg = 'Bank communication failed';
-            if (isset($result['curl_error']) && !empty($result['curl_error'])) {
-                $errorMsg .= ': ' . $result['curl_error'];
-            } elseif (isset($result['status_code'])) {
-                $errorMsg .= ': HTTP ' . $result['status_code'];
-            }
-            throw new RuntimeException("Failed to debit funds: " . $errorMsg);
-        }
-
-        $bankResponse = $result['data'] ?? [];
-
-        if (!isset($bankResponse['debited']) || $bankResponse['debited'] !== true) {
-            throw new RuntimeException("Failed to debit funds: " . ($bankResponse['message'] ?? 'Unknown error'));
-        }
-        
-        if (isset($holdResult['hold_reference'])) {
-            $this->updateHoldStatus($holdResult['hold_reference'], 'DEBITED');
-        }
-        
-        $this->logEvent($swapRef, 'FUNDS_DEBITED', [
-            'amount' => $source['amount'],
-            'hold_reference' => $holdResult['hold_reference']
-        ]);
-    }
-
-    private function verifySourceAsset(string $swapRef, array $source, array $participant): array
-    {
-        $assetType = strtoupper($source['asset_type'] ?? 'UNKNOWN');
-
-        $this->logEvent($swapRef, 'VERIFYING_SOURCE', [
-            'institution' => $participant['provider_code'] ?? $source['institution'],
-            'asset_type' => $assetType,
-            'reference' => $this->maskIdentifier($source)
-        ]);
-
-        $walletTypes = array_map('strtoupper', $participant['capabilities']['wallet_types'] ?? []);
-        if (!in_array($assetType, $walletTypes)) {
-            throw new RuntimeException("Institution does not support asset type: {$assetType}");
-        }
-
-        $bankClient = new GenericBankClient($participant);
-
-        $verificationPayload = [
-            'reference' => $swapRef,
-            'institution' => $source['institution'],
-            'asset_type' => $assetType,
-            'amount' => $source['amount'] ?? 0
-        ];
-
-        switch ($assetType) {
-            case 'VOUCHER':
-                $voucher = $source['voucher'] ?? [];
-                $verificationPayload = array_merge($verificationPayload, [
-                    'claimant_phone' => $this->formatPhoneForInstitution($voucher['claimant_phone'] ?? null, $participant),
-                    'voucher_number' => $voucher['voucher_number'] ?? null,
-                    'voucher_pin' => $voucher['voucher_pin'] ?? null
-                ]);
-                break;
-
-            case 'ACCOUNT':
-                $account = $source['account'] ?? [];
-                $verificationPayload = array_merge($verificationPayload, [
-                    'account_holder' => $account['account_holder'] ?? null,
-                    'account_number' => $account['account_number'] ?? null,
-                    'account_pin' => $account['account_pin'] ?? null
-                ]);
-                break;
-
-            case 'WALLET':
-                $wallet = $source['wallet'] ?? [];
-                $verificationPayload = array_merge($verificationPayload, [
-                    'wallet_phone' => $this->formatPhoneForInstitution($wallet['wallet_phone'] ?? null, $participant),
-                    'wallet_pin' => $wallet['wallet_pin'] ?? null
-                ]);
-                break;
-
-            case 'E-WALLET':
-    // Try ALL possible phone locations - comprehensive extraction
-    $phone = $source['ewallet']['ewallet_phone'] ?? 
-             $source['ewallet']['phone'] ?? 
-             $source['ewallet_phone'] ?? 
-             $source['phone'] ?? 
-             $source['beneficiary_phone'] ??
-             $source['claimant_phone'] ??
-             $source['wallet_phone'] ??
-             $source['account_phone'] ??
-             null;
-    
-    // Detailed debug logging
-    error_log("[VERIFY_ASSET] E-WALLET phone extraction:");
-    error_log("  - ewallet.ewallet_phone: " . ($source['ewallet']['ewallet_phone'] ?? 'null'));
-    error_log("  - ewallet.phone: " . ($source['ewallet']['phone'] ?? 'null'));
-    error_log("  - source.ewallet_phone: " . ($source['ewallet_phone'] ?? 'null'));
-    error_log("  - source.phone: " . ($source['phone'] ?? 'null'));
-    error_log("  - source.beneficiary_phone: " . ($source['beneficiary_phone'] ?? 'null'));
-    error_log("  - source.claimant_phone: " . ($source['claimant_phone'] ?? 'null'));
-    error_log("  - source.wallet_phone: " . ($source['wallet_phone'] ?? 'null'));
-    error_log("  - source.account_phone: " . ($source['account_phone'] ?? 'null'));
-    error_log("  - FINAL extracted phone: " . ($phone ?? 'null'));
-    
-    if (!$phone) {
-        error_log("[VERIFY_ASSET] CRITICAL: No phone number found for E-WALLET verification");
-        error_log("[VERIFY_ASSET] Full source: " . json_encode($source));
-        throw new RuntimeException("Phone number required for E-WALLET verification");
-    }
-    
-    $verificationPayload = array_merge($verificationPayload, [
-        'phone' => $this->formatPhoneForInstitution($phone, $participant)
-    ]);
-    
-    error_log("[VERIFY_ASSET] E-WALLET phone: " . $phone . " → formatted: " . $verificationPayload['phone']);
-    break;
-            case 'CARD':
-                $card = $source['card'] ?? [];
-                $verificationPayload = array_merge($verificationPayload, [
-                    'card_number' => $card['card_number'] ?? null,
-                    'card_pin' => $card['card_pin'] ?? null,
-                    'card_holder' => $card['card_holder'] ?? null
-                ]);
-                break;
-
-            default:
-                throw new RuntimeException("Unsupported asset type: {$assetType}");
-        }
-
-        $this->logEvent($swapRef, 'VERIFICATION_PAYLOAD', [
-            'payload' => $verificationPayload
-        ]);
-
         try {
-            $result = $bankClient->verifyAsset($verificationPayload);
-            $this->debugApiCall('verify_asset', $verificationPayload, $result);
+            $grossAmount = (float)$destination['amount'];
+            $debug[] = ['time' => microtime(true), 'step' => 'GROSS_AMOUNT', 'amount' => $grossAmount];
             
-            $this->logApiMessage(
+            $feeDetails = $this->deductSwapFee(
                 $swapRef,
-                'verify_asset',
-                'outgoing',
-                $participant,
-                '/api/verify-asset',
-                $verificationPayload,
-                $result,
-                null
+                'CARD_LOAD',
+                $grossAmount,
+                $source['institution'],
+                $destination['institution']
             );
+            $debug[] = ['time' => microtime(true), 'step' => 'FEE_DEDUCTED', 'fee' => $feeDetails['fee_amount'], 'net' => $feeDetails['net_amount']];
             
-            $this->logEvent($swapRef, 'BANK_CLIENT_RESPONSE', [
-                'result' => $result
+            $netAmount = $feeDetails['net_amount'];
+            
+            if (!$this->cardService) {
+                throw new RuntimeException("Card service not available");
+            }
+            
+            $cardSuffix = $destination['card_suffix'] ?? null;
+            if (!$cardSuffix) {
+                throw new RuntimeException("card_suffix is required for card_load");
+            }
+            
+            $debug[] = ['time' => microtime(true), 'step' => 'LOADING_CARD', 'card_suffix' => $cardSuffix];
+            
+            // Load the card with the hold
+            $cardResult = $this->cardService->loadCard([
+                'hold_reference' => $holdResult['hold_reference'],
+                'swap_reference' => $swapRef,
+                'card_suffix' => $cardSuffix,
+                'amount' => $netAmount
             ]);
-
-            if (!isset($result['success']) || $result['success'] !== true) {
-                return [
-                    'verified' => false,
-                    'message' => 'Bank communication failed: ' . ($result['curl_error'] ?? 'HTTP ' . ($result['status_code'] ?? 'unknown'))
-                ];
-            }
-
-            $bankResponse = $result['data'] ?? [];
-
-            if (!isset($bankResponse['verified']) || $bankResponse['verified'] !== true) {
-                $errorMessage = $bankResponse['message'] ?? $bankResponse['error'] ?? 'Verification failed';
-                return [
-                    'verified' => false,
-                    'message' => $errorMessage
-                ];
-            }
-
-            return [
-                'verified' => true,
-                'asset_details' => [
-                    'id' => $bankResponse['asset_id'] ?? $bankResponse['wallet_id'] ?? $bankResponse['account_id'] ?? null,
-                    'available_balance' => $bankResponse['available_balance'] ?? $bankResponse['balance'] ?? null,
-                    'holder_name' => $bankResponse['holder_name'] ?? $bankResponse['account_holder'] ?? null,
-                    'expiry_date' => $bankResponse['expiry_date'] ?? null,
-                    'metadata' => $bankResponse['metadata'] ?? []
+            
+            $debug[] = ['time' => microtime(true), 'step' => 'CARD_LOADED', 
+                       'card_suffix' => $cardResult['card_suffix'] ?? $cardSuffix,
+                       'new_balance' => $cardResult['new_balance'] ?? null];
+            
+            $this->updateSwapMetadata($swapRef, [
+                'card_load_result' => [
+                    'card_suffix' => $cardSuffix,
+                    'amount' => $netAmount,
+                    'new_balance' => $cardResult['new_balance'] ?? null
                 ]
-            ];
+            ]);
             
-        } catch (\Throwable $e) {
-            error_log("=== VERIFICATION EXCEPTION === " . $e->getMessage());
-            throw new RuntimeException("Source verification failed: " . $e->getMessage());
+            $this->logEvent($swapRef, 'CARD_LOADED', [
+                'card_suffix' => $cardSuffix,
+                'amount' => $netAmount
+            ]);
+            
+            // Queue settlement message
+            $this->queueSettlementMessage($swapRef, $source, $destination, $grossAmount, $holdResult, $feeDetails);
+            
+            // Update net position
+            $this->settlement->updateNetPosition($source['institution'], $destination['institution'], $netAmount, 'card_load');
+            
+            // Update swap ledger
+            $this->updateSwapLedgerFees($swapRef, $source['institution'], $destination['institution'], $grossAmount, $currency);
+            
+        } catch (Exception $e) {
+            $debug[] = ['time' => microtime(true), 'step' => 'CARD_LOAD_EXCEPTION', 'error' => $e->getMessage()];
+            error_log("CARD LOAD ERROR: " . json_encode($debug));
+            throw $e;
         }
+        
+        error_log("CARD LOAD DEBUG: " . json_encode($debug));
     }
 
-    private function placeHoldOnSourceAsset(string $swapRef, array $source, array $verificationResult, array $participant, ?array $destination = null): array
+    /**
+     * NEW METHOD: Process card issuance (create new card)
+     */
+    private function processCardIssuance(int $swapId, string $swapRef, array $source, array $destination, string $currency, array $holdResult): void
     {
-        $assetType = strtoupper($source['asset_type']);
-        $bankClient = new GenericBankClient($participant);
-
-        $holdPayload = [
-            'reference' => $swapRef,
-            'asset_type' => $assetType,
-            'amount' => $source['amount'],
-            'action' => 'PLACE_HOLD',
-            'expiry' => (new DateTimeImmutable('+' . self::HOLD_EXPIRY_HOURS . ' hours'))->format('Y-m-d H:i:s'),
-            'hold_reason' => 'PENDING_TRANSACTION'
-        ];
-
-        if ($destination && isset($destination['institution'])) {
-            $holdPayload['foreign_bank'] = $destination['institution'];
-            $holdPayload['destination_institution'] = $destination['institution'];
-            $holdPayload['destination'] = $destination['institution'];
-            $holdPayload['beneficiary_bank'] = $destination['institution'];
+        $debug = [];
+        $debug[] = ['time' => microtime(true), 'step' => 'CARD_ISSUANCE_START'];
+        
+        try {
+            $grossAmount = (float)$destination['amount'];
+            $debug[] = ['time' => microtime(true), 'step' => 'GROSS_AMOUNT', 'amount' => $grossAmount];
             
-            $this->logEvent($swapRef, 'HOLD_ADDED_FOREIGN_BANK', [
-                'foreign_bank' => $destination['institution']
-            ]);
-        } else {
-            $this->logEvent($swapRef, 'HOLD_NO_FOREIGN_BANK', [
-                'warning' => 'No destination institution provided for hold'
-            ]);
-            $holdPayload['foreign_bank'] = 'UNKNOWN';
-        }
-
-        switch ($assetType) {
-            case 'VOUCHER':
-                $holdPayload['voucher_number'] = $source['voucher']['voucher_number'] ?? null;
-                $holdPayload['claimant_phone'] = $this->formatPhoneForInstitution(
-                    $source['voucher']['claimant_phone'] ?? null, $participant
-                );
-                break;
-            case 'ACCOUNT':
-                $holdPayload['account_number'] = $source['account']['account_number'] ?? null;
-                break;
-            case 'WALLET':
-                $holdPayload['wallet_phone'] = $this->formatPhoneForInstitution(
-                    $source['wallet']['wallet_phone'] ?? null, $participant
-                );
-                break;
-            case 'E-WALLET':
-                   $phone = $source['ewallet']['phone'] ??          
-                            $source['ewallet']['ewallet_phone'] ??  
-                            $source['phone'] ??                      
-                            $source['ewallet_phone'] ??              
-                            $source['beneficiary_phone'] ??          
-                            $source['claimant_phone'] ??             
-                            $source['wallet_phone'] ??               
-                            $source['account_phone'] ??             
-                            null;
-                
-                if (!$phone) {
-                    error_log("[PLACE_HOLD] CRITICAL: No phone number found for E-WALLET hold placement");
-                    throw new RuntimeException("Phone number required for E-WALLET hold placement");
-                }
-                
-                $holdPayload['phone'] = $this->formatPhoneForInstitution($phone, $participant);
-                
-                error_log("[PLACE_HOLD] E-WALLET phone found: " . $phone . " → formatted: " . $holdPayload['phone']);
-                break;
-            case 'CARD':
-                $holdPayload['card_number'] = $source['card']['card_number'] ?? null;
-                break;
-        }
-
-        $this->logEvent($swapRef, 'PLACE_HOLD_PAYLOAD', [
-            'payload' => $holdPayload,
-            'participant' => $participant['provider_code'] ?? 'unknown'
-        ]);
-
-        $result = $bankClient->authorize($holdPayload);
-        $this->debugApiCall('place_hold', $holdPayload, $result);
-        
-        $this->logApiMessage(
-            $swapRef,
-            'hold_placement',
-            'outgoing',
-            $participant,
-            '/api/authorize',
-            $holdPayload,
-            $result,
-            null
-        );
-        
-        $this->logEvent($swapRef, 'PLACE_HOLD_RESPONSE_RAW', ['result' => $result]);
-
-        if (!isset($result['success']) || $result['success'] !== true) {
-            $errorMsg = 'Bank communication failed';
-            if (isset($result['curl_error'])) {
-                $errorMsg .= ': ' . $result['curl_error'];
-            } elseif (isset($result['status_code'])) {
-                $errorMsg .= ': HTTP ' . $result['status_code'];
+            $feeDetails = $this->deductSwapFee(
+                $swapRef,
+                'CARD_ISSUANCE',
+                $grossAmount,
+                $source['institution'],
+                $destination['institution']
+            );
+            $debug[] = ['time' => microtime(true), 'step' => 'FEE_DEDUCTED', 'fee' => $feeDetails['fee_amount'], 'net' => $feeDetails['net_amount']];
+            
+            $netAmount = $feeDetails['net_amount'];
+            
+            if (!$this->cardService) {
+                throw new RuntimeException("Card service not available");
             }
-            
-            $this->logEvent($swapRef, 'PLACE_HOLD_COMMS_FAILED', [
-                'error' => $errorMsg,
-                'status_code' => $result['status_code'] ?? null,
-                'curl_error' => $result['curl_error'] ?? null
-            ]);
-            
-            return ['hold_placed' => false, 'message' => $errorMsg];
-        }
-
-        $bankResponse = $result['data'] ?? [];
-        
-        $this->logEvent($swapRef, 'PLACE_HOLD_BANK_RESPONSE', ['bank_response' => $bankResponse]);
-
-        $holdPlaced = false;
-        if (isset($bankResponse['hold_placed'])) {
-            $holdPlaced = $bankResponse['hold_placed'] === true || $bankResponse['hold_placed'] === 'true' || $bankResponse['hold_placed'] === 1;
-        } elseif (isset($bankResponse['status']) && strtoupper($bankResponse['status']) === 'SUCCESS') {
-            $holdPlaced = true;
-        } elseif (isset($bankResponse['success']) && $bankResponse['success'] === true) {
-            $holdPlaced = true;
-        }
-
-        if (!$holdPlaced) {
-            $errorMsg = $bankResponse['message'] ?? $bankResponse['error'] ?? $bankResponse['reason'] ?? 'Failed to place hold';
-            $this->logEvent($swapRef, 'PLACE_HOLD_FAILED', ['error' => $errorMsg, 'bank_response' => $bankResponse]);
-            return ['hold_placed' => false, 'message' => $errorMsg];
-        }
-
-        $holdReference = $bankResponse['hold_reference'] ?? $bankResponse['reference'] ?? $bankResponse['transaction_id'] ?? null;
-        $holdExpiry = $bankResponse['hold_expiry'] ?? $bankResponse['expiry'] ?? null;
-
-        $this->logEvent($swapRef, 'PLACE_HOLD_SUCCESS', [
-            'hold_reference' => $holdReference,
-            'hold_expiry' => $holdExpiry
-        ]);
-
-        if ($holdReference) {
-            $this->recordHoldTransaction($swapRef, [
-                'hold_reference' => $holdReference,
-                'hold_expiry' => $holdExpiry,
-                'hold_placed' => true
-            ], $source, $participant, $destination);
-        }
-
-        return [
-            'hold_placed' => true,
-            'hold_reference' => $holdReference,
-            'hold_expiry' => $holdExpiry
-        ];
-    }
-
-  /**
- * Process cashout to ATM/Agent or issue Message Card
- */
-private function processCashout(int $swapId, string $swapRef, array $source, array $destination, string $currency, array $holdResult): void
-{
-    $debug = [];
-    $debug[] = ['time' => microtime(true), 'step' => 'CASHOUT_START'];
-    
-    try {
-        $grossAmount = (float)$destination['amount'];
-        $debug[] = ['time' => microtime(true), 'step' => 'GROSS_AMOUNT', 'amount' => $grossAmount];
-        
-        $feeDetails = $this->deductSwapFee(
-            $swapRef,
-            'CASHOUT',
-            $grossAmount,
-            $source['institution'],
-            $destination['institution']
-        );
-        $debug[] = ['time' => microtime(true), 'step' => 'FEE_DEDUCTED', 'fee' => $feeDetails['fee_amount'], 'net' => $feeDetails['net_amount']];
-        
-        $netAmount = $feeDetails['net_amount'];
-        
-        // Determine delivery mode
-        $deliveryMode = $destination['delivery_mode'] ?? 'cashout';
-        
-        // Find destination institution
-        $destInstitutionKey = $this->findInstitutionKey($destination['institution']);
-        if (!$destInstitutionKey) {
-            throw new RuntimeException("Destination institution not found: {$destination['institution']}");
-        }
-        $destParticipant = $this->participants[$destInstitutionKey];
-        $debug[] = ['time' => microtime(true), 'step' => 'DEST_FOUND', 'participant' => $destParticipant['provider_code'] ?? $destInstitutionKey];
-        
-        // Handle different delivery modes
-        if ($deliveryMode === 'card' && $this->cardService) {
-            // ========================================================
-            // UNIVERSAL MESSAGE CARD - FOR EVERYONE
-            // No segmentation, no categories - one card for all users
-            // ========================================================
-            $debug[] = ['time' => microtime(true), 'step' => 'CARD_ISSUANCE_START'];
             
             $cardData = $destination['card'] ?? [];
             $cardholderName = $cardData['cardholder_name'] ?? 
@@ -1321,10 +965,8 @@ private function processCashout(int $swapId, string $swapRef, array $source, arr
                              $source['cardholder_name'] ?? 
                              'Cardholder';
             
-            // Check if VouchMorph is the issuer
-            $isVouchMorph = strtoupper($destination['institution']) === 'VOUCHMORPH';
+            $debug[] = ['time' => microtime(true), 'step' => 'ISSUING_CARD', 'cardholder' => $cardholderName];
             
-            // Universal card payload - works for everyone
             $cardPayload = [
                 'hold_reference' => $holdResult['hold_reference'],
                 'swap_reference' => $swapRef,
@@ -1333,106 +975,93 @@ private function processCashout(int $swapId, string $swapRef, array $source, arr
                 'daily_limit' => $cardData['daily_limit'] ?? null,
                 'monthly_limit' => $cardData['monthly_limit'] ?? null,
                 'atm_daily_limit' => $cardData['atm_daily_limit'] ?? null,
-                'issued_by' => $isVouchMorph ? 'vouchmorph' : 'swap_service',
-                'notes' => "Message Card issued from swap $swapRef",
+                'issued_by' => 'swap_service',
                 'metadata' => [
                     'source_institution' => $source['institution'],
                     'source_asset_type' => $source['asset_type'],
-                    'destination_institution' => $destination['institution'],
-                    'card_metadata' => $cardData['metadata'] ?? []
+                    'destination_institution' => $destination['institution']
                 ]
             ];
             
-            // Add optional VouchMorph features (still universal, just extra options)
-            if ($isVouchMorph) {
-                // Optional features that any user can have
-                $optionalFeatures = [
-                    'weekly_limit' => $cardData['weekly_limit'] ?? null,
-                    'pos_daily_limit' => $cardData['pos_daily_limit'] ?? null,
-                    'online_daily_limit' => $cardData['online_daily_limit'] ?? null,
-                    'international_enabled' => $cardData['international_enabled'] ?? false,
-                    'auto_topup' => $cardData['auto_topup'] ?? null,
-                    'message' => $cardData['message'] ?? null,
-                    'expiry_days' => $cardData['expiry_days'] ?? 365,
-                    'card_design' => $cardData['card_design'] ?? 'standard',
-                    'is_virtual' => $cardData['is_virtual'] ?? false,
-                    'send_to_applepay' => $cardData['send_to_applepay'] ?? false,
-                    'send_to_googlepay' => $cardData['send_to_googlepay'] ?? false,
-                ];
-                
-                // Remove null values to keep payload clean
-                $cardPayload = array_merge($cardPayload, array_filter($optionalFeatures, function($value) {
-                    return $value !== null;
-                }));
-                
-                $debug[] = ['time' => microtime(true), 'step' => 'OPTIONAL_FEATURES_ADDED'];
-            }
-            
-            $debug[] = ['time' => microtime(true), 'step' => 'CARD_PAYLOAD_PREPARED'];
-            
-            // Issue the universal card
             $cardResult = $this->cardService->issueCard($cardPayload);
             
             $debug[] = ['time' => microtime(true), 'step' => 'CARD_ISSUED', 
-                       'card_suffix' => $cardResult['card_suffix'] ?? substr($cardResult['card_number'] ?? '', -4),
-                       'card_id' => $cardResult['card_id'] ?? null];
+                       'card_suffix' => $cardResult['card_suffix'] ?? substr($cardResult['card_number'] ?? '', -4)];
             
-            // Universal metadata - no categories
-            $metadataUpdate = [
-                'issued_card_id' => $cardResult['card_id'] ?? null,
-                'card_suffix' => $cardResult['card_suffix'] ?? substr($cardResult['card_number'] ?? '', -4),
-                'card_expiry' => $cardResult['expiry'] ?? null,
-            ];
-            
-            if ($isVouchMorph) {
-                $metadataUpdate['card_type'] = 'VOUCHMORPH_MESSAGE_CARD';
-            }
-            
-            $this->updateSwapMetadata($swapRef, $metadataUpdate);
-            
-            // Log card issuance (no categories)
-            $this->logEvent($swapRef, 'CARD_ISSUED', [
-                'card_suffix' => $metadataUpdate['card_suffix'],
-                'amount' => $netAmount,
-                'expiry' => $cardResult['expiry'] ?? null
+            $this->updateSwapMetadata($swapRef, [
+                'card_issuance_result' => [
+                    'card_suffix' => $cardResult['card_suffix'] ?? substr($cardResult['card_number'] ?? '', -4),
+                    'expiry' => $cardResult['expiry'] ?? null,
+                    'amount' => $netAmount,
+                    'card_id' => $cardResult['card_id'] ?? null
+                ]
             ]);
             
-            // Send card details via SMS (use masked PAN for security)
-            $cardNumber = $cardResult['masked_pan'] ?? 
-                         (isset($cardResult['card_number']) ? 'XXXX-XXXX-XXXX-' . substr($cardResult['card_number'], -4) : null);
+            $this->logEvent($swapRef, 'CARD_ISSUED', [
+                'card_suffix' => $cardResult['card_suffix'] ?? substr($cardResult['card_number'] ?? '', -4),
+                'amount' => $netAmount
+            ]);
             
-            $this->sendCardDetailsSms(
-                $destination['beneficiary_phone'] ?? $source['phone'] ?? null,
-                $cardNumber,
-                $cardResult['cvv'] ?? '***',
-                $cardResult['expiry'] ?? '**/**',
-                $netAmount,
-                $currency
+            // Queue settlement message
+            $this->queueSettlementMessage($swapRef, $source, $destination, $grossAmount, $holdResult, $feeDetails);
+            
+            // Update net position
+            $this->settlement->updateNetPosition($source['institution'], $destination['institution'], $netAmount, 'card_issuance');
+            
+            // Update swap ledger
+            $this->updateSwapLedgerFees($swapRef, $source['institution'], $destination['institution'], $grossAmount, $currency);
+            
+        } catch (Exception $e) {
+            $debug[] = ['time' => microtime(true), 'step' => 'CARD_ISSUANCE_EXCEPTION', 'error' => $e->getMessage()];
+            error_log("CARD ISSUANCE ERROR: " . json_encode($debug));
+            throw $e;
+        }
+        
+        error_log("CARD ISSUANCE DEBUG: " . json_encode($debug));
+    }
+
+    /**
+     * Process cashout to ATM/Agent
+     */
+    private function processCashout(int $swapId, string $swapRef, array $source, array $destination, string $currency, array $holdResult): void
+    {
+        $debug = [];
+        $debug[] = ['time' => microtime(true), 'step' => 'CASHOUT_START'];
+        
+        try {
+            $grossAmount = (float)$destination['amount'];
+            $debug[] = ['time' => microtime(true), 'step' => 'GROSS_AMOUNT', 'amount' => $grossAmount];
+            
+            $feeDetails = $this->deductSwapFee(
+                $swapRef,
+                'CASHOUT',
+                $grossAmount,
+                $source['institution'],
+                $destination['institution']
             );
+            $debug[] = ['time' => microtime(true), 'step' => 'FEE_DEDUCTED', 'fee' => $feeDetails['fee_amount'], 'net' => $feeDetails['net_amount']];
             
-            $debug[] = ['time' => microtime(true), 'step' => 'CARD_DETAILS_SENT'];
-            
-            $this->setCardResult($swapRef, $cardResult);
-            
-        } else {
-            // TRADITIONAL ATM/AGENT CASHOUT
+            $netAmount = $feeDetails['net_amount'];
             $cashoutData = $destination['cashout'] ?? [];
+            
+            $destInstitutionKey = $this->findInstitutionKey($destination['institution']);
+            if (!$destInstitutionKey) {
+                throw new RuntimeException("Destination institution not found: {$destination['institution']}");
+            }
+            $destParticipant = $this->participants[$destInstitutionKey];
+            $debug[] = ['time' => microtime(true), 'step' => 'DEST_FOUND', 'participant' => $destParticipant['provider_code'] ?? $destInstitutionKey];
             
             if (isset($cashoutData['beneficiary_phone'])) {
                 $originalPhone = $cashoutData['beneficiary_phone'];
                 $cashoutData['beneficiary_phone'] = $this->formatPhoneForInstitution(
                     $cashoutData['beneficiary_phone'], $destParticipant
                 );
-                $debug[] = ['time' => microtime(true), 'step' => 'PHONE_FORMATTED', 
-                           'original' => $originalPhone, 
-                           'formatted' => $cashoutData['beneficiary_phone']];
+                $debug[] = ['time' => microtime(true), 'step' => 'PHONE_FORMATTED', 'original' => $originalPhone, 'formatted' => $cashoutData['beneficiary_phone']];
             }
             
             $rawCode = (string)random_int(100000, 999999);
             $codeHash = password_hash($rawCode, PASSWORD_BCRYPT);
-            $debug[] = ['time' => microtime(true), 'step' => 'CODE_GENERATED', 
-                       'raw_length' => strlen($rawCode), 
-                       'hash_length' => strlen($codeHash)];
+            $debug[] = ['time' => microtime(true), 'step' => 'CODE_GENERATED', 'raw_length' => strlen($rawCode), 'hash_length' => strlen($codeHash)];
 
             $debug[] = ['time' => microtime(true), 'step' => 'CREATING_VOUCHER'];
             $this->createCashoutVoucher($swapId, $codeHash, $destination, $rawCode, $cashoutData);
@@ -1440,35 +1069,35 @@ private function processCashout(int $swapId, string $swapRef, array $source, arr
             
             $debug[] = ['time' => microtime(true), 'step' => 'REQUESTING_ATM_TOKEN'];
             $atmToken = $this->requestAtmToken($swapRef, $source, $destination, $codeHash, $holdResult, $destParticipant, $netAmount);
-            $debug[] = ['time' => microtime(true), 'step' => 'ATM_TOKEN_RECEIVED', 
-                       'token_reference' => $atmToken['token_reference'] ?? null];
+            $debug[] = ['time' => microtime(true), 'step' => 'ATM_TOKEN_RECEIVED', 'token_reference' => $atmToken['token_reference'] ?? null];
 
             $debug[] = ['time' => microtime(true), 'step' => 'SENDING_SMS'];
             $this->sendWithdrawalSms($cashoutData['beneficiary_phone'] ?? '', $rawCode, $atmToken, $netAmount, $currency);
             $debug[] = ['time' => microtime(true), 'step' => 'SMS_SENT'];
+            
+            // Queue settlement message
+            $debug[] = ['time' => microtime(true), 'step' => 'QUEUEING_SETTLEMENT'];
+            $this->queueSettlementMessage($swapRef, $source, $destination, $grossAmount, $holdResult, $feeDetails);
+            $debug[] = ['time' => microtime(true), 'step' => 'SETTLEMENT_QUEUED'];
+
+            // Update net position
+            $debug[] = ['time' => microtime(true), 'step' => 'UPDATING_NET_POSITION'];
+            $this->settlement->updateNetPosition($source['institution'], $destination['institution'], $netAmount, 'cashout');
+            $debug[] = ['time' => microtime(true), 'step' => 'NET_POSITION_UPDATED'];
+            
+            // Update swap ledger
+            $debug[] = ['time' => microtime(true), 'step' => 'UPDATING_SWAP_LEDGER'];
+            $this->updateSwapLedgerFees($swapRef, $source['institution'], $destination['institution'], $grossAmount, $currency);
+            $debug[] = ['time' => microtime(true), 'step' => 'SWAP_LEDGER_UPDATED'];
+            
+        } catch (Exception $e) {
+            $debug[] = ['time' => microtime(true), 'step' => 'CASHOUT_EXCEPTION', 'error' => $e->getMessage()];
+            error_log("CASHOUT ERROR: " . json_encode($debug));
+            throw $e;
         }
-
-        // COMMON STEPS FOR BOTH MODES
-        $debug[] = ['time' => microtime(true), 'step' => 'QUEUEING_SETTLEMENT'];
-        $this->queueSettlementMessage($swapRef, $source, $destination, $grossAmount, $holdResult, $feeDetails);
-        $debug[] = ['time' => microtime(true), 'step' => 'SETTLEMENT_QUEUED'];
-
-        $debug[] = ['time' => microtime(true), 'step' => 'UPDATING_NET_POSITION'];
-        $this->settlement->updateNetPosition($source['institution'], $destination['institution'], $netAmount, 'cashout');
-        $debug[] = ['time' => microtime(true), 'step' => 'NET_POSITION_UPDATED'];
         
-        $debug[] = ['time' => microtime(true), 'step' => 'UPDATING_SWAP_LEDGER'];
-        $this->updateSwapLedgerFees($swapRef, $source['institution'], $destination['institution'], $grossAmount, $currency);
-        $debug[] = ['time' => microtime(true), 'step' => 'SWAP_LEDGER_UPDATED'];
-        
-    } catch (Exception $e) {
-        $debug[] = ['time' => microtime(true), 'step' => 'CASHOUT_EXCEPTION', 'error' => $e->getMessage()];
-        error_log("CASHOUT ERROR: " . json_encode($debug));
-        throw $e;
+        error_log("CASHOUT DEBUG: " . json_encode($debug));
     }
-    
-    error_log("CASHOUT DEBUG: " . json_encode($debug));
-}
 
     private function createCashoutVoucher(int $swapId, string $codeHash, array $destination, string $rawCode, array $cashoutData): void
     {
@@ -2382,5 +2011,3 @@ private function processCashout(int $swapId, string $swapRef, array $source, arr
         }
     }
 }
-
-
