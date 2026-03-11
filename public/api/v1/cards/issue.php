@@ -9,7 +9,7 @@ declare(strict_types=1);
 // ============================================
 // 1. BOOTSTRAP & PATHS
 // ============================================
-define('ROOT_PATH', dirname(__DIR__, 4));
+define('ROOT_PATH', dirname(__DIR__, 5));
 
 // ============================================
 // 2. HEADERS & CORS
