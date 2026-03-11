@@ -1342,3 +1342,34 @@ CREATE TABLE IF NOT EXISTS message_cards (
 -- Create indexes
 CREATE INDEX idx_message_cards_hash ON message_cards(card_number_hash);
 CREATE INDEX idx_message_cards_hold ON message_cards(hold_reference);
+
+
+
+CREATE TABLE IF NOT EXISTS card_batches (
+    batch_id BIGSERIAL PRIMARY KEY,
+    batch_reference VARCHAR(50) UNIQUE NOT NULL,
+    bin_prefix VARCHAR(6) NOT NULL,
+    card_scheme VARCHAR(20) NOT NULL,
+    card_type VARCHAR(20) NOT NULL DEFAULT 'PHYSICAL',
+    quantity_produced INT NOT NULL,
+    quantity_remaining INT NOT NULL,
+    expiry_year INT NOT NULL,
+    expiry_month INT NOT NULL,
+    status VARCHAR(20) DEFAULT 'PRODUCED',
+    ordered_at TIMESTAMPTZ,
+    produced_at TIMESTAMPTZ,
+    received_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    metadata JSONB DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX idx_card_batches_status ON card_batches(status);
+CREATE INDEX idx_card_batches_expiry ON card_batches(expiry_year, expiry_month);
+CREATE INDEX idx_message_cards_hash ON message_cards(card_number_hash);
+CREATE INDEX idx_message_cards_hold ON message_cards(hold_reference);
+CREATE INDEX idx_message_cards_user ON message_cards(user_id);
+CREATE INDEX idx_message_cards_lifecycle ON message_cards(lifecycle_status);
+CREATE INDEX idx_message_cards_batch ON message_cards(batch_id);
+
+
