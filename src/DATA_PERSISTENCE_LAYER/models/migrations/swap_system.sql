@@ -1322,3 +1322,23 @@ LEFT JOIN message_cards mc ON u.user_id = mc.user_id
 GROUP BY u.user_id, u.full_name, u.phone;
 
 https://github.com/marvinsehunelo/vouchmorphn/tree/main/public/api/v1/cards
+-- Create message_cards table
+CREATE TABLE IF NOT EXISTS message_cards (
+    card_id BIGSERIAL PRIMARY KEY,
+    card_number_hash VARCHAR(255) NOT NULL UNIQUE,
+    card_suffix VARCHAR(4) NOT NULL,
+    cvv_hash VARCHAR(255) NOT NULL,
+    hold_reference VARCHAR(100) REFERENCES hold_transactions(hold_reference),
+    user_id BIGINT REFERENCES users(user_id),
+    cardholder_name VARCHAR(200) NOT NULL,
+    initial_amount NUMERIC(20,4) NOT NULL DEFAULT 0,
+    remaining_amount NUMERIC(20,4) NOT NULL DEFAULT 0,
+    currency CHAR(3) DEFAULT 'BWP',
+    status VARCHAR(20) DEFAULT 'ACTIVE',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Create indexes
+CREATE INDEX idx_message_cards_hash ON message_cards(card_number_hash);
+CREATE INDEX idx_message_cards_hold ON message_cards(hold_reference);
