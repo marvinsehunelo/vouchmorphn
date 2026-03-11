@@ -41,14 +41,6 @@ class CardService
     
     /**
      * Authorize a card load (for message-based cards)
-     * This is a wrapper around loadCard() that matches the interface expected by SwapService
-     * 
-     * @param array $data Contains:
-     * - hold_reference: string (required)
-     * - swap_reference: string (required)
-     * - card_suffix: string (required)
-     * - amount: float (required)
-     * @return array
      */
     public function authorizeCardLoad(array $data): array
     {
@@ -59,7 +51,6 @@ class CardService
         ]));
         
         try {
-            // Validate required fields
             if (empty($data['hold_reference'])) {
                 throw new RuntimeException("hold_reference is required for card authorization");
             }
@@ -70,7 +61,6 @@ class CardService
                 throw new RuntimeException("Valid amount is required for card authorization");
             }
             
-            // Map the data to match what loadCard expects
             $loadData = [
                 'hold_reference' => $data['hold_reference'],
                 'swap_reference' => $data['swap_reference'] ?? null,
@@ -78,10 +68,8 @@ class CardService
                 'amount' => $data['amount']
             ];
             
-            // Call the existing loadCard method
             $result = $this->loadCard($loadData);
             
-            // Add authorization-specific fields to the response
             $result['authorized'] = true;
             $result['authorization_id'] = $result['card_id'] ?? null;
             $result['authorized_amount'] = $data['amount'];
@@ -112,12 +100,10 @@ class CardService
         $this->db->beginTransaction();
         
         try {
-            // Validate required fields
             if (empty($data['hold_reference'])) {
                 throw new RuntimeException("hold_reference is required");
             }
             
-            // Get the hold
             $holdStmt = $this->db->prepare("
                 SELECT ht.*, sr.swap_uuid, sr.source_details 
                 FROM hold_transactions ht
@@ -132,7 +118,6 @@ class CardService
                 throw new RuntimeException("Hold not found or not active");
             }
             
-            // Determine initial amount (from hold or provided)
             $initialAmount = $data['initial_amount'] ?? (float)$hold['amount'];
             
             if ($initialAmount <= 0) {
@@ -143,14 +128,11 @@ class CardService
                 throw new RuntimeException("Initial amount exceeds hold amount");
             }
             
-            // Generate card details
             $purpose = $data['purpose'] ?? 'student';
             $cardDetails = $this->cardGenerator->generateForPurpose($purpose);
             
-            // Get or create user/cardholder
             $userId = $this->getOrCreateUser($data);
             
-            // Create message card record
             $cardStmt = $this->db->prepare("
                 INSERT INTO message_cards (
                     card_number_hash,
@@ -201,12 +183,10 @@ class CardService
             
             $cardId = $cardStmt->fetchColumn();
             
-            // If amount is less than full hold, split the hold
             if ($initialAmount < (float)$hold['amount']) {
                 $this->splitHold($hold['hold_reference'], $initialAmount);
             }
             
-            // Log issuance transaction
             $this->logTransaction([
                 'card_id' => $cardId,
                 'type' => 'ISSUANCE',
@@ -218,13 +198,12 @@ class CardService
             
             $this->db->commit();
             
-            // Return card details (CVV only on issuance!)
             return [
                 'success' => true,
                 'card_id' => $cardId,
                 'card_number' => $cardDetails['pan_formatted'],
                 'card_suffix' => $cardDetails['pan_suffix'],
-                'cvv' => $cardDetails['cvv'], // Only returned once!
+                'cvv' => $cardDetails['cvv'],
                 'expiry' => $cardDetails['expiry_formatted'],
                 'expiry_month' => $cardDetails['expiry_month'],
                 'expiry_year' => $cardDetails['expiry_year'],
@@ -245,20 +224,10 @@ class CardService
 
     /**
      * Load funds onto an existing card (link hold to card)
-     * 
-     * @param array $data Contains:
-     * - hold_reference: string (required)
-     * - swap_reference: string (required)
-     * - card_suffix: string (required)
-     * - amount: float (required)
-     * @return array
      */
     public function loadCard(array $data): array
     {
-        // NO beginTransaction() here - transaction already active
-        
         try {
-            // Validate required fields
             if (empty($data['hold_reference'])) {
                 throw new RuntimeException("hold_reference is required");
             }
@@ -269,7 +238,6 @@ class CardService
                 throw new RuntimeException("Valid amount is required");
             }
             
-            // Find the card (FOR UPDATE will work because parent transaction has lock)
             $cardStmt = $this->db->prepare("
                 SELECT * FROM message_cards 
                 WHERE card_suffix = :suffix 
@@ -283,7 +251,6 @@ class CardService
                 throw new RuntimeException("Card not found or not available for loading");
             }
             
-            // Check if hold exists and is active
             $holdStmt = $this->db->prepare("
                 SELECT * FROM hold_transactions 
                 WHERE hold_reference = :hold_ref 
@@ -296,7 +263,6 @@ class CardService
                 throw new RuntimeException("Hold not found or not active");
             }
             
-            // Link the hold to the card
             $updateStmt = $this->db->prepare("
                 UPDATE message_cards 
                 SET hold_reference = :hold_ref,
@@ -320,14 +286,11 @@ class CardService
             
             $updatedCard = $updateStmt->fetch(PDO::FETCH_ASSOC);
             
-            // Record the card load transaction
             $this->recordCardLoadTransaction(
                 $updatedCard['card_id'],
                 $data['hold_reference'],
                 $data['amount']
             );
-            
-            // NO commit here - let parent transaction handle it
             
             return [
                 'success' => true,
@@ -341,7 +304,6 @@ class CardService
             ];
             
         } catch (Exception $e) {
-            // NO rollback here - let parent transaction handle it
             error_log("Card load error: " . $e->getMessage());
             throw $e;
         }
@@ -356,7 +318,6 @@ class CardService
         $this->db->beginTransaction();
         
         try {
-            // Find card by PAN
             $cardHash = hash('sha256', $data['card_number']);
             
             $cardStmt = $this->db->prepare("
@@ -374,13 +335,11 @@ class CardService
                 throw new RuntimeException("Card not found or inactive");
             }
             
-            // Verify CVV
             $expectedCvvHash = hash('sha256', $data['cvv']);
             if ($expectedCvvHash !== $card['cvv_hash']) {
                 throw new RuntimeException("Invalid CVV");
             }
             
-            // Check expiry
             $currentYear = (int)date('Y');
             $currentMonth = (int)date('m');
             
@@ -391,12 +350,10 @@ class CardService
             
             $amount = (float)$data['amount'];
             
-            // Check sufficient funds
             if ($card['remaining_amount'] < $amount) {
                 throw new RuntimeException("Insufficient funds");
             }
             
-            // Apply channel-specific limits
             $channel = $data['channel'] ?? 'POS';
             
             if ($channel === 'ATM' && $amount > (float)($card['atm_daily_limit'] ?? self::ATM_DAILY_LIMIT)) {
@@ -407,7 +364,6 @@ class CardService
                 throw new RuntimeException("Transaction exceeds POS limit");
             }
             
-            // Check daily limit
             $dailyStmt = $this->db->prepare("
                 SELECT COALESCE(SUM(amount), 0) as daily_total
                 FROM card_transactions
@@ -422,7 +378,6 @@ class CardService
                 throw new RuntimeException("Daily spending limit exceeded");
             }
             
-            // REDUCE THE HOLD (magic happens here!)
             $holdStmt = $this->db->prepare("
                 UPDATE hold_transactions 
                 SET amount = amount - ?
@@ -437,7 +392,6 @@ class CardService
                 throw new RuntimeException("Failed to update hold");
             }
             
-            // Update card remaining amount
             $updateCard = $this->db->prepare("
                 UPDATE message_cards 
                 SET remaining_amount = remaining_amount - ?,
@@ -448,7 +402,6 @@ class CardService
             $updateCard->execute([$amount, $card['card_id']]);
             $newCardBalance = $updateCard->fetchColumn();
             
-            // Create settlement obligation
             $authCode = CardHelper::generateAuthCode();
             
             $settlementStmt = $this->db->prepare("
@@ -480,9 +433,6 @@ class CardService
                 ])
             ]);
             
-            $settlementId = $settlementStmt->fetchColumn();
-            
-            // Log transaction
             $this->logTransaction([
                 'card_id' => $card['card_id'],
                 'type' => $channel === 'ATM' ? 'ATM_WITHDRAWAL' : 'PURCHASE',
@@ -494,7 +444,7 @@ class CardService
                 'terminal_id' => $data['terminal_id'] ?? null,
                 'atm_id' => $data['atm_id'] ?? null,
                 'channel' => $channel,
-                'settlement_id' => $settlementId,
+                'settlement_id' => $settlementId ?? null,
                 'reference' => $data['reference'] ?? null
             ]);
             
@@ -502,7 +452,6 @@ class CardService
             
             $responseTime = round((microtime(true) - $startTime) * 1000);
             
-            // Log authorization for audit
             $this->logAuthRequest($card['card_id'], $data, [
                 'success' => true,
                 'auth_code' => $authCode,
@@ -525,7 +474,6 @@ class CardService
             
             $responseTime = round((microtime(true) - $startTime) * 1000);
             
-            // Log failed authorization
             $this->logAuthRequest(
                 $data['card_number'] ?? null,
                 $data,
@@ -540,7 +488,7 @@ class CardService
                 'success' => false,
                 'authorized' => false,
                 'error' => $e->getMessage(),
-                'response_code' => '51', // Generic decline
+                'response_code' => '51',
                 'response_message' => 'Declined',
                 'processing_time_ms' => $responseTime
             ];
@@ -668,7 +616,6 @@ class CardService
         $this->db->beginTransaction();
         
         try {
-            // Find the original transaction
             $txStmt = $this->db->prepare("
                 SELECT ct.*, mc.hold_reference
                 FROM card_transactions ct
@@ -684,7 +631,6 @@ class CardService
                 throw new RuntimeException("Transaction not found or already reversed");
             }
             
-            // Restore the hold
             $holdStmt = $this->db->prepare("
                 UPDATE hold_transactions 
                 SET amount = amount + ?
@@ -693,7 +639,6 @@ class CardService
             ");
             $holdStmt->execute([$transaction['amount'], $transaction['hold_reference']]);
             
-            // Restore card balance
             $cardStmt = $this->db->prepare("
                 UPDATE message_cards 
                 SET remaining_amount = remaining_amount + ?
@@ -701,7 +646,6 @@ class CardService
             ");
             $cardStmt->execute([$transaction['amount'], $transaction['card_id']]);
             
-            // Mark transaction as reversed
             $updateTx = $this->db->prepare("
                 UPDATE card_transactions 
                 SET auth_status = 'REVERSED'
@@ -709,7 +653,6 @@ class CardService
             ");
             $updateTx->execute([$transaction['transaction_id']]);
             
-            // Remove from settlement queue
             $queueStmt = $this->db->prepare("
                 DELETE FROM settlement_queue 
                 WHERE reference = ?
@@ -736,7 +679,6 @@ class CardService
      */
     private function splitHold(string $holdReference, float $cardAmount): void
     {
-        // Create a new hold for the remaining amount
         $stmt = $this->db->prepare("
             INSERT INTO hold_transactions (
                 hold_reference,
@@ -772,7 +714,6 @@ class CardService
         $stmt->execute([$cardAmount, $holdReference, $holdReference]);
         $newHoldRef = $stmt->fetchColumn();
         
-        // Update original hold to card amount
         $updateStmt = $this->db->prepare("
             UPDATE hold_transactions 
             SET amount = ?,
@@ -826,7 +767,6 @@ class CardService
         }
         
         if (!empty($data['student_id'])) {
-            // Check if user exists for this student
             $stmt = $this->db->prepare("
                 SELECT user_id FROM users 
                 WHERE metadata->>'student_id' = ?
@@ -839,7 +779,7 @@ class CardService
             }
         }
         
-        return null; // Guest card without user account
+        return null;
     }
     
     /**
@@ -908,12 +848,11 @@ class CardService
                 json_encode($request),
                 json_encode($response),
                 200,
-                $response['response_time'] ?? null,
+                $response['response_time_ms'] ?? null,
                 $response['success'] ?? false,
                 $response['error'] ?? null
             ]);
         } catch (Exception $e) {
-            // Non-critical, just log
             error_log("Failed to log auth request: " . $e->getMessage());
         }
     }
