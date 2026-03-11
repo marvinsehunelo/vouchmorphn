@@ -1638,3 +1638,57 @@ CREATE TRIGGER trg_card_applications_updated
     EXECUTE FUNCTION update_card_applications_updated_at();
 
 
+CREATE TABLE card_applications (
+    application_id VARCHAR(50) PRIMARY KEY,
+    user_id BIGINT REFERENCES users(user_id) NOT NULL,
+    card_id BIGINT REFERENCES message_cards(card_id),
+    full_name VARCHAR(200) NOT NULL,
+    id_number VARCHAR(50) NOT NULL,
+    id_type VARCHAR(30) NOT NULL,
+    date_of_birth DATE NOT NULL,
+    phone VARCHAR(20) NOT NULL,
+    email VARCHAR(150) NOT NULL,
+    address JSONB,
+    delivery_address JSONB,
+    occupation VARCHAR(100),
+    employer VARCHAR(200),
+    income_range VARCHAR(50),
+    source_of_funds TEXT,
+    card_type VARCHAR(20) NOT NULL,
+    delivery_method VARCHAR(50),
+    branch_location VARCHAR(200),
+    status VARCHAR(30) DEFAULT 'PENDING_KYC',
+    consent JSONB,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    submitted_at TIMESTAMPTZ DEFAULT NOW(),
+    kyc_submitted_at TIMESTAMPTZ,
+    kyc_verified_at TIMESTAMPTZ,
+    card_assigned_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    
+    metadata JSONB DEFAULT '{}'::jsonb
+);
+
+-- Create indexes for performance
+CREATE INDEX idx_card_applications_user ON card_applications(user_id);
+CREATE INDEX idx_card_applications_status ON card_applications(status);
+CREATE INDEX idx_card_applications_phone ON card_applications(phone);
+CREATE INDEX idx_card_applications_email ON card_applications(email);
+CREATE INDEX idx_card_applications_created ON card_applications(created_at);
+
+CREATE OR REPLACE FUNCTION update_card_applications_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_card_applications_updated
+    BEFORE UPDATE ON card_applications
+    FOR EACH ROW
+    EXECUTE FUNCTION update_card_applications_updated_at();
+
+
+
