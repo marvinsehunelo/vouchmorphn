@@ -9,7 +9,7 @@ declare(strict_types=1);
 // ============================================
 // 1. BOOTSTRAP & PATHS
 // ============================================
-define('ROOT_PATH', dirname(__DIR__, 5)); // Goes up 5 levels to project root
+define('ROOT_PATH', dirname(__DIR__, 4)); // Goes up 5 levels to project root
 
 // ============================================
 // 2. HEADERS & CORS
