@@ -37,6 +37,19 @@ require_once ROOT_PATH . '/src/BUSINESS_LOGIC_LAYER/services/KYCDocumentService.
 use DATA_PERSISTENCE_LAYER\config\DBConnection;
 use BUSINESS_LOGIC_LAYER\services\CardApplicationService;
 
+// ============================================
+// ADD THIS MISSING HELPER FUNCTION
+// ============================================
+if (!function_exists('get_env_val')) {
+    function get_env_val(string $key) {
+        $val = getenv($key);
+        if ($val === false) {
+            $val = $_ENV[$key] ?? ($_SERVER[$key] ?? null);
+        }
+        return $val;
+    }
+}
+
 // Load environment
 $envFile = ROOT_PATH . "/src/CORE_CONFIG/countries/{$country}/.env_{$country}";
 if (file_exists($envFile)) {
