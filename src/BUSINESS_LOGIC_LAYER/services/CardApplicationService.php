@@ -3,14 +3,10 @@ declare(strict_types=1);
 
 namespace BUSINESS_LOGIC_LAYER\services;
 
-
 require_once __DIR__ . '/KYCDocumentService.php';
 require_once __DIR__ . '/../../INTEGRATION_LAYER/CLIENTS/CardSchemes/CardNumberGenerator.php';
 require_once __DIR__ . '/../Helpers/CardHelper.php';
 
-// ============================================
-// ADD THESE USE STATEMENTS
-// ============================================
 use PDO;
 use Exception;
 use RuntimeException;
@@ -87,45 +83,98 @@ class CardApplicationService
     }
     
     /**
-     * Get or create user from application data
+     * Get or create user from application data - FIXED for your schema
      */
     private function getOrCreateUser(array $data): array
     {
-        // Check if user exists by ID number
+        // Check if user exists by phone (phone is UNIQUE in your schema)
         $stmt = $this->db->prepare("
-            SELECT u.* FROM users u
-            JOIN kyc_documents k ON u.user_id = k.user_id
-            WHERE k.document_number = :id_number
-            LIMIT 1
+            SELECT * FROM users WHERE phone = :phone
         ");
-        $stmt->execute([':id_number' => $data['id_number']]);
+        $stmt->execute([':phone' => $data['phone']]);
         $user = $stmt->fetch(PDO::FETCH_ASSOC);
         
         if ($user) {
             return $user;
         }
         
-        // Create new user
+        // Check by email as well
+        $stmt = $this->db->prepare("
+            SELECT * FROM users WHERE email = :email
+        ");
+        $stmt->execute([':email' => $data['email']]);
+        $user = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+        if ($user) {
+            return $user;
+        }
+        
+        // Create new user with your actual schema (no full_name column)
+        $username = $this->generateUsername($data['email']);
+        $tempPassword = bin2hex(random_bytes(8)); // Generate temporary password
+        
         $stmt = $this->db->prepare("
             INSERT INTO users (
-                full_name, email, phone, username, password_hash, 
-                role_id, verified, kyc_verified, created_at
+                username, email, phone, password_hash, role_id, 
+                verified, kyc_verified, created_at
             ) VALUES (
-                :name, :email, :phone, :username, 'temp',
-                1, false, false, NOW()
-            ) RETURNING user_id, full_name, email, phone
+                :username, :email, :phone, :password, 1, 
+                false, false, NOW()
+            ) RETURNING user_id, username, email, phone
         ");
         
-        $username = 'user_' . time() . '_' . rand(1000, 9999);
-        
         $stmt->execute([
-            ':name' => $data['full_name'],
+            ':username' => $username,
             ':email' => $data['email'],
             ':phone' => $data['phone'],
-            ':username' => $username
+            ':password' => password_hash($tempPassword, PASSWORD_DEFAULT)
         ]);
         
-        return $stmt->fetch(PDO::FETCH_ASSOC);
+        $user = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+        // Store personal information in kyc_documents table
+        $this->storeUserProfile($user['user_id'], $data);
+        
+        return $user;
+    }
+    
+    /**
+     * Store user profile information in kyc_documents
+     */
+    private function storeUserProfile(int $userId, array $data): void
+    {
+        $stmt = $this->db->prepare("
+            INSERT INTO kyc_documents (
+                user_id, document_type, document_number, status, metadata, submitted_at
+            ) VALUES (
+                :user_id, 'identity', :id_number, 'pending', :metadata, NOW()
+            )
+        ");
+        
+        $stmt->execute([
+            ':user_id' => $userId,
+            ':id_number' => $data['id_number'],
+            ':metadata' => json_encode([
+                'full_name' => $data['full_name'],
+                'id_type' => $data['id_type'],
+                'date_of_birth' => $data['date_of_birth'],
+                'address' => $data['address'] ?? null,
+                'occupation' => $data['occupation'] ?? null,
+                'employer' => $data['employer'] ?? null,
+                'income_range' => $data['income_range'] ?? null,
+                'source_of_funds' => $data['source_of_funds'] ?? null
+            ])
+        ]);
+    }
+    
+    /**
+     * Generate username from email
+     */
+    private function generateUsername(string $email): string
+    {
+        $base = strtolower(preg_replace('/[^a-zA-Z0-9]/', '', explode('@', $email)[0]));
+        $base = substr($base, 0, 15); // Limit length
+        return $base . '_' . rand(100, 999);
     }
     
     /**
@@ -194,9 +243,7 @@ class CardApplicationService
                 cardholder_name = :name,
                 lifecycle_status = 'ASSIGNED',
                 batch_assigned_at = NOW(),
-                delivery_address = :address,
-                delivery_method = 'COURIER',
-                delivery_status = 'PENDING_SHIPMENT',
+                delivery_method = 'BRANCH_PICKUP',
                 updated_at = NOW()
             WHERE card_id = :card_id
             RETURNING *
@@ -205,7 +252,6 @@ class CardApplicationService
         $updateStmt->execute([
             ':user_id' => $userId,
             ':name' => $data['full_name'],
-            ':address' => json_encode($data['delivery_address'] ?? null),
             ':card_id' => $card['card_id']
         ]);
         
@@ -315,14 +361,12 @@ class CardApplicationService
      */
     private function sendVirtualCardDetails(string $phone, string $cardNumber, string $cvv, string $expiry): void
     {
-        // Implementation depends on your SMS service
         $message = "Your VouchMorph Virtual Card\n"
                  . "Card: {$cardNumber}\n"
                  . "Expiry: {$expiry}\n"
                  . "CVV: {$cvv}\n"
                  . "Keep this secure!";
         
-        // Queue SMS
         $stmt = $this->db->prepare("
             INSERT INTO message_outbox 
             (message_id, channel, destination, payload, status, created_at)
@@ -344,8 +388,7 @@ class CardApplicationService
         $messages = [
             'PENDING_KYC' => 'Your application is pending KYC verification',
             'IN_BATCH' => 'Card is being prepared',
-            'ASSIGNED' => 'Card assigned, awaiting shipment',
-            'SHIPPED' => 'Card has been shipped',
+            'ASSIGNED' => 'Card assigned, awaiting pickup',
             'DELIVERED' => 'Card delivered, ready for activation',
             'ISSUED' => 'Virtual card issued, check your SMS',
             'ACTIVE' => 'Card is active and ready to use',
