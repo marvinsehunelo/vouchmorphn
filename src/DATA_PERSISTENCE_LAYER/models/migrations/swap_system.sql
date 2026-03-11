@@ -1372,4 +1372,19 @@ CREATE INDEX idx_message_cards_user ON message_cards(user_id);
 CREATE INDEX idx_message_cards_lifecycle ON message_cards(lifecycle_status);
 CREATE INDEX idx_message_cards_batch ON message_cards(batch_id);
 
+-- Add missing card_category column
+ALTER TABLE message_cards 
+ADD COLUMN IF NOT EXISTS card_category VARCHAR(20) NOT NULL DEFAULT 'PHYSICAL';
+
+-- Also add any other columns that might be missing
+ALTER TABLE message_cards 
+ADD COLUMN IF NOT EXISTS card_scheme VARCHAR(20) NOT NULL DEFAULT 'VOUCHMORPH',
+ADD COLUMN IF NOT EXISTS batch_sequence INT,
+ADD COLUMN IF NOT EXISTS lifecycle_status VARCHAR(30) NOT NULL DEFAULT 'PENDING_ACTIVATION',
+ADD COLUMN IF NOT EXISTS financial_status VARCHAR(20) DEFAULT 'UNFUNDED';
+
+-- Verify the table structure
+\d message_cards
+
+
 
