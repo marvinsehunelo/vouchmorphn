@@ -6,7 +6,7 @@ declare(strict_types=1);
  * Requires admin authentication
  */
 
-define('ROOT_PATH', dirname(__DIR__, 6));
+define('ROOT_PATH', dirname(__DIR__, 5));
 
 // ... (same bootstrapping code with admin check)
 
