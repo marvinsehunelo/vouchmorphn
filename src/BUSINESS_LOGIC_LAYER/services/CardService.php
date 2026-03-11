@@ -308,6 +308,97 @@ class CardService
             throw $e;
         }
     }
+
+    /**
+ * Get card authorization details (the message)
+ * 
+ * @param string $cardSuffix The card suffix (last 4 digits)
+ * @return array Card authorization details
+ * @throws RuntimeException if card not found or expired
+ */
+public function getCardAuthorization(string $cardSuffix): array
+{
+    $stmt = $this->db->prepare("
+        SELECT 
+            ca.authorization_id,
+            ca.swap_id,
+            ca.swap_reference,
+            ca.card_suffix,
+            ca.authorized_amount,
+            ca.remaining_balance,
+            ca.hold_reference,
+            ca.source_institution,
+            ca.fee_amount,
+            ca.vat_amount,
+            ca.status,
+            ca.expiry_at,
+            ca.created_at,
+            mc.cardholder_name,
+            mc.currency,
+            mc.daily_limit,
+            mc.monthly_limit,
+            mc.atm_daily_limit
+        FROM card_authorizations ca
+        JOIN message_cards mc ON ca.card_suffix = mc.card_suffix
+        WHERE ca.card_suffix = ? 
+        AND ca.status = 'ACTIVE'
+        AND ca.expiry_at > NOW()
+        ORDER BY ca.created_at DESC
+        LIMIT 1
+    ");
+    
+    $stmt->execute([$cardSuffix]);
+    $auth = $stmt->fetch(PDO::FETCH_ASSOC);
+    
+    if (!$auth) {
+        // Try to find any active card without authorization
+        $cardStmt = $this->db->prepare("
+            SELECT * FROM message_cards 
+            WHERE card_suffix = ? 
+            AND status = 'ACTIVE'
+            LIMIT 1
+        ");
+        $cardStmt->execute([$cardSuffix]);
+        $card = $cardStmt->fetch(PDO::FETCH_ASSOC);
+        
+        if ($card) {
+            // Card exists but no active authorization
+            return [
+                'authorization_id' => null,
+                'card_suffix' => $card['card_suffix'],
+                'cardholder_name' => $card['cardholder_name'],
+                'authorized_amount' => (float)$card['initial_amount'],
+                'remaining_balance' => (float)$card['remaining_amount'],
+                'hold_reference' => $card['hold_reference'],
+                'source_institution' => $card['source_institution'] ?? 'VOUCHMORPH',
+                'expiry' => $card['expiry_year'] . '-' . $card['expiry_month'] . '-01',
+                'currency' => $card['currency'] ?? 'BWP',
+                'is_authorization' => false
+            ];
+        }
+        
+        throw new RuntimeException("Card not found or no active authorization");
+    }
+    
+    return [
+        'authorization_id' => (int)$auth['authorization_id'],
+        'card_suffix' => $auth['card_suffix'],
+        'cardholder_name' => $auth['cardholder_name'],
+        'authorized_amount' => (float)$auth['authorized_amount'],
+        'remaining_balance' => (float)$auth['remaining_balance'],
+        'hold_reference' => $auth['hold_reference'],
+        'source_institution' => $auth['source_institution'] ?? 'VOUCHMORPH',
+        'expiry' => $auth['expiry_at'],
+        'currency' => $auth['currency'] ?? 'BWP',
+        'fee_amount' => (float)$auth['fee_amount'],
+        'vat_amount' => (float)$auth['vat_amount'],
+        'status' => $auth['status'],
+        'daily_limit' => (float)$auth['daily_limit'],
+        'monthly_limit' => (float)$auth['monthly_limit'],
+        'atm_daily_limit' => (float)$auth['atm_daily_limit'],
+        'is_authorization' => true
+    ];
+}
     
     /**
      * Authorize a transaction (called by ATM/POS/online)
