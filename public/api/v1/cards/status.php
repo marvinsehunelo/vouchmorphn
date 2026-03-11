@@ -5,7 +5,7 @@ declare(strict_types=1);
  * VouchMorph - Card Application Status API
  */
 
-define('ROOT_PATH', dirname(__DIR__, 4));
+define('ROOT_PATH', dirname(__DIR__, 5));
 
 header("Access-Control-Allow-Origin: *");
 header("Content-Type: application/json; charset=UTF-8");
