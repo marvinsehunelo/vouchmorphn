@@ -194,8 +194,7 @@ class CardApplicationService
         ) VALUES (
             :app_id, :user_id, :full_name, :id_number, :id_type,
             :dob, :phone, :email, :occupation, :income_range,
-            :source_of_funds, :institution, :course, :year,
-            :card_type, :address, :delivery_method, :branch_location,
+            :source_of_funds,:card_type, :address, :delivery_method, :branch_location,
             'PENDING_KYC', :consent, NOW(), NOW()
         )
     ");
@@ -212,9 +211,6 @@ class CardApplicationService
         ':occupation' => $data['occupation'] ?? null,
         ':income_range' => $data['income_range'] ?? null,
         ':source_of_funds' => $data['source_of_funds'] ?? null,
-        ':institution' => $data['institution'] ?? null,
-        ':course' => $data['course'] ?? null,
-        ':year' => $data['year'] ?? null,
         ':card_type' => $data['card_type'],
         ':address' => json_encode($data['delivery_address'] ?? null),
         ':delivery_method' => $data['delivery_method'] ?? 'BRANCH_PICKUP',
