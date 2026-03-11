@@ -1,28 +1,37 @@
 <?php
 declare(strict_types=1);
 
-// Move headers BEFORE any output or warnings
+// Headers - good!
 header('Content-Type: application/json');
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: POST, GET, OPTIONS');
-header("Access-Control-Allow-Headers: Content-Type, X-API-Key, Authorization");
+header('Access-Control-Allow-Headers: Content-Type, X-API-Key, X-Correlation-ID'); // Added X-Correlation-ID
 
-// Fix the paths - remove one level of ../../
-require_once __DIR__ . '/../../../../src/bootstrap.php';  
+// Fix paths - they look correct now (4 levels up to root)
+require_once __DIR__ . '/../../../../src/bootstrap.php';
 require_once __DIR__ . '/../../../../src/BUSINESS_LOGIC_LAYER/services/CardService.php';
 
 use BUSINESS_LOGIC_LAYER\services\CardService;
 
-// Remove unused use statement
-// use RuntimeException;  // Remove this - not needed
-
 try {
-    // Verify API key
-    $apiKey = $_SERVER['HTTP_X_API_KEY'] ?? '';
-    if ($apiKey !== 'sys_key_2026_sandbox_001') {
-        http_response_code(401);
-        echo json_encode(['error' => 'Invalid API key']);
-        exit;
+    // Better API key validation - use your existing auth function if available
+    $apiKey = $_SERVER['HTTP_X_API_KEY'] ?? $_SERVER['HTTP_AUTHORIZATION'] ?? '';
+    $apiKey = str_replace('Bearer ', '', $apiKey);
+    
+    // Use your existing validateApiKey function if it exists
+    if (function_exists('validateApiKey')) {
+        if (!validateApiKey($apiKey)) {
+            http_response_code(401);
+            echo json_encode(['error' => 'Invalid API key']);
+            exit;
+        }
+    } else {
+        // Fallback to hardcoded check (temporary)
+        if ($apiKey !== 'sys_key_2026_sandbox_001') {
+            http_response_code(401);
+            echo json_encode(['error' => 'Invalid API key']);
+            exit;
+        }
     }
 
     // Get request body
@@ -31,17 +40,29 @@ try {
         $input = $_GET; // Fallback to GET params
     }
     
-    // Get database connection function
+    // IMPORTANT: Don't redefine getDatabaseConnection if bootstrap already provides it
+    // Just use the existing one from bootstrap
     if (!function_exists('getDatabaseConnection')) {
-        // Define it if not exists
+        // Define it only if bootstrap doesn't provide it
         function getDatabaseConnection() {
             static $pdo = null;
             if ($pdo === null) {
-                $host = $_ENV['DB_HOST'] ?? 'localhost';
-                $port = $_ENV['DB_PORT'] ?? '5432';
-                $dbname = $_ENV['DB_NAME'] ?? 'postgres';
-                $user = $_ENV['DB_USER'] ?? 'postgres';
-                $pass = $_ENV['DB_PASS'] ?? '';
+                // Use environment variables from Railway
+                $host = $_ENV['PGHOST'] ?? $_ENV['DB_HOST'] ?? 'localhost';
+                $port = $_ENV['PGPORT'] ?? $_ENV['DB_PORT'] ?? '5432';
+                $dbname = $_ENV['PGDATABASE'] ?? $_ENV['DB_NAME'] ?? 'postgres';
+                $user = $_ENV['PGUSER'] ?? $_ENV['DB_USER'] ?? 'postgres';
+                $pass = $_ENV['PGPASSWORD'] ?? $_ENV['DB_PASS'] ?? '';
+                
+                // Check for Railway's DATABASE_URL
+                if (getenv('DATABASE_URL')) {
+                    $dbUrl = parse_url(getenv('DATABASE_URL'));
+                    $host = $dbUrl['host'] ?? $host;
+                    $port = $dbUrl['port'] ?? $port;
+                    $user = $dbUrl['user'] ?? $user;
+                    $pass = $dbUrl['pass'] ?? $pass;
+                    $dbname = ltrim($dbUrl['path'] ?? '', '/') ?: $dbname;
+                }
                 
                 $dsn = "pgsql:host=$host;port=$port;dbname=$dbname";
                 $pdo = new PDO($dsn, $user, $pass);
@@ -51,9 +72,21 @@ try {
         }
     }
     
-    // Initialize CardService
+    // Get database connection (from bootstrap or our fallback)
     $db = getDatabaseConnection();
-    $cardService = new CardService($db, 'BWP', []);
+    
+    // Load participant config - bootstrap should provide this
+    $participants = [];
+    if (function_exists('loadParticipantsConfig')) {
+        $config = loadParticipantsConfig();
+        $participants = $config['participants'] ?? [];
+    }
+    
+    $cardService = new CardService(
+        $db, 
+        'BWP', 
+        $participants['vouchmorph'] ?? []  // Pass VouchMorph config
+    );
     
     // Extract verification data
     $assetType = $input['asset_type'] ?? '';
@@ -103,7 +136,6 @@ try {
         
     } elseif ($assetType === 'E-WALLET' || $assetType === 'ACCOUNT') {
         // Regular asset verification - forward to bank
-        // You'll need to implement this based on your bank client
         echo json_encode([
             'verified' => false,
             'message' => 'E-WALLET verification not implemented in this endpoint'
