@@ -7,11 +7,97 @@ declare(strict_types=1);
 
 define('ROOT_PATH', dirname(__DIR__, 5));
 
-// ... (same bootstrapping with admin auth)
+// ============================================
+// BOOTSTRAP - Load all dependencies (SAME AS batch_create.php)
+// ============================================
+require_once ROOT_PATH . '/src/CORE_CONFIG/system_country.php';
+require_once ROOT_PATH . '/src/CORE_CONFIG/load_country.php';
+require_once ROOT_PATH . '/src/DATA_PERSISTENCE_LAYER/config/DBConnection.php';
+require_once ROOT_PATH . '/src/BUSINESS_LOGIC_LAYER/services/CardService.php';
 
+use DATA_PERSISTENCE_LAYER\config\DBConnection;
+
+// ============================================
+// HEADERS & AUTHENTICATION
+// ============================================
+header('Content-Type: application/json');
+header('Access-Control-Allow-Origin: *');
+header('Access-Control-Allow-Methods: GET, OPTIONS');
+header('Access-Control-Allow-Headers: Content-Type, X-API-Key, Authorization');
+
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+    http_response_code(200);
+    exit();
+}
+
+if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
+    http_response_code(405);
+    echo json_encode(['error' => 'Method not allowed. Use GET.']);
+    exit();
+}
+
+// Load environment
+$country = defined('SYSTEM_COUNTRY') ? SYSTEM_COUNTRY : 'BW';
+$envFile = ROOT_PATH . "/src/CORE_CONFIG/countries/{$country}/.env_{$country}";
+if (file_exists($envFile)) {
+    $lines = file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    foreach ($lines as $line) {
+        $line = trim($line);
+        if (empty($line) || strpos($line, '#') === 0) continue;
+        $parts = explode('=', $line, 2);
+        if (count($parts) === 2) {
+            $key = trim($parts[0]);
+            $value = trim($parts[1]);
+            putenv("$key=$value");
+            $_ENV[$key] = $value;
+            $_SERVER[$key] = $value;
+        }
+    }
+}
+
+// Helper function for env vars
+if (!function_exists('get_env_val')) {
+    function get_env_val(string $key) {
+        $val = getenv($key);
+        if ($val === false) {
+            $val = $_ENV[$key] ?? ($_SERVER[$key] ?? null);
+        }
+        return $val;
+    }
+}
+
+// ============================================
+// AUTHENTICATION
+// ============================================
+$headers = function_exists('getallheaders') ? getallheaders() : [];
+$headersLower = array_change_key_case($headers, CASE_LOWER);
+$providedKey = $headersLower['x-api-key'] ?? $_SERVER['HTTP_X_API_KEY'] ?? null;
+
+$validKeys = array_filter([get_env_val('API_KEY_SYSTEM')]);
+if (!$providedKey || !in_array($providedKey, $validKeys, true)) {
+    http_response_code(401);
+    echo json_encode(['success' => false, 'error' => 'Unauthorized']);
+    exit();
+}
+
+// ============================================
+// DATABASE CONNECTION
+// ============================================
 try {
     $pdo = DBConnection::getConnection();
-    
+    if (!$pdo) {
+        throw new Exception('Database connection failed');
+    }
+} catch (Exception $e) {
+    http_response_code(500);
+    echo json_encode(['success' => false, 'error' => 'Database connection error']);
+    exit();
+}
+
+// ============================================
+// GET INVENTORY DATA
+// ============================================
+try {
     // Get batches summary
     $batches = $pdo->query("
         SELECT 
@@ -39,20 +125,32 @@ try {
         GROUP BY lifecycle_status
     ")->fetchAll(PDO::FETCH_ASSOC);
     
-    // Get recent assignments
-    $recentAssignments = $pdo->query("
-        SELECT 
-            mc.card_suffix,
-            mc.cardholder_name,
-            mc.lifecycle_status,
-            mc.batch_assigned_at,
-            u.phone
-        FROM message_cards mc
-        JOIN users u ON mc.user_id = u.user_id
-        WHERE mc.batch_assigned_at IS NOT NULL
-        ORDER BY mc.batch_assigned_at DESC
-        LIMIT 20
-    ")->fetchAll(PDO::FETCH_ASSOC);
+    // Calculate total inventory
+    $totalInventory = 0;
+    foreach ($cardsByStatus as $status) {
+        $totalInventory += $status['count'];
+    }
+    
+    // Get recent assignments (if any)
+    $recentAssignments = [];
+    try {
+        $recentAssignments = $pdo->query("
+            SELECT 
+                mc.card_suffix,
+                COALESCE(mc.cardholder_name, 'Unassigned') as cardholder_name,
+                mc.lifecycle_status,
+                mc.batch_assigned_at,
+                u.phone
+            FROM message_cards mc
+            LEFT JOIN users u ON mc.user_id = u.user_id
+            WHERE mc.batch_assigned_at IS NOT NULL
+            ORDER BY mc.batch_assigned_at DESC
+            LIMIT 20
+        ")->fetchAll(PDO::FETCH_ASSOC);
+    } catch (Exception $e) {
+        // Table might not have assignments yet, ignore
+        $recentAssignments = [];
+    }
     
     echo json_encode([
         'success' => true,
@@ -60,7 +158,7 @@ try {
             'batches' => $batches,
             'cards_by_status' => $cardsByStatus,
             'recent_assignments' => $recentAssignments,
-            'total_inventory' => array_sum(array_column($cardsByStatus, 'count'))
+            'total_inventory' => $totalInventory
         ]
     ], JSON_PRETTY_PRINT);
     
