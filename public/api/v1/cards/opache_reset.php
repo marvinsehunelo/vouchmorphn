@@ -12,6 +12,6 @@ clearstatcache(true);
 echo "✅ Realpath cache cleared\n";
 
 // Show that the method exists
-require_once '/../../../src/BUSINESS_LOGIC_LAYER/services/SwapService.php';
+require_once __DIR__ . '/../../../../src/BUSINESS_LOGIC_LAYER/services/SwapService.php';
 echo "✅ SwapService reloaded\n";
 echo "✅ verifySourceAsset() exists: " . (method_exists('BUSINESS_LOGIC_LAYER\services\SwapService', 'verifySourceAsset') ? 'YES' : 'NO') . "\n";
