@@ -3,11 +3,20 @@ declare(strict_types=1);
 
 namespace BUSINESS_LOGIC_LAYER\services;
 
+
+require_once __DIR__ . '/KYCDocumentService.php';
+require_once __DIR__ . '/../../INTEGRATION_LAYER/CLIENTS/CardSchemes/CardNumberGenerator.php';
+require_once __DIR__ . '/../Helpers/CardHelper.php';
+
+// ============================================
+// ADD THESE USE STATEMENTS
+// ============================================
 use PDO;
 use Exception;
 use RuntimeException;
 use BUSINESS_LOGIC_LAYER\services\KYCDocumentService;
 use INTEGRATION_LAYER\CLIENTS\CardSchemes\CardNumberGenerator;
+use BUSINESS_LOGIC_LAYER\Helpers\CardHelper;
 
 /**
  * CardApplicationService - Handles card applications for general public
