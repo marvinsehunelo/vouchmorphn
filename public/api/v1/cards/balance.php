@@ -9,7 +9,7 @@ declare(strict_types=1);
 // ============================================
 // 1. BOOTSTRAP & PATHS
 // ============================================
-define('ROOT_PATH', dirname(__DIR__, 4)); // Goes up 5 levels to project root
+define('ROOT_PATH', dirname(__DIR__, 4));
 
 // ============================================
 // 2. HEADERS & CORS
@@ -43,13 +43,12 @@ $country = defined('SYSTEM_COUNTRY') ? SYSTEM_COUNTRY : 'BW';
 // ============================================
 require_once ROOT_PATH . '/src/DATA_PERSISTENCE_LAYER/config/DBConnection.php';
 require_once ROOT_PATH . '/src/BUSINESS_LOGIC_LAYER/services/CardService.php';
-require_once ROOT_PATH . '/src/BUSINESS_LOGIC_LAYER/Helpers/CardHelper.php';
 
 use DATA_PERSISTENCE_LAYER\config\DBConnection;
 use BUSINESS_LOGIC_LAYER\services\CardService;
 
 // ============================================
-// 5. LOAD COUNTRY-SPECIFIC ENVIRONMENT VARIABLES
+// 5. LOAD ENVIRONMENT
 // ============================================
 $envFile = ROOT_PATH . "/src/CORE_CONFIG/countries/{$country}/.env_{$country}";
 if (file_exists($envFile)) {
@@ -79,79 +78,30 @@ if (!function_exists('get_env_val')) {
 }
 
 // ============================================
-// 6. AUTHENTICATION - SAME PATTERN AS OTHER ENDPOINTS
+// 6. AUTHENTICATION
 // ============================================
 $headers = function_exists('getallheaders') ? getallheaders() : [];
 $headersLower = array_change_key_case($headers, CASE_LOWER);
 $providedKey = $headersLower['x-api-key'] ?? $_SERVER['HTTP_X_API_KEY'] ?? null;
 
-// Start with SYSTEM key (global)
-$validKeys = array_filter([
-    get_env_val('API_KEY_SYSTEM')
-]);
-
-// Load country-specific participants to get bank keys
-$participantsFile = ROOT_PATH . "/src/CORE_CONFIG/countries/{$country}/participants_{$country}.json";
-if (file_exists($participantsFile)) {
-    $participantsData = json_decode(file_get_contents($participantsFile), true);
-    
-    // For each participant, look for its API key in environment
-    if (isset($participantsData['participants'])) {
-        foreach ($participantsData['participants'] as $participantName => $participant) {
-            // Convert participant name to env key format (e.g., ZURUBANK -> API_KEY_ZURUBANK)
-            $envKey = 'API_KEY_' . strtoupper($participantName);
-            $keyValue = get_env_val($envKey);
-            if ($keyValue) {
-                $validKeys[] = $keyValue;
-            }
-            
-            // Also check for provider_code based keys
-            if (isset($participant['provider_code'])) {
-                $providerEnvKey = 'API_KEY_' . strtoupper($participant['provider_code']);
-                $providerKeyValue = get_env_val($providerEnvKey);
-                if ($providerKeyValue) {
-                    $validKeys[] = $providerKeyValue;
-                }
-            }
-        }
-    }
-}
-
-// Remove any empty values
-$validKeys = array_filter($validKeys);
-
+$validKeys = array_filter([get_env_val('API_KEY_SYSTEM')]);
 if (!$providedKey || !in_array($providedKey, $validKeys, true)) {
     http_response_code(401);
-    echo json_encode([
-        'success' => false,
-        'error' => 'Unauthorized: Invalid or missing API key',
-        'debug' => ['country' => $country]
-    ]);
+    echo json_encode(['success' => false, 'error' => 'Unauthorized']);
     exit();
 }
 
 // ============================================
-// 7. GET CARD NUMBER FROM QUERY PARAMETERS
+// 7. GET CARD IDENTIFIER
 // ============================================
 $cardNumber = $_GET['card_number'] ?? '';
+$cardSuffix = $_GET['card_suffix'] ?? '';
 
-if (!$cardNumber) {
+if (!$cardNumber && !$cardSuffix) {
     http_response_code(400);
     echo json_encode([
         'success' => false,
-        'error' => 'card_number parameter is required'
-    ]);
-    exit();
-}
-
-// Basic card number sanitization (remove spaces, dashes)
-$cardNumber = preg_replace('/[^0-9]/', '', $cardNumber);
-
-if (strlen($cardNumber) < 15 || strlen($cardNumber) > 19) {
-    http_response_code(400);
-    echo json_encode([
-        'success' => false,
-        'error' => 'Invalid card number format'
+        'error' => 'Either card_number or card_suffix parameter is required'
     ]);
     exit();
 }
@@ -161,43 +111,127 @@ if (strlen($cardNumber) < 15 || strlen($cardNumber) > 19) {
 // ============================================
 try {
     $pdo = DBConnection::getConnection();
-    if (!$pdo) {
-        throw new Exception('Database connection failed');
-    }
+    if (!$pdo) throw new Exception('Database connection failed');
 } catch (Exception $e) {
-    error_log("Database connection error in balance API: " . $e->getMessage());
     http_response_code(500);
-    echo json_encode([
-        'success' => false,
-        'error' => 'Database connection error'
-    ]);
+    echo json_encode(['success' => false, 'error' => 'Database error']);
     exit();
 }
 
 // ============================================
-// 9. LOAD COUNTRY-SPECIFIC CARD CONFIG
-// ============================================
-$config = [];
-$cardConfigPath = ROOT_PATH . "/src/CORE_CONFIG/countries/{$country}/card_config_{$country}.json";
-if (file_exists($cardConfigPath)) {
-    $config = json_decode(file_get_contents($cardConfigPath), true);
-}
-
-// ============================================
-// 10. EXECUTE CARD BALANCE CHECK
+// 9. FETCH CARD BALANCE
 // ============================================
 try {
-    $cardService = new CardService($pdo, $country, $config);
-    $result = $cardService->getCardBalance($cardNumber);
+    if ($cardSuffix) {
+        // Search by suffix
+        $stmt = $pdo->prepare("
+            SELECT 
+                mc.card_id,
+                mc.card_suffix,
+                mc.cardholder_name,
+                mc.remaining_amount as balance,
+                'BWP' as currency,
+                mc.lifecycle_status,
+                mc.financial_status,
+                mc.expiry_month,
+                mc.expiry_year,
+                mc.initial_amount,
+                mc.activated_at,
+                mc.last_used_at,
+                COALESCE(ht.hold_reference, 'No active hold') as hold_reference,
+                COALESCE(ht.source_institution, 'Not funded') as source_institution,
+                (
+                    SELECT COUNT(*) 
+                    FROM card_transactions ct 
+                    WHERE ct.card_id = mc.card_id AND ct.auth_status = 'APPROVED'
+                ) as transaction_count,
+                (
+                    SELECT COALESCE(SUM(amount), 0)
+                    FROM card_transactions ct 
+                    WHERE ct.card_id = mc.card_id AND ct.auth_status = 'APPROVED'
+                ) as total_spent
+            FROM message_cards mc
+            LEFT JOIN hold_transactions ht ON mc.hold_reference = ht.hold_reference
+            WHERE mc.card_suffix = :suffix
+        ");
+        $stmt->execute([':suffix' => $cardSuffix]);
+    } else {
+        // Search by full card number (hash it first)
+        $cardNumberHash = hash('sha256', $cardNumber);
+        $stmt = $pdo->prepare("
+            SELECT 
+                mc.card_id,
+                mc.card_suffix,
+                mc.cardholder_name,
+                mc.remaining_amount as balance,
+                'BWP' as currency,
+                mc.lifecycle_status,
+                mc.financial_status,
+                mc.expiry_month,
+                mc.expiry_year,
+                mc.initial_amount,
+                mc.activated_at,
+                mc.last_used_at,
+                COALESCE(ht.hold_reference, 'No active hold') as hold_reference,
+                COALESCE(ht.source_institution, 'Not funded') as source_institution,
+                (
+                    SELECT COUNT(*) 
+                    FROM card_transactions ct 
+                    WHERE ct.card_id = mc.card_id AND ct.auth_status = 'APPROVED'
+                ) as transaction_count,
+                (
+                    SELECT COALESCE(SUM(amount), 0)
+                    FROM card_transactions ct 
+                    WHERE ct.card_id = mc.card_id AND ct.auth_status = 'APPROVED'
+                ) as total_spent
+            FROM message_cards mc
+            LEFT JOIN hold_transactions ht ON mc.hold_reference = ht.hold_reference
+            WHERE mc.card_number_hash = :hash
+        ");
+        $stmt->execute([':hash' => $cardNumberHash]);
+    }
+    
+    $card = $stmt->fetch(PDO::FETCH_ASSOC);
+    
+    if (!$card) {
+        http_response_code(404);
+        echo json_encode([
+            'success' => false,
+            'error' => 'Card not found'
+        ]);
+        exit();
+    }
+    
+    // Format response
+    $response = [
+        'success' => true,
+        'card_id' => $card['card_id'],
+        'card_suffix' => $card['card_suffix'],
+        'cardholder_name' => $card['cardholder_name'],
+        'balance' => (float)$card['balance'],
+        'currency' => $card['currency'],
+        'expiry' => sprintf("%02d/%d", $card['expiry_month'], $card['expiry_year']),
+        'status' => $card['lifecycle_status'],
+        'financial_status' => $card['financial_status'],
+        'initial_amount' => (float)$card['initial_amount'],
+        'total_spent' => (float)$card['total_spent'],
+        'transaction_count' => (int)$card['transaction_count'],
+        'hold_reference' => $card['hold_reference'],
+        'source_institution' => $card['source_institution']
+    ];
+    
+    if ($card['activated_at']) {
+        $response['activated_at'] = $card['activated_at'];
+    }
+    if ($card['last_used_at']) {
+        $response['last_used_at'] = $card['last_used_at'];
+    }
     
     http_response_code(200);
-    echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+    echo json_encode($response, JSON_PRETTY_PRINT);
     
 } catch (Exception $e) {
-    error_log("Card balance error for {$country} - card ending in " . substr($cardNumber, -4) . ": " . $e->getMessage());
-    http_response_code(404);
-    echo json_encode([
-        'success' => false,
-        'error' => $e->getMessage()
-    ]);
+    error_log("Card balance error: " . $e->getMessage());
+    http_response_code(400);
+    echo json_encode(['success' => false, 'error' => $e->getMessage()]);
 }
