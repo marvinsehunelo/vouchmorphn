@@ -2176,12 +2176,16 @@ class SwapService
     {
         $assetType = 'UNKNOWN';
         
+        // Safely check for asset_type in various possible locations
         if (isset($source['asset_type'])) {
             $assetType = strtoupper($source['asset_type']);
         } elseif (isset($source['type'])) {
             $assetType = strtoupper($source['type']);
         } elseif (isset($source['source']['asset_type'])) {
             $assetType = strtoupper($source['source']['asset_type']);
+        } elseif (isset($source['delivery_mode'])) {
+            // For destination arrays, use delivery_mode as fallback
+            $assetType = strtoupper($source['delivery_mode']);
         }
         
         error_log("[maskIdentifier] Asset type: {$assetType}, Source keys: " . implode(', ', array_keys($source)));
@@ -2219,6 +2223,18 @@ class SwapService
                 $phone = $source['cashout']['beneficiary_phone'] ?? $source['beneficiary_phone'] ?? '';
                 return 'CSH-' . substr($phone, -8);
                 
+            case 'CARD_LOAD':
+            case 'CARD_ISSUANCE':
+            case 'DEPOSIT':
+                // Handle destination types
+                if (isset($source['card_suffix'])) {
+                    return 'CRD-' . $source['card_suffix'];
+                }
+                if (isset($source['beneficiary_account'])) {
+                    return 'ACC-' . substr($source['beneficiary_account'], -4);
+                }
+                return 'DST-' . substr(uniqid(), -6);
+                
             default:
                 if (isset($source['phone'])) {
                     return 'USR-' . substr($source['phone'], -8);
@@ -2231,6 +2247,9 @@ class SwapService
                 }
                 if (isset($source['beneficiary_phone'])) {
                     return 'BNF-' . substr($source['beneficiary_phone'], -8);
+                }
+                if (isset($source['card_suffix'])) {
+                    return 'CRD-' . $source['card_suffix'];
                 }
                 return 'SRC-' . substr(uniqid(), -6);
         }
@@ -2314,3 +2333,4 @@ class SwapService
         }
     }
 }
+
