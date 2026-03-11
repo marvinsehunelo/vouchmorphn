@@ -1720,4 +1720,55 @@ CREATE INDEX IF NOT EXISTS idx_message_cards_user ON message_cards(user_id);
 CREATE INDEX IF NOT EXISTS idx_message_cards_hold ON message_cards(hold_reference);
 CREATE INDEX IF NOT EXISTS idx_message_cards_lifecycle ON message_cards(lifecycle_status);
 
+-- =========================================================
+-- CARD TRANSACTIONS TABLE
+-- Tracks all card transactions (loads, purchases, ATM withdrawals)
+-- =========================================================
+CREATE TABLE IF NOT EXISTS card_transactions (
+    transaction_id BIGSERIAL PRIMARY KEY,
+    card_id BIGINT NOT NULL REFERENCES message_cards(card_id),
+    
+    -- Transaction details
+    transaction_type VARCHAR(30) NOT NULL,
+    -- 'ISSUANCE', 'LOAD', 'ATM_WITHDRAWAL', 'PURCHASE', 'REFUND', 'VOID', 'AUTHORIZATION'
+    
+    amount NUMERIC(20,4) NOT NULL,
+    currency CHAR(3) DEFAULT 'BWP',
+    
+    -- Authorization
+    auth_code VARCHAR(20),
+    auth_status VARCHAR(20) DEFAULT 'APPROVED',
+    -- 'APPROVED', 'DECLINED', 'PENDING', 'REVERSED'
+    
+    -- Merchant/ATM details
+    merchant_name VARCHAR(200),
+    merchant_id VARCHAR(50),
+    merchant_category VARCHAR(10),
+    terminal_id VARCHAR(50),
+    
+    -- ATM specific
+    atm_id VARCHAR(50),
+    atm_location VARCHAR(200),
+    
+    -- Channel
+    channel VARCHAR(20), -- 'POS', 'ATM', 'ECOMMERCE', 'MOTO', 'LOAD'
+    
+    -- Links
+    settlement_queue_id BIGINT REFERENCES settlement_queue(id),
+    hold_reference VARCHAR(100),
+    reference VARCHAR(100),
+    
+    -- Timestamps
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    settled_at TIMESTAMPTZ,
+    
+    -- Response codes
+    response_code VARCHAR(2),
+    response_message TEXT
+);
+
+-- Create indexes for performance
+CREATE INDEX idx_card_transactions_card ON card_transactions(card_id);
+CREATE INDEX idx_card_transactions_date ON card_transactions(created_at);
+CREATE INDEX idx_card_transactions_auth ON card_transactions(auth_code);
 
