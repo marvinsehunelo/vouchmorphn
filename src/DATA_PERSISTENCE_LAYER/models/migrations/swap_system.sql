@@ -1690,5 +1690,34 @@ CREATE TRIGGER trg_card_applications_updated
     FOR EACH ROW
     EXECUTE FUNCTION update_card_applications_updated_at();
 
+ALTER TABLE message_cards 
+ADD COLUMN IF NOT EXISTS cardholder_name VARCHAR(200),
+ADD COLUMN IF NOT EXISTS user_id BIGINT REFERENCES users(user_id),
+ADD COLUMN IF NOT EXISTS batch_assigned_at TIMESTAMPTZ,
+ADD COLUMN IF NOT EXISTS delivery_method VARCHAR(50),
+ADD COLUMN IF NOT EXISTS delivery_address JSONB,
+ADD COLUMN IF NOT EXISTS delivery_status VARCHAR(30),
+ADD COLUMN IF NOT EXISTS batch_sequence INT,
+ADD COLUMN IF NOT EXISTS lifecycle_status VARCHAR(30) NOT NULL DEFAULT 'IN_BATCH',
+ADD COLUMN IF NOT EXISTS financial_status VARCHAR(20) NOT NULL DEFAULT 'UNFUNDED',
+ADD COLUMN IF NOT EXISTS initial_amount NUMERIC(20,4) DEFAULT 0,
+ADD COLUMN IF NOT EXISTS remaining_amount NUMERIC(20,4) DEFAULT 0,
+ADD COLUMN IF NOT EXISTS currency CHAR(3) DEFAULT 'BWP',
+ADD COLUMN IF NOT EXISTS activated_at TIMESTAMPTZ,
+ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMPTZ,
+ADD COLUMN IF NOT EXISTS blocked_at TIMESTAMPTZ,
+ADD COLUMN IF NOT EXISTS block_reason TEXT,
+ADD COLUMN IF NOT EXISTS daily_limit NUMERIC(20,4),
+ADD COLUMN IF NOT EXISTS monthly_limit NUMERIC(20,4),
+ADD COLUMN IF NOT EXISTS atm_daily_limit NUMERIC(20,4),
+ADD COLUMN IF NOT EXISTS pin_hash VARCHAR(255),
+ADD COLUMN IF NOT EXISTS hold_reference VARCHAR(100) REFERENCES hold_transactions(hold_reference),
+ADD COLUMN IF NOT EXISTS swap_reference VARCHAR(100) REFERENCES swap_requests(swap_uuid);
+
+
+-- Create indexes for performance
+CREATE INDEX IF NOT EXISTS idx_message_cards_user ON message_cards(user_id);
+CREATE INDEX IF NOT EXISTS idx_message_cards_hold ON message_cards(hold_reference);
+CREATE INDEX IF NOT EXISTS idx_message_cards_lifecycle ON message_cards(lifecycle_status);
 
 
