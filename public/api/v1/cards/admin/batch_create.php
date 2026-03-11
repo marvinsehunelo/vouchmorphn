@@ -270,32 +270,3 @@ try {
     http_response_code(400);
     echo json_encode(['success' => false, 'error' => $e->getMessage()]);
 }
-
-
--- Add batch_id column to message_cards
-ALTER TABLE message_cards 
-ADD COLUMN IF NOT EXISTS batch_id BIGINT REFERENCES card_batches(batch_id);
-
--- Also add any other columns that might be missing from our INSERT statement
-ALTER TABLE message_cards 
-ADD COLUMN IF NOT EXISTS card_category VARCHAR(20) NOT NULL DEFAULT 'PHYSICAL',
-ADD COLUMN IF NOT EXISTS card_scheme VARCHAR(20) NOT NULL DEFAULT 'VOUCHMORPH',
-ADD COLUMN IF NOT EXISTS batch_sequence INT,
-ADD COLUMN IF NOT EXISTS lifecycle_status VARCHAR(30) NOT NULL DEFAULT 'PENDING_ACTIVATION',
-ADD COLUMN IF NOT EXISTS financial_status VARCHAR(20) DEFAULT 'UNFUNDED',
-ADD COLUMN IF NOT EXISTS cardholder_name VARCHAR(200),
-ADD COLUMN IF NOT EXISTS cardholder_phone VARCHAR(20),
-ADD COLUMN IF NOT EXISTS daily_limit NUMERIC(20,4),
-ADD COLUMN IF NOT EXISTS monthly_limit NUMERIC(20,4),
-ADD COLUMN IF NOT EXISTS atm_daily_limit NUMERIC(20,4),
-ADD COLUMN IF NOT EXISTS batch_assigned_at TIMESTAMPTZ,
-ADD COLUMN IF NOT EXISTS activated_at TIMESTAMPTZ,
-ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMPTZ,
-ADD COLUMN IF NOT EXISTS blocked_at TIMESTAMPTZ,
-ADD COLUMN IF NOT EXISTS block_reason TEXT;
-
--- Verify the table structure
-SELECT column_name, data_type 
-FROM information_schema.columns 
-WHERE table_name = 'message_cards' 
-ORDER BY ordinal_position;
