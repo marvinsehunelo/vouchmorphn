@@ -40,6 +40,71 @@ class CardService
     }
     
     /**
+     * Authorize a card load (for message-based cards)
+     * This is a wrapper around loadCard() that matches the interface expected by SwapService
+     * 
+     * @param array $data Contains:
+     * - hold_reference: string (required)
+     * - swap_reference: string (required)
+     * - card_suffix: string (required)
+     * - amount: float (required)
+     * @return array
+     */
+    public function authorizeCardLoad(array $data): array
+    {
+        error_log("[CardService] authorizeCardLoad called with: " . json_encode([
+            'hold_reference' => $data['hold_reference'] ?? null,
+            'card_suffix' => $data['card_suffix'] ?? null,
+            'amount' => $data['amount'] ?? null
+        ]));
+        
+        try {
+            // Validate required fields
+            if (empty($data['hold_reference'])) {
+                throw new RuntimeException("hold_reference is required for card authorization");
+            }
+            if (empty($data['card_suffix'])) {
+                throw new RuntimeException("card_suffix is required for card authorization");
+            }
+            if (empty($data['amount']) || $data['amount'] <= 0) {
+                throw new RuntimeException("Valid amount is required for card authorization");
+            }
+            
+            // Map the data to match what loadCard expects
+            $loadData = [
+                'hold_reference' => $data['hold_reference'],
+                'swap_reference' => $data['swap_reference'] ?? null,
+                'card_suffix' => $data['card_suffix'],
+                'amount' => $data['amount']
+            ];
+            
+            // Call the existing loadCard method
+            $result = $this->loadCard($loadData);
+            
+            // Add authorization-specific fields to the response
+            $result['authorized'] = true;
+            $result['authorization_id'] = $result['card_id'] ?? null;
+            $result['authorized_amount'] = $data['amount'];
+            $result['remaining_balance'] = $result['new_balance'] ?? $data['amount'];
+            $result['status'] = 'AUTHORIZED';
+            
+            error_log("[CardService] authorizeCardLoad successful: " . json_encode($result));
+            
+            return $result;
+            
+        } catch (Exception $e) {
+            error_log("[CardService] authorizeCardLoad failed: " . $e->getMessage());
+            
+            return [
+                'success' => false,
+                'authorized' => false,
+                'error' => $e->getMessage(),
+                'message' => 'Card authorization failed: ' . $e->getMessage()
+            ];
+        }
+    }
+    
+    /**
      * Issue a new message card from a hold
      */
     public function issueCard(array $data): array
@@ -188,99 +253,99 @@ class CardService
      * - amount: float (required)
      * @return array
      */
- public function loadCard(array $data): array
-{
-    // NO beginTransaction() here - transaction already active
-    
-    try {
-        // Validate required fields
-        if (empty($data['hold_reference'])) {
-            throw new RuntimeException("hold_reference is required");
+    public function loadCard(array $data): array
+    {
+        // NO beginTransaction() here - transaction already active
+        
+        try {
+            // Validate required fields
+            if (empty($data['hold_reference'])) {
+                throw new RuntimeException("hold_reference is required");
+            }
+            if (empty($data['card_suffix'])) {
+                throw new RuntimeException("card_suffix is required");
+            }
+            if (empty($data['amount']) || $data['amount'] <= 0) {
+                throw new RuntimeException("Valid amount is required");
+            }
+            
+            // Find the card (FOR UPDATE will work because parent transaction has lock)
+            $cardStmt = $this->db->prepare("
+                SELECT * FROM message_cards 
+                WHERE card_suffix = :suffix 
+                AND lifecycle_status IN ('ASSIGNED', 'DELIVERED', 'ACTIVE')
+                FOR UPDATE
+            ");
+            $cardStmt->execute([':suffix' => $data['card_suffix']]);
+            $card = $cardStmt->fetch(PDO::FETCH_ASSOC);
+            
+            if (!$card) {
+                throw new RuntimeException("Card not found or not available for loading");
+            }
+            
+            // Check if hold exists and is active
+            $holdStmt = $this->db->prepare("
+                SELECT * FROM hold_transactions 
+                WHERE hold_reference = :hold_ref 
+                AND status = 'ACTIVE'
+            ");
+            $holdStmt->execute([':hold_ref' => $data['hold_reference']]);
+            $hold = $holdStmt->fetch(PDO::FETCH_ASSOC);
+            
+            if (!$hold) {
+                throw new RuntimeException("Hold not found or not active");
+            }
+            
+            // Link the hold to the card
+            $updateStmt = $this->db->prepare("
+                UPDATE message_cards 
+                SET hold_reference = :hold_ref,
+                    swap_reference = :swap_ref,
+                    initial_amount = initial_amount + :amount,
+                    remaining_amount = remaining_amount + :amount,
+                    financial_status = 'FUNDED',
+                    lifecycle_status = 'ACTIVE',
+                    activated_at = COALESCE(activated_at, NOW()),
+                    updated_at = NOW()
+                WHERE card_id = :card_id
+                RETURNING *
+            ");
+            
+            $updateStmt->execute([
+                ':hold_ref' => $data['hold_reference'],
+                ':swap_ref' => $data['swap_reference'] ?? null,
+                ':amount' => $data['amount'],
+                ':card_id' => $card['card_id']
+            ]);
+            
+            $updatedCard = $updateStmt->fetch(PDO::FETCH_ASSOC);
+            
+            // Record the card load transaction
+            $this->recordCardLoadTransaction(
+                $updatedCard['card_id'],
+                $data['hold_reference'],
+                $data['amount']
+            );
+            
+            // NO commit here - let parent transaction handle it
+            
+            return [
+                'success' => true,
+                'card_id' => $updatedCard['card_id'],
+                'card_suffix' => $updatedCard['card_suffix'],
+                'new_balance' => (float)$updatedCard['remaining_amount'],
+                'old_balance' => (float)$card['remaining_amount'],
+                'amount_loaded' => $data['amount'],
+                'hold_reference' => $data['hold_reference'],
+                'message' => 'Card loaded successfully'
+            ];
+            
+        } catch (Exception $e) {
+            // NO rollback here - let parent transaction handle it
+            error_log("Card load error: " . $e->getMessage());
+            throw $e;
         }
-        if (empty($data['card_suffix'])) {
-            throw new RuntimeException("card_suffix is required");
-        }
-        if (empty($data['amount']) || $data['amount'] <= 0) {
-            throw new RuntimeException("Valid amount is required");
-        }
-        
-        // Find the card (FOR UPDATE will work because parent transaction has lock)
-        $cardStmt = $this->db->prepare("
-            SELECT * FROM message_cards 
-            WHERE card_suffix = :suffix 
-            AND lifecycle_status IN ('ASSIGNED', 'DELIVERED', 'ACTIVE')
-            FOR UPDATE
-        ");
-        $cardStmt->execute([':suffix' => $data['card_suffix']]);
-        $card = $cardStmt->fetch(PDO::FETCH_ASSOC);
-        
-        if (!$card) {
-            throw new RuntimeException("Card not found or not available for loading");
-        }
-        
-        // Check if hold exists and is active
-        $holdStmt = $this->db->prepare("
-            SELECT * FROM hold_transactions 
-            WHERE hold_reference = :hold_ref 
-            AND status = 'ACTIVE'
-        ");
-        $holdStmt->execute([':hold_ref' => $data['hold_reference']]);
-        $hold = $holdStmt->fetch(PDO::FETCH_ASSOC);
-        
-        if (!$hold) {
-            throw new RuntimeException("Hold not found or not active");
-        }
-        
-        // Link the hold to the card
-        $updateStmt = $this->db->prepare("
-            UPDATE message_cards 
-            SET hold_reference = :hold_ref,
-                swap_reference = :swap_ref,
-                initial_amount = initial_amount + :amount,
-                remaining_amount = remaining_amount + :amount,
-                financial_status = 'FUNDED',
-                lifecycle_status = 'ACTIVE',
-                activated_at = COALESCE(activated_at, NOW()),
-                updated_at = NOW()
-            WHERE card_id = :card_id
-            RETURNING *
-        ");
-        
-        $updateStmt->execute([
-            ':hold_ref' => $data['hold_reference'],
-            ':swap_ref' => $data['swap_reference'] ?? null,
-            ':amount' => $data['amount'],
-            ':card_id' => $card['card_id']
-        ]);
-        
-        $updatedCard = $updateStmt->fetch(PDO::FETCH_ASSOC);
-        
-        // Record the card load transaction
-        $this->recordCardLoadTransaction(
-            $updatedCard['card_id'],
-            $data['hold_reference'],
-            $data['amount']
-        );
-        
-        // NO commit here - let parent transaction handle it
-        
-        return [
-            'success' => true,
-            'card_id' => $updatedCard['card_id'],
-            'card_suffix' => $updatedCard['card_suffix'],
-            'new_balance' => (float)$updatedCard['remaining_amount'],
-            'old_balance' => (float)$card['remaining_amount'],
-            'amount_loaded' => $data['amount'],
-            'hold_reference' => $data['hold_reference'],
-            'message' => 'Card loaded successfully'
-        ];
-        
-    } catch (Exception $e) {
-        // NO rollback here - let parent transaction handle it
-        error_log("Card load error: " . $e->getMessage());
-        throw $e;
     }
-}
     
     /**
      * Authorize a transaction (called by ATM/POS/online)
