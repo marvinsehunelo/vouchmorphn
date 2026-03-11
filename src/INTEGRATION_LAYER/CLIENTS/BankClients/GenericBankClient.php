@@ -21,12 +21,12 @@ class GenericBankClient implements BankAPIInterface
     // ============================================================================
 
     public function verifyAsset(array $payload): array
-{
-    error_log("=== GENERIC BANK CLIENT: verifyAsset ===");
-    error_log("Bank: " . ($this->config['provider_code'] ?? 'unknown'));
-    error_log("Original payload: " . json_encode($payload));
-    return $this->send('verify_asset', $payload);
-}
+    {
+        error_log("=== GENERIC BANK CLIENT: verifyAsset ===");
+        error_log("Bank: " . ($this->config['provider_code'] ?? 'unknown'));
+        error_log("Original payload: " . json_encode($payload));
+        return $this->send('verify_asset', $payload);
+    }
 
     public function placeHold(array $payload): array
     {
@@ -44,6 +44,36 @@ class GenericBankClient implements BankAPIInterface
     {
         error_log("=== GENERIC BANK CLIENT: debitFunds ===");
         return $this->send('debit_funds', $payload);
+    }
+
+    // ============================================================================
+    // ADD THIS NEW METHOD - debitHold (alias for debitFunds)
+    // ============================================================================
+    
+    public function debitHold(array $payload): array
+    {
+        error_log("=== GENERIC BANK CLIENT: debitHold (maps to debitFunds) ===");
+        
+        // Ensure we have the required fields
+        if (!isset($payload['hold_reference'])) {
+            error_log("ERROR: hold_reference is required for debitHold");
+            return [
+                'success' => false,
+                'message' => 'hold_reference is required',
+                'data' => []
+            ];
+        }
+        
+        // Map to debitFunds format
+        $debitPayload = [
+            'reference' => $payload['reference'] ?? $payload['hold_reference'],
+            'hold_reference' => $payload['hold_reference'],
+            'amount' => $payload['amount'] ?? null,
+            'reason' => $payload['reason'] ?? 'Debit hold for completed swap',
+            'action' => 'DEBIT_HOLD'
+        ];
+        
+        return $this->debitFunds($debitPayload);
     }
 
     // ============================================================================
@@ -121,6 +151,10 @@ class GenericBankClient implements BankAPIInterface
                 error_log("Mapping to authorize");
                 return $this->authorize($payload);
                 
+            case 'DEBIT_HOLD':
+                error_log("Mapping to debitHold");
+                return $this->debitHold($payload);
+                
             default:
                 error_log("Unknown action: $action, defaulting to processDeposit");
                 return $this->processDeposit($payload);
@@ -145,13 +179,13 @@ class GenericBankClient implements BankAPIInterface
         error_log("Bank: " . ($this->config['provider_code'] ?? 'unknown'));
         error_log("Action: " . $action);
 
-         // ADD THIS CRITICAL DEBUG
-    error_log("🚨 FULL PAYLOAD BEING SENT TO BANK: " . json_encode($payload));
-    error_log("🚨 PHONE FIELDS IN PAYLOAD: " . 
-              (isset($payload['ewallet_phone']) ? 'ewallet_phone=' . $payload['ewallet_phone'] : '') . ' ' .
-              (isset($payload['wallet_phone']) ? 'wallet_phone=' . $payload['wallet_phone'] : '') . ' ' .
-              (isset($payload['phone']) ? 'phone=' . $payload['phone'] : '') . ' ' .
-              (isset($payload['claimant_phone']) ? 'claimant_phone=' . $payload['claimant_phone'] : ''));
+        // ADD THIS CRITICAL DEBUG
+        error_log("🚨 FULL PAYLOAD BEING SENT TO BANK: " . json_encode($payload));
+        error_log("🚨 PHONE FIELDS IN PAYLOAD: " . 
+                  (isset($payload['ewallet_phone']) ? 'ewallet_phone=' . $payload['ewallet_phone'] : '') . ' ' .
+                  (isset($payload['wallet_phone']) ? 'wallet_phone=' . $payload['wallet_phone'] : '') . ' ' .
+                  (isset($payload['phone']) ? 'phone=' . $payload['phone'] : '') . ' ' .
+                  (isset($payload['claimant_phone']) ? 'claimant_phone=' . $payload['claimant_phone'] : ''));
         
         if (!$endpoint) {
             error_log("ERROR: No endpoint found for action: " . $action);
@@ -226,7 +260,8 @@ class GenericBankClient implements BankAPIInterface
             'reverse_transaction' => 'reverse_transaction',
             'authorize' => 'place_hold',
             'transfer' => 'process_deposit',
-            'reverse' => 'reverse_transaction'
+            'reverse' => 'reverse_transaction',
+            'debit_hold' => 'debit_funds' // Map debit_hold to debit_funds endpoint
         ];
 
         $endpointKey = $endpointMap[$action] ?? $action;
