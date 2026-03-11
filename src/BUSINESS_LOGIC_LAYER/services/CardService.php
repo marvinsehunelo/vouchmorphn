@@ -177,6 +177,110 @@ class CardService
             throw $e;
         }
     }
+
+    /**
+     * Load funds onto an existing card (link hold to card)
+     * 
+     * @param array $data Contains:
+     * - hold_reference: string (required)
+     * - swap_reference: string (required)
+     * - card_suffix: string (required)
+     * - amount: float (required)
+     * @return array
+     */
+    public function loadCard(array $data): array
+    {
+        $this->db->beginTransaction();
+        
+        try {
+            // Validate required fields
+            if (empty($data['hold_reference'])) {
+                throw new RuntimeException("hold_reference is required");
+            }
+            if (empty($data['card_suffix'])) {
+                throw new RuntimeException("card_suffix is required");
+            }
+            if (empty($data['amount']) || $data['amount'] <= 0) {
+                throw new RuntimeException("Valid amount is required");
+            }
+            
+            // Find the card
+            $cardStmt = $this->db->prepare("
+                SELECT * FROM message_cards 
+                WHERE card_suffix = :suffix 
+                AND lifecycle_status IN ('ASSIGNED', 'DELIVERED', 'ACTIVE')
+                FOR UPDATE
+            ");
+            $cardStmt->execute([':suffix' => $data['card_suffix']]);
+            $card = $cardStmt->fetch(PDO::FETCH_ASSOC);
+            
+            if (!$card) {
+                throw new RuntimeException("Card not found or not available for loading");
+            }
+            
+            // Check if hold exists and is active
+            $holdStmt = $this->db->prepare("
+                SELECT * FROM hold_transactions 
+                WHERE hold_reference = :hold_ref 
+                AND status = 'ACTIVE'
+            ");
+            $holdStmt->execute([':hold_ref' => $data['hold_reference']]);
+            $hold = $holdStmt->fetch(PDO::FETCH_ASSOC);
+            
+            if (!$hold) {
+                throw new RuntimeException("Hold not found or not active");
+            }
+            
+            // Link the hold to the card
+            $updateStmt = $this->db->prepare("
+                UPDATE message_cards 
+                SET hold_reference = :hold_ref,
+                    swap_reference = :swap_ref,
+                    initial_amount = initial_amount + :amount,
+                    remaining_amount = remaining_amount + :amount,
+                    financial_status = 'FUNDED',
+                    lifecycle_status = 'ACTIVE',
+                    activated_at = COALESCE(activated_at, NOW()),
+                    updated_at = NOW()
+                WHERE card_id = :card_id
+                RETURNING *
+            ");
+            
+            $updateStmt->execute([
+                ':hold_ref' => $data['hold_reference'],
+                ':swap_ref' => $data['swap_reference'] ?? null,
+                ':amount' => $data['amount'],
+                ':card_id' => $card['card_id']
+            ]);
+            
+            $updatedCard = $updateStmt->fetch(PDO::FETCH_ASSOC);
+            
+            // Record the card load transaction
+            $this->recordCardLoadTransaction(
+                $updatedCard['card_id'],
+                $data['hold_reference'],
+                $data['amount']
+            );
+            
+            $this->db->commit();
+            
+            return [
+                'success' => true,
+                'card_id' => $updatedCard['card_id'],
+                'card_suffix' => $updatedCard['card_suffix'],
+                'new_balance' => (float)$updatedCard['remaining_amount'],
+                'old_balance' => (float)$card['remaining_amount'],
+                'amount_loaded' => $data['amount'],
+                'hold_reference' => $data['hold_reference'],
+                'message' => 'Card loaded successfully'
+            ];
+            
+        } catch (Exception $e) {
+            $this->db->rollBack();
+            error_log("Card load error: " . $e->getMessage());
+            throw $e;
+        }
+    }
     
     /**
      * Authorize a transaction (called by ATM/POS/online)
@@ -440,9 +544,6 @@ class CardService
                 throw new RuntimeException("Card not found or already inactive");
             }
             
-            // Note: We DON'T release the hold automatically
-            // The hold can be used by other cards or later reversal
-            
             $this->db->commit();
             
             return [
@@ -618,6 +719,36 @@ class CardService
             WHERE hold_reference = ?
         ");
         $updateStmt->execute([$cardAmount, $newHoldRef, $holdReference]);
+    }
+    
+    /**
+     * Record card load transaction
+     */
+    private function recordCardLoadTransaction(int $cardId, string $holdReference, float $amount): void
+    {
+        $stmt = $this->db->prepare("
+            INSERT INTO card_transactions (
+                card_id,
+                transaction_type,
+                amount,
+                hold_reference,
+                auth_status,
+                created_at
+            ) VALUES (
+                :card_id,
+                'LOAD',
+                :amount,
+                :hold_ref,
+                'APPROVED',
+                NOW()
+            )
+        ");
+        
+        $stmt->execute([
+            ':card_id' => $cardId,
+            ':amount' => $amount,
+            ':hold_ref' => $holdReference
+        ]);
     }
     
     /**
