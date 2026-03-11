@@ -188,8 +188,7 @@ class CardApplicationService
         INSERT INTO card_applications (
             application_id, user_id, full_name, id_number, id_type,
             date_of_birth, phone, email, occupation, income_range,
-            source_of_funds, institution, course, year,
-            card_type, delivery_address, delivery_method, branch_location,
+            source_of_funds, card_type, delivery_address, delivery_method, branch_location,
             status, consent, created_at, submitted_at
         ) VALUES (
             :app_id, :user_id, :full_name, :id_number, :id_type,
