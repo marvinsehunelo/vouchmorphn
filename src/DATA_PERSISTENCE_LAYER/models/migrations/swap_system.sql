@@ -1502,6 +1502,11 @@ CREATE INDEX idx_message_cards_hold ON message_cards(hold_reference);
 CREATE INDEX idx_message_cards_user ON message_cards(user_id);
 CREATE INDEX idx_message_cards_lifecycle ON message_cards(lifecycle_status);
 
+ALTER TABLE kyc_documents 
+ADD COLUMN IF NOT EXISTS submitted_at TIMESTAMPTZ DEFAULT NOW();
+ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ,
+ADD COLUMN IF NOT EXISTS admin_reviewer_id INT,
+ADD COLUMN IF NOT EXISTS review_notes TEXT;
 
 
 
