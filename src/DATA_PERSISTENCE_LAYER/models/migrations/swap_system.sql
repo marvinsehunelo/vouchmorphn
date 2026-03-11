@@ -1772,3 +1772,26 @@ CREATE INDEX idx_card_transactions_card ON card_transactions(card_id);
 CREATE INDEX idx_card_transactions_date ON card_transactions(created_at);
 CREATE INDEX idx_card_transactions_auth ON card_transactions(auth_code);
 
+CREATE TABLE IF NOT EXISTS card_authorizations (
+    authorization_id SERIAL PRIMARY KEY,
+    swap_id INTEGER NOT NULL,
+    swap_reference VARCHAR(64) NOT NULL,
+    card_suffix VARCHAR(10) NOT NULL,
+    authorized_amount DECIMAL(10,2) NOT NULL,
+    remaining_balance DECIMAL(10,2) NOT NULL,
+    hold_reference VARCHAR(64) NOT NULL,
+    source_institution VARCHAR(50) NOT NULL,
+    fee_amount DECIMAL(10,2) DEFAULT 0.00,
+    vat_amount DECIMAL(10,2) DEFAULT 0.00,
+    status VARCHAR(20) DEFAULT 'ACTIVE',
+    expiry_at TIMESTAMP NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_swap_ref (swap_reference),
+    INDEX idx_card_suffix (card_suffix),
+    INDEX idx_hold_ref (hold_reference)
+);
+
+ALTER TABLE hold_transactions ADD COLUMN IF NOT EXISTS source_institution VARCHAR(50);
+
+
+ALTER TABLE hold_transactions ADD COLUMN IF NOT EXISTS source_institution VARCHAR(50);
