@@ -1320,3 +1320,5 @@ SELECT
 FROM users u
 LEFT JOIN message_cards mc ON u.user_id = mc.user_id
 GROUP BY u.user_id, u.full_name, u.phone;
+
+https://github.com/marvinsehunelo/vouchmorphn/tree/main/public/api/v1/cards
