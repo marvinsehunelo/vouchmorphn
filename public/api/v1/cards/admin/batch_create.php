@@ -138,7 +138,11 @@ function generateBatchCard($pdo, $batchId, $input, $index) {
     $cardNumber = generateCardNumber($input['bin_prefix'], $index);
     $cardNumberHash = hash('sha256', $cardNumber);
     $cardSuffix = substr($cardNumber, -4);
-    $cvv = rand(100, 999);
+    
+    // FIXED: Cast CVV to string before hashing
+    $cvv = (string)rand(100, 999);
+    // Ensure 3-digit CVV with leading zeros if needed
+    $cvv = str_pad($cvv, 3, '0', STR_PAD_LEFT);
     $cvvHash = hash('sha256', $cvv);
     
     $stmt = $pdo->prepare("
@@ -182,7 +186,8 @@ function generateBatchCard($pdo, $batchId, $input, $index) {
         ':exp_month' => $input['expiry_month'],
         ':metadata' => json_encode([
             'bin' => $input['bin_prefix'],
-            'produced_at' => date('Y-m-d H:i:s')
+            'produced_at' => date('Y-m-d H:i:s'),
+            'cvv_generated' => true
         ])
     ]);
 }
