@@ -141,68 +141,91 @@
       "status": "ACTIVE"
     },
 
-        "VOUCHMORPH": {
-      "type": "TECHNICAL_PROVIDER",
-      "category": "PAYMENT_PROCESSOR",
-      "provider_code": "VMPHBWX1",
-      "auth_type": "API_KEY",
-      "base_url": "https://vouchmorphn-production.up.railway.app",
-      
-      "security": {
-        "api_key": {
-          "value_env": "API_KEY_SYSTEM",
-          "header_name": "X-API-KEY"
-        }
-      },
-      
-      "identity": {
-        "system_user_id": 0,
-        "legal_entity_identifier": "VOUCHMORPH-SWAP-SYSTEM",
-        "license_number": "SANDBOX-001"
-      },
-      
-      "capabilities": {
-        "supports_sca": true,
-        "supports_realtime_processing": true,
-        "supports_reversal": true,
-        "supports_idempotency": true,
-        "wallet_types": ["CARD", "VOUCHER"],
-        "services": ["card_issuance", "message_clearing", "swap_execution", "settlement"]
-      },
-      
-      "resource_endpoints": {
-        "card_issue": "/api/v1/cards/issue.php",
-        "card_authorize": "/api/v1/cards/authorize.php",
-        "card_balance": "/api/v1/cards/balance.php",
-        "card_block": "/api/v1/cards/block.php",
-        "card_transactions": "/api/v1/cards/transactions.php",
-        "swap_execute": "/api/v1/swap/execute.php",
-        "swap_status": "/api/v1/swap/status.php",
-        "swap_cancel": "/api/v1/swap/cancel.php",
-        "regulatory_report": "/api/regulatory/report"
-      },
-      
-      "phone_format": {
-        "prefix": "+",
-        "country_code": "267",
-        "strip_leading_zeros": true,
-        "expected_length": 11
-      },
-      
-      "message_profile": {
-        "correlation_id_header": "X-Correlation-ID",
-        "idempotency_key_header": "X-Idempotency-Key",
-        "content_standard": "ISO20022_JSON"
-      },
-      
-      "settlement": {
-        "account": "VOUCHMORPH_SETTLEMENT",
-        "type": "POOLED",
-        "currency": "BWP"
-      },
-      
-      "status": "ACTIVE"
+     "VOUCHMORPH": {
+  "type": "TECHNICAL_PROVIDER",
+  "category": "PAYMENT_PROCESSOR",
+  "provider_code": "VMPHBWX1",
+  "auth_type": "API_KEY",
+  "base_url": "https://vouchmorphn-production.up.railway.app",
+  
+  "security": {
+    "api_key": {
+      "value_env": "API_KEY_SYSTEM",
+      "header_name": "X-API-KEY"
+    }
+  },
+  
+  "identity": {
+    "system_user_id": 0,
+    "legal_entity_identifier": "VOUCHMORPH-SWAP-SYSTEM",
+    "license_number": "SANDBOX-001"
+  },
+  
+  "capabilities": {
+    "supports_sca": true,
+    "supports_realtime_processing": true,
+    "supports_reversal": true,
+    "supports_idempotency": true,
+    "wallet_types": ["CARD", "VOUCHER"],
+    "services": ["card_issuance", "message_clearing", "swap_execution", "settlement"],
+    "card_types": ["message_based", "balance_based"],
+    "default_card_type": "message_based",
+    "supports_card_authorization": true,
+    "supports_card_swipe_settlement": true
+  },
+  
+  "resource_endpoints": {
+    "card_issue": "/api/v1/cards/issue.php",
+    "card_authorize": "/api/v1/cards/authorize.php",
+    "card_load": "/api/v1/cards/load.php",
+    "card_balance": "/api/v1/cards/balance.php",
+    "card_block": "/api/v1/cards/block.php",
+    "card_transactions": "/api/v1/cards/transactions.php",
+    "card_swipe": "/api/v1/cards/swipe.php",
+    "card_settlement": "/api/v1/cards/settlement.php",
+    "swap_execute": "/api/v1/swap/execute.php",
+    "swap_status": "/api/v1/swap/status.php",
+    "swap_cancel": "/api/v1/swap/cancel.php",
+    "regulatory_report": "/api/regulatory/report"
+  },
+  
+  "card_config": {
+    "message_based": {
+      "authorization_expiry_days": 30,
+      "requires_hold": true,
+      "fee_collection": "on_settlement",
+      "supports_partial_usage": true
     },
+    "balance_based": {
+      "requires_hold": false,
+      "fee_collection": "on_load",
+      "supports_partial_usage": true
+    }
+  },
+  
+  "phone_format": {
+    "prefix": "+",
+    "country_code": "267",
+    "strip_leading_zeros": true,
+    "expected_length": 11
+  },
+  
+  "message_profile": {
+    "correlation_id_header": "X-Correlation-ID",
+    "idempotency_key_header": "X-Idempotency-Key",
+    "content_standard": "ISO20022_JSON"
+  },
+  
+  "settlement": {
+    "account": "VOUCHMORPH_SETTLEMENT",
+    "type": "POOLED",
+    "currency": "BWP",
+    "settlement_cycle": "T+1",
+    "cutoff_time": "16:00"
+  },
+  
+  "status": "ACTIVE"
+}
    
    
     "TEST_BANK_A": {
@@ -444,6 +467,7 @@
     }
   }
 }
+
 
 
 
