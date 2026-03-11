@@ -5,7 +5,7 @@ declare(strict_types=1);
  * VouchMorph - Admin: Card Inventory View
  */
 
-define('ROOT_PATH', dirname(__DIR__, 5));
+define('ROOT_PATH', dirname(__DIR__, 6));
 
 // ... (same bootstrapping with admin auth)
 
