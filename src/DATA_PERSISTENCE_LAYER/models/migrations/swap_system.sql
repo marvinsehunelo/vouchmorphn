@@ -1050,3 +1050,273 @@ GROUP BY mc.card_id, mc.card_suffix, mc.cardholder_name, mc.remaining_amount,
 ALTER TABLE hold_transactions 
 ADD COLUMN IF NOT EXISTS source_institution VARCHAR(100),
 ADD COLUMN IF NOT EXISTS source_details JSONB;
+
+-- =========================================================
+-- SECTION 16: CARD MANAGEMENT SYSTEM
+-- Supports both Virtual and Physical cards
+-- Clear separation of concerns for easy understanding
+-- =========================================================
+
+-- 16.1 Card Batches (For Physical Card Inventory)
+-- Tracks batches of pre-printed cards from manufacturer
+CREATE TABLE IF NOT EXISTS card_batches (
+    batch_id BIGSERIAL PRIMARY KEY,
+    batch_reference VARCHAR(50) UNIQUE NOT NULL,
+    
+    -- Card details (same for all cards in batch)
+    bin_prefix VARCHAR(6) NOT NULL, -- First 6 digits (e.g., 411111)
+    card_scheme VARCHAR(20) NOT NULL, -- 'VISA', 'MASTERCARD'
+    card_type VARCHAR(20) NOT NULL, -- 'PHYSICAL', 'VIRTUAL' (for this batch)
+    
+    -- Production details
+    quantity_produced INT NOT NULL,
+    quantity_remaining INT NOT NULL,
+    expiry_year INT NOT NULL,
+    expiry_month INT NOT NULL,
+    
+    -- Status tracking
+    status VARCHAR(20) DEFAULT 'PRODUCED',
+    -- 'ORDERED', 'PRODUCED', 'RECEIVED', 'INVENTORY', 'DEPLETED'
+    
+    -- Timestamps
+    ordered_at TIMESTAMPTZ,
+    produced_at TIMESTAMPTZ,
+    received_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    
+    -- Metadata
+    metadata JSONB DEFAULT '{}'::jsonb,
+    
+    CONSTRAINT valid_card_type CHECK (card_type IN ('PHYSICAL', 'VIRTUAL'))
+);
+
+-- 16.2 Message Cards (Unified table for both card types)
+CREATE TABLE IF NOT EXISTS message_cards (
+    card_id BIGSERIAL PRIMARY KEY,
+    
+    -- Card Identifiers (Security: never store plain PAN!)
+    card_number_hash VARCHAR(255) NOT NULL UNIQUE,
+    card_suffix VARCHAR(4) NOT NULL, -- Last 4 digits for display
+    cvv_hash VARCHAR(255) NOT NULL,
+    pin_hash VARCHAR(255), -- Optional for ATM PIN
+    
+    -- Card Classification
+    card_category VARCHAR(20) NOT NULL, -- 'VIRTUAL', 'PHYSICAL'
+    card_scheme VARCHAR(20) NOT NULL, -- 'VISA', 'MASTERCARD', 'VOUCHMORPH'
+    
+    -- For Physical Cards: Link to batch
+    batch_id BIGINT REFERENCES card_batches(batch_id),
+    batch_sequence INT, -- Which number in the batch (e.g., card 123 of 1000)
+    
+    -- Links to your existing systems
+    hold_reference VARCHAR(100) REFERENCES hold_transactions(hold_reference),
+    swap_reference VARCHAR(100) REFERENCES swap_requests(swap_uuid),
+    user_id BIGINT REFERENCES users(user_id),
+    
+    -- Cardholder details
+    cardholder_name VARCHAR(200) NOT NULL,
+    cardholder_phone VARCHAR(20),
+    student_id VARCHAR(50),
+    
+    -- Balance tracking (mirrors the hold)
+    initial_amount NUMERIC(20,4) NOT NULL DEFAULT 0,
+    remaining_amount NUMERIC(20,4) NOT NULL DEFAULT 0,
+    currency CHAR(3) DEFAULT 'BWP',
+    
+    -- Card Lifecycle Status
+    lifecycle_status VARCHAR(30) NOT NULL DEFAULT 'PENDING_ACTIVATION',
+    -- For VIRTUAL cards:
+    --   'PENDING_ISSUANCE' → 'ISSUED' → 'ACTIVE' → 'BLOCKED' → 'EXPIRED'
+    -- For PHYSICAL cards:
+    --   'IN_BATCH' → 'ASSIGNED' → 'SHIPPED' → 'DELIVERED' → 'ACTIVE' → 'BLOCKED' → 'EXPIRED'
+    
+    -- Financial Status (separate from lifecycle)
+    financial_status VARCHAR(20) DEFAULT 'UNFUNDED',
+    -- 'UNFUNDED', 'FUNDED', 'ACTIVE', 'DEPLETED'
+    
+    -- Important Dates
+    issued_at TIMESTAMPTZ, -- When card record created
+    batch_assigned_at TIMESTAMPTZ, -- When PHYSICAL card assigned to student
+    shipped_at TIMESTAMPTZ,
+    delivered_at TIMESTAMPTZ,
+    activated_at TIMESTAMPTZ, -- When first funded/swiped
+    last_used_at TIMESTAMPTZ,
+    blocked_at TIMESTAMPTZ,
+    block_reason TEXT,
+    
+    -- Expiry (from batch or generated for virtual)
+    expiry_year INT NOT NULL,
+    expiry_month INT NOT NULL,
+    
+    -- Spending controls (can override batch defaults)
+    daily_limit NUMERIC(20,4),
+    monthly_limit NUMERIC(20,4),
+    atm_daily_limit NUMERIC(20,4),
+    
+    -- Delivery tracking for physical cards
+    delivery_address TEXT,
+    delivery_method VARCHAR(50), -- 'COURIER', 'BRANCH_PICKUP', 'MAIL'
+    delivery_status VARCHAR(30),
+    tracking_number VARCHAR(100),
+    delivered_at TIMESTAMPTZ,
+    
+    -- Metadata
+    metadata JSONB DEFAULT '{}'::jsonb,
+    
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    
+    -- Constraints
+    CONSTRAINT valid_card_category CHECK (card_category IN ('VIRTUAL', 'PHYSICAL')),
+    CONSTRAINT valid_lifecycle_status CHECK (lifecycle_status IN (
+        'PENDING_ISSUANCE', 'ISSUED', 'IN_BATCH', 'ASSIGNED', 'SHIPPED', 
+        'DELIVERED', 'ACTIVE', 'BLOCKED', 'EXPIRED', 'CANCELLED'
+    )),
+    CONSTRAINT valid_financial_status CHECK (financial_status IN (
+        'UNFUNDED', 'FUNDED', 'ACTIVE', 'DEPLETED'
+    ))
+);
+
+-- 16.3 Card Transactions
+CREATE TABLE IF NOT EXISTS card_transactions (
+    transaction_id BIGSERIAL PRIMARY KEY,
+    card_id BIGINT NOT NULL REFERENCES message_cards(card_id),
+    
+    -- Transaction details
+    transaction_type VARCHAR(30) NOT NULL,
+    -- 'ISSUANCE', 'LOAD', 'ATM_WITHDRAWAL', 'PURCHASE', 'REFUND', 'VOID', 'AUTHORIZATION'
+    
+    amount NUMERIC(20,4) NOT NULL,
+    currency CHAR(3) DEFAULT 'BWP',
+    
+    -- Authorization
+    auth_code VARCHAR(20),
+    auth_status VARCHAR(20) DEFAULT 'APPROVED',
+    rrn VARCHAR(12), -- Retrieval Reference Number
+    stan VARCHAR(12), -- System Trace Audit Number
+    
+    -- Merchant/ATM details
+    merchant_name VARCHAR(200),
+    merchant_id VARCHAR(50),
+    merchant_category VARCHAR(10),
+    terminal_id VARCHAR(50),
+    
+    -- ATM specific
+    atm_id VARCHAR(50),
+    atm_location VARCHAR(200),
+    
+    -- Channel
+    channel VARCHAR(20), -- 'POS', 'ATM', 'ECOMMERCE', 'MOTO', 'LOAD'
+    
+    -- Links
+    settlement_queue_id BIGINT REFERENCES settlement_queue(id),
+    hold_reference VARCHAR(100),
+    swap_reference VARCHAR(100),
+    
+    -- Timestamps
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    settled_at TIMESTAMPTZ,
+    
+    -- Response codes
+    response_code VARCHAR(2),
+    response_message TEXT
+);
+
+-- 16.4 Card Loads (Funding cards via swaps)
+CREATE TABLE IF NOT EXISTS card_loads (
+    load_id BIGSERIAL PRIMARY KEY,
+    card_id BIGINT NOT NULL REFERENCES message_cards(card_id),
+    swap_reference VARCHAR(100) REFERENCES swap_requests(swap_uuid),
+    hold_reference VARCHAR(100) REFERENCES hold_transactions(hold_reference),
+    
+    amount NUMERIC(20,4) NOT NULL,
+    currency CHAR(3) DEFAULT 'BWP',
+    
+    -- Status
+    status VARCHAR(20) DEFAULT 'PENDING',
+    -- 'PENDING', 'COMPLETED', 'FAILED', 'REVERSED'
+    
+    -- Timestamps
+    initiated_at TIMESTAMPTZ DEFAULT NOW(),
+    completed_at TIMESTAMPTZ,
+    
+    -- Metadata
+    metadata JSONB DEFAULT '{}'::jsonb
+);
+
+-- =========================================================
+-- INDEXES FOR PERFORMANCE
+-- =========================================================
+
+-- Card batches indexes
+CREATE INDEX idx_card_batches_status ON card_batches(status);
+CREATE INDEX idx_card_batches_expiry ON card_batches(expiry_year, expiry_month);
+
+-- Message cards indexes
+CREATE INDEX idx_message_cards_hash ON message_cards(card_number_hash);
+CREATE INDEX idx_message_cards_hold ON message_cards(hold_reference);
+CREATE INDEX idx_message_cards_user ON message_cards(user_id);
+CREATE INDEX idx_message_cards_lifecycle ON message_cards(lifecycle_status);
+CREATE INDEX idx_message_cards_financial ON message_cards(financial_status);
+CREATE INDEX idx_message_cards_expiry ON message_cards(expiry_year, expiry_month);
+CREATE INDEX idx_message_cards_batch ON message_cards(batch_id);
+
+-- Card transactions indexes
+CREATE INDEX idx_card_transactions_card ON card_transactions(card_id);
+CREATE INDEX idx_card_transactions_date ON card_transactions(created_at);
+CREATE INDEX idx_card_transactions_auth ON card_transactions(auth_code);
+CREATE INDEX idx_card_transactions_rrn ON card_transactions(rrn);
+
+-- Card loads indexes
+CREATE INDEX idx_card_loads_card ON card_loads(card_id);
+CREATE INDEX idx_card_loads_swap ON card_loads(swap_reference);
+CREATE INDEX idx_card_loads_status ON card_loads(status);
+
+-- =========================================================
+-- VIEWS FOR CLEAR REPORTING
+-- =========================================================
+
+-- 16.5 View: Card Inventory (Physical cards only)
+CREATE OR REPLACE VIEW card_inventory_view AS
+SELECT 
+    cb.batch_id,
+    cb.batch_reference,
+    cb.bin_prefix,
+    cb.card_scheme,
+    cb.quantity_produced,
+    cb.quantity_remaining,
+    cb.expiry_month || '/' || cb.expiry_year as expiry,
+    COUNT(mc.card_id) as cards_assigned,
+    cb.quantity_remaining - COUNT(mc.card_id) as available_in_inventory
+FROM card_batches cb
+LEFT JOIN message_cards mc ON cb.batch_id = mc.batch_id
+WHERE cb.card_type = 'PHYSICAL'
+GROUP BY cb.batch_id, cb.batch_reference, cb.bin_prefix, cb.card_scheme,
+         cb.quantity_produced, cb.quantity_remaining, cb.expiry_month, cb.expiry_year;
+
+-- 16.6 View: Card Lifecycle Status
+CREATE OR REPLACE VIEW card_lifecycle_view AS
+SELECT 
+    lifecycle_status,
+    card_category,
+    COUNT(*) as card_count,
+    SUM(CASE WHEN financial_status = 'FUNDED' THEN 1 ELSE 0 END) as funded_count,
+    SUM(remaining_amount) as total_remaining_value
+FROM message_cards
+GROUP BY lifecycle_status, card_category
+ORDER BY lifecycle_status;
+
+-- 16.7 View: Student Card Summary
+CREATE OR REPLACE VIEW student_cards_summary AS
+SELECT 
+    u.user_id,
+    u.full_name,
+    u.phone,
+    COUNT(mc.card_id) as total_cards,
+    SUM(CASE WHEN mc.financial_status IN ('FUNDED', 'ACTIVE') THEN 1 ELSE 0 END) as active_cards,
+    SUM(mc.remaining_amount) as total_available_balance,
+    MAX(mc.last_used_at) as last_card_activity
+FROM users u
+LEFT JOIN message_cards mc ON u.user_id = mc.user_id
+GROUP BY u.user_id, u.full_name, u.phone;
