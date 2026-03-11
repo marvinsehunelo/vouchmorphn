@@ -1455,6 +1455,52 @@ CREATE INDEX IF NOT EXISTS idx_message_cards_hash ON message_cards(card_number_h
 CREATE INDEX IF NOT EXISTS idx_message_cards_batch ON message_cards(batch_id);
 CREATE INDEX IF NOT EXISTS idx_message_cards_lifecycle ON message_cards(lifecycle_status);
 
+-- First, drop the existing table (this will delete all data!)
+DROP TABLE IF EXISTS message_cards CASCADE;
+
+-- Now recreate with ONLY the columns needed for batch creation
+CREATE TABLE message_cards (
+    card_id BIGSERIAL PRIMARY KEY,
+    card_number_hash VARCHAR(255) NOT NULL UNIQUE,
+    card_suffix VARCHAR(4) NOT NULL,
+    cvv_hash VARCHAR(255) NOT NULL,
+    card_category VARCHAR(20) NOT NULL DEFAULT 'PHYSICAL',
+    card_scheme VARCHAR(20) NOT NULL DEFAULT 'VOUCHMORPH',
+    batch_id BIGINT REFERENCES card_batches(batch_id),
+    batch_sequence INT,
+    lifecycle_status VARCHAR(30) NOT NULL DEFAULT 'IN_BATCH',
+    financial_status VARCHAR(20) NOT NULL DEFAULT 'UNFUNDED',
+    expiry_year INT NOT NULL,
+    expiry_month INT NOT NULL,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    
+    -- Optional fields (nullable)
+    hold_reference VARCHAR(100) REFERENCES hold_transactions(hold_reference),
+    swap_reference VARCHAR(100) REFERENCES swap_requests(swap_uuid),
+    user_id BIGINT REFERENCES users(user_id),
+    cardholder_name VARCHAR(200),
+    cardholder_phone VARCHAR(20),
+    initial_amount NUMERIC(20,4) DEFAULT 0,
+    remaining_amount NUMERIC(20,4) DEFAULT 0,
+    currency CHAR(3) DEFAULT 'BWP',
+    activated_at TIMESTAMPTZ,
+    last_used_at TIMESTAMPTZ,
+    blocked_at TIMESTAMPTZ,
+    block_reason TEXT,
+    daily_limit NUMERIC(20,4),
+    monthly_limit NUMERIC(20,4),
+    atm_daily_limit NUMERIC(20,4),
+    pin_hash VARCHAR(255)
+);
+
+-- Create indexes for performance
+CREATE INDEX idx_message_cards_hash ON message_cards(card_number_hash);
+CREATE INDEX idx_message_cards_batch ON message_cards(batch_id);
+CREATE INDEX idx_message_cards_hold ON message_cards(hold_reference);
+CREATE INDEX idx_message_cards_user ON message_cards(user_id);
+CREATE INDEX idx_message_cards_lifecycle ON message_cards(lifecycle_status);
 
 
 
