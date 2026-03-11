@@ -5,7 +5,7 @@ declare(strict_types=1);
  * VouchMorph - Card Shipping Tracking API
  */
 
-define('ROOT_PATH', dirname(__DIR__, 5));
+define('ROOT_PATH', dirname(__DIR__, 4));
 
 // ... (same bootstrapping code)
 
