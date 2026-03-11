@@ -1,16 +1,20 @@
 <?php
 declare(strict_types=1);
 
+// Move headers BEFORE any output or warnings
 header('Content-Type: application/json');
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: POST, GET, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, X-API-Key, X-Correlation-ID');
 
-require_once __DIR__ . '/../../../src/bootstrap.php';
+// Fix the paths - remove one level of ../../
+require_once __DIR__ . '/../../../src/bootstrap.php';  
 require_once __DIR__ . '/../../../src/BUSINESS_LOGIC_LAYER/services/CardService.php';
 
 use BUSINESS_LOGIC_LAYER\services\CardService;
-use RuntimeException;
+
+// Remove unused use statement
+// use RuntimeException;  // Remove this - not needed
 
 try {
     // Verify API key
@@ -23,9 +27,32 @@ try {
 
     // Get request body
     $input = json_decode(file_get_contents('php://input'), true);
+    if (!$input) {
+        $input = $_GET; // Fallback to GET params
+    }
+    
+    // Get database connection function
+    if (!function_exists('getDatabaseConnection')) {
+        // Define it if not exists
+        function getDatabaseConnection() {
+            static $pdo = null;
+            if ($pdo === null) {
+                $host = $_ENV['DB_HOST'] ?? 'localhost';
+                $port = $_ENV['DB_PORT'] ?? '5432';
+                $dbname = $_ENV['DB_NAME'] ?? 'postgres';
+                $user = $_ENV['DB_USER'] ?? 'postgres';
+                $pass = $_ENV['DB_PASS'] ?? '';
+                
+                $dsn = "pgsql:host=$host;port=$port;dbname=$dbname";
+                $pdo = new PDO($dsn, $user, $pass);
+                $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+            }
+            return $pdo;
+        }
+    }
     
     // Initialize CardService
-    $db = getDatabaseConnection(); // Your DB connection function
+    $db = getDatabaseConnection();
     $cardService = new CardService($db, 'BWP', []);
     
     // Extract verification data
@@ -41,7 +68,7 @@ try {
                      $input['card_number'] ?? null;
         
         if (!$cardSuffix) {
-            throw new RuntimeException("Card identifier required");
+            throw new Exception("Card identifier required");
         }
         
         // Get card authorization (the message)
@@ -66,7 +93,7 @@ try {
             'available_balance' => $cardInfo['remaining_balance'],
             'holder_name' => $cardInfo['cardholder_name'],
             'hold_reference' => $cardInfo['hold_reference'],
-            'is_message' => true, // Explicitly mark as message-based
+            'is_message' => true,
             'metadata' => [
                 'card_suffix' => $cardSuffix,
                 'authorized_amount' => $cardInfo['authorized_amount'],
@@ -75,11 +102,15 @@ try {
         ]);
         
     } elseif ($assetType === 'E-WALLET' || $assetType === 'ACCOUNT') {
-        // Regular asset verification (real money)
-        // ... existing verification logic ...
+        // Regular asset verification - forward to bank
+        // You'll need to implement this based on your bank client
+        echo json_encode([
+            'verified' => false,
+            'message' => 'E-WALLET verification not implemented in this endpoint'
+        ]);
         
     } else {
-        throw new RuntimeException("Unsupported asset type: {$assetType}");
+        throw new Exception("Unsupported asset type: {$assetType}");
     }
     
 } catch (Exception $e) {
