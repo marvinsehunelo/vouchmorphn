@@ -1429,102 +1429,117 @@ class SwapService
         $this->settlement->updateNetPosition($source['institution'], $destination['institution'], $netAmount, 'card_load');
     }
 
-    /**
-     * Process message-based card (VouchMorph internal - funds stay at source)
-     */
-    private function processMessageBasedCardLoad(int $swapId, string $swapRef, array $source, array $destination, string $currency, array $holdResult, float $grossAmount): void
-    {
-        $debug = [];
-        $debug[] = ['time' => microtime(true), 'step' => 'MESSAGE_CARD_START'];
-        
-        // Calculate fees but don't deduct yet (will be deducted when card is used)
-        $feeDetails = $this->calculateFees($swapRef, 'CARD_LOAD', $grossAmount);
-        $debug[] = ['time' => microtime(true), 'step' => 'FEES_CALCULATED', 'fee' => $feeDetails['fee_amount']];
-        
-        if (!$this->cardService) {
-            throw new RuntimeException("Card service not available");
-        }
-        
-        // DEBUG: Log what class we're dealing with
-        error_log("[DEBUG] CardService class: " . get_class($this->cardService));
-        error_log("[DEBUG] CardService methods: " . implode(', ', get_class_methods($this->cardService)));
-        
-        $cardSuffix = $destination['card_suffix'] ?? null;
-        if (!$cardSuffix) {
-            throw new RuntimeException("card_suffix is required for card_load");
-        }
-        
-        $debug[] = ['time' => microtime(true), 'step' => 'AUTHORIZING_MESSAGE_CARD', 'card_suffix' => $cardSuffix];
-        
-        // Prepare the authorization data with CORRECT key names
-        $authData = [
-            'hold_reference' => $holdResult['hold_reference'],
-            'swap_reference' => $swapRef,
-            'card_suffix' => $cardSuffix,
-            'amount' => $grossAmount, // IMPORTANT: Use 'amount' not 'authorized_amount'
-            'authorized_amount' => $grossAmount, // Keep this for backward compatibility
+ /**
+ * Process message-based card (VouchMorph internal - funds stay at source)
+ */
+private function processMessageBasedCardLoad(int $swapId, string $swapRef, array $source, array $destination, string $currency, array $holdResult, float $grossAmount): void
+{
+    $debug = [];
+    $debug[] = ['time' => microtime(true), 'step' => 'MESSAGE_CARD_START'];
+    
+    // Calculate fees but don't deduct yet (will be deducted when card is used)
+    $feeDetails = $this->calculateFees($swapRef, 'CARD_LOAD', $grossAmount);
+    $netAmount = $feeDetails['net_amount']; // This is 1994 (2000 - 6)
+    
+    $debug[] = ['time' => microtime(true), 'step' => 'FEES_CALCULATED', 
+                'fee' => $feeDetails['fee_amount'], 
+                'net' => $netAmount,
+                'gross' => $grossAmount];
+    
+    if (!$this->cardService) {
+        throw new RuntimeException("Card service not available");
+    }
+    
+    // DEBUG: Log what class we're dealing with
+    error_log("[DEBUG] CardService class: " . get_class($this->cardService));
+    error_log("[DEBUG] CardService methods: " . implode(', ', get_class_methods($this->cardService)));
+    
+    $cardSuffix = $destination['card_suffix'] ?? null;
+    if (!$cardSuffix) {
+        throw new RuntimeException("card_suffix is required for card_load");
+    }
+    
+    $debug[] = ['time' => microtime(true), 'step' => 'AUTHORIZING_MESSAGE_CARD', 'card_suffix' => $cardSuffix];
+    
+    // Prepare the authorization data with CORRECT key names
+    $authData = [
+        'hold_reference' => $holdResult['hold_reference'],
+        'swap_reference' => $swapRef,
+        'card_suffix' => $cardSuffix,
+        'amount' => $netAmount, // FIXED: Use net amount (1994) not gross
+        'authorized_amount' => $netAmount, // Also fixed here
+        'gross_amount' => $grossAmount, // Keep track of gross for reference
+        'fee_details' => $feeDetails,
+        'source_institution' => $source['institution'],
+        'source_hold_reference' => $holdResult['hold_reference'],
+        'expiry_days' => self::MESSAGE_CARD_EXPIRY_DAYS,
+        'metadata' => [
             'source_institution' => $source['institution'],
-            'source_hold_reference' => $holdResult['hold_reference'],
-            'expiry_days' => self::MESSAGE_CARD_EXPIRY_DAYS,
-            'metadata' => [
-                'source_institution' => $source['institution'],
-                'source_asset_type' => $source['asset_type'],
-                'destination_institution' => $destination['institution']
-            ]
-        ];
+            'source_asset_type' => $source['asset_type'],
+            'destination_institution' => $destination['institution'],
+            'gross_amount' => $grossAmount,
+            'fee_amount' => $feeDetails['fee_amount']
+        ]
+    ];
+    
+    // Check if the method exists before calling
+    if (!method_exists($this->cardService, 'authorizeCardLoad')) {
+        error_log("[CRITICAL] authorizeCardLoad method missing in CardService!");
+        error_log("[CRITICAL] Available methods: " . implode(', ', get_class_methods($this->cardService)));
         
-        // Check if the method exists before calling
-        if (!method_exists($this->cardService, 'authorizeCardLoad')) {
-            error_log("[CRITICAL] authorizeCardLoad method missing in CardService!");
-            error_log("[CRITICAL] Available methods: " . implode(', ', get_class_methods($this->cardService)));
-            
-            // Try fallback to loadCard if authorizeCardLoad doesn't exist
-            if (method_exists($this->cardService, 'loadCard')) {
-                error_log("[FALLBACK] Using loadCard instead");
-                $cardResult = $this->cardService->loadCard([
-                    'hold_reference' => $holdResult['hold_reference'],
-                    'swap_reference' => $swapRef,
-                    'card_suffix' => $cardSuffix,
-                    'amount' => $grossAmount
-                ]);
-                
-                // Add authorization fields to make it look like an authorization response
-                $cardResult['authorized'] = true;
-                $cardResult['authorized_amount'] = $grossAmount;
-                $cardResult['status'] = 'AUTHORIZED';
-            } else {
-                throw new RuntimeException("Card service has neither authorizeCardLoad nor loadCard methods");
-            }
-        } else {
-            // Method exists, call it normally
-            $cardResult = $this->cardService->authorizeCardLoad($authData);
-        }
-        
-        $debug[] = ['time' => microtime(true), 'step' => 'CARD_AUTHORIZED', 
-                   'card_suffix' => $cardSuffix,
-                   'result' => $cardResult];
-        
-        // Record the card authorization in database
-        $this->recordCardAuthorization($swapId, $swapRef, $cardSuffix, $grossAmount, $holdResult, $feeDetails);
-        
-        $this->updateSwapMetadata($swapRef, [
-            'card_authorization' => [
-                'card_suffix' => $cardSuffix,
-                'authorized_amount' => $grossAmount,
+        // Try fallback to loadCard if authorizeCardLoad doesn't exist
+        if (method_exists($this->cardService, 'loadCard')) {
+            error_log("[FALLBACK] Using loadCard instead");
+            $cardResult = $this->cardService->loadCard([
                 'hold_reference' => $holdResult['hold_reference'],
-                'status' => 'AUTHORIZED',
-                'card_type' => 'message_based',
-                'fee_details' => $feeDetails
-            ]
-        ]);
-        
-        $this->logEvent($swapRef, 'MESSAGE_CARD_AUTHORIZED', [
+                'swap_reference' => $swapRef,
+                'card_suffix' => $cardSuffix,
+                'amount' => $netAmount // FIXED: Use net amount
+            ]);
+            
+            // Add authorization fields to make it look like an authorization response
+            $cardResult['authorized'] = true;
+            $cardResult['authorized_amount'] = $netAmount; // FIXED
+            $cardResult['gross_amount'] = $grossAmount;
+            $cardResult['status'] = 'AUTHORIZED';
+        } else {
+            throw new RuntimeException("Card service has neither authorizeCardLoad nor loadCard methods");
+        }
+    } else {
+        // Method exists, call it normally
+        $cardResult = $this->cardService->authorizeCardLoad($authData);
+    }
+    
+    $debug[] = ['time' => microtime(true), 'step' => 'CARD_AUTHORIZED', 
+               'card_suffix' => $cardSuffix,
+               'result' => $cardResult];
+    
+    // Record the card authorization in database - FIXED: Use netAmount here too
+    $this->recordCardAuthorization($swapId, $swapRef, $cardSuffix, $netAmount, $holdResult, $feeDetails);
+    
+    $this->updateSwapMetadata($swapRef, [
+        'card_authorization' => [
             'card_suffix' => $cardSuffix,
-            'amount' => $grossAmount,
-            'hold_reference' => $holdResult['hold_reference']
-        ]);
-        
-        // DO NOT debit funds here - Keep the hold active at source
+            'authorized_amount' => $netAmount, // FIXED
+            'gross_amount' => $grossAmount,
+            'fee_amount' => $feeDetails['fee_amount'],
+            'hold_reference' => $holdResult['hold_reference'],
+            'status' => 'AUTHORIZED',
+            'card_type' => 'message_based',
+            'fee_details' => $feeDetails
+        ]
+    ]);
+    
+    $this->logEvent($swapRef, 'MESSAGE_CARD_AUTHORIZED', [
+        'card_suffix' => $cardSuffix,
+        'amount' => $netAmount, // FIXED
+        'gross_amount' => $grossAmount,
+        'fee' => $feeDetails['fee_amount'],
+        'hold_reference' => $holdResult['hold_reference']
+    ]);
+    
+    // DO NOT debit funds here - Keep the hold active at source
+}
     }
 
     /**
@@ -3017,4 +3032,5 @@ class SwapService
         }
     }
 }
+
 
