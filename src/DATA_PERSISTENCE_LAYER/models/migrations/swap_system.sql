@@ -1514,5 +1514,127 @@ ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ,
 ADD COLUMN IF NOT EXISTS admin_reviewer_id INT,
 ADD COLUMN IF NOT EXISTS review_notes TEXT;
 
+-- First, drop the existing check constraint
+ALTER TABLE kyc_documents DROP CONSTRAINT IF EXISTS kyc_documents_document_type_check;
+
+-- Add new constraint with 'identity' included
+ALTER TABLE kyc_documents ADD CONSTRAINT kyc_documents_document_type_check 
+CHECK (document_type IN ('passport', 'national_id', 'drivers_license', 'utility_bill', 'bank_statement', 'identity'));
+
+CREATE TABLE IF NOT EXISTS card_applications (
+    application_id VARCHAR(50) PRIMARY KEY,
+    user_id BIGINT REFERENCES users(user_id) NOT NULL,
+    card_id BIGINT REFERENCES message_cards(card_id),
+    
+    -- Personal details
+    full_name VARCHAR(200) NOT NULL,
+    id_number VARCHAR(50) NOT NULL,
+    id_type VARCHAR(30) NOT NULL, -- 'omang', 'passport', 'drivers_license'
+    date_of_birth DATE NOT NULL,
+    phone VARCHAR(20) NOT NULL,
+    email VARCHAR(150) NOT NULL,
+    
+    -- Optional (for students/professionals)
+    institution VARCHAR(200),
+    course VARCHAR(200),
+    year INT,
+    occupation VARCHAR(100),
+    employer VARCHAR(200),
+    income_range VARCHAR(50),
+    source_of_funds TEXT,
+    
+    -- Application details
+    card_type VARCHAR(20) NOT NULL, -- 'PHYSICAL', 'VIRTUAL'
+    delivery_address JSONB,
+    delivery_method VARCHAR(50),
+    branch_location VARCHAR(200),
+    status VARCHAR(30) DEFAULT 'PENDING_KYC',
+    -- 'PENDING_KYC', 'KYC_SUBMITTED', 'KYC_VERIFIED', 
+    -- 'CARD_ASSIGNED', 'CARD_DELIVERED', 'COMPLETED', 'REJECTED'
+    
+    -- Consent tracking
+    consent JSONB,
+    
+    -- Timestamps
+    submitted_at TIMESTAMPTZ DEFAULT NOW(),
+    kyc_submitted_at TIMESTAMPTZ,
+    kyc_verified_at TIMESTAMPTZ,
+    card_assigned_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    
+    -- Metadata
+    metadata JSONB DEFAULT '{}'::jsonb
+);
+
+-- =========================================================
+-- CARD APPLICATIONS TABLE
+-- Tracks all card applications from the public
+-- =========================================================
+CREATE TABLE IF NOT EXISTS card_applications (
+    application_id VARCHAR(50) PRIMARY KEY,
+    user_id BIGINT REFERENCES users(user_id) NOT NULL,
+    card_id BIGINT REFERENCES message_cards(card_id),
+    
+    -- Personal details
+    full_name VARCHAR(200) NOT NULL,
+    id_number VARCHAR(50) NOT NULL,
+    id_type VARCHAR(30) NOT NULL, -- 'omang', 'passport', 'drivers_license'
+    date_of_birth DATE NOT NULL,
+    phone VARCHAR(20) NOT NULL,
+    email VARCHAR(150) NOT NULL,
+    
+    -- Optional (for students/professionals)
+    institution VARCHAR(200),
+    course VARCHAR(200),
+    year INT,
+    occupation VARCHAR(100),
+    employer VARCHAR(200),
+    income_range VARCHAR(50),
+    source_of_funds TEXT,
+    
+    -- Application details
+    card_type VARCHAR(20) NOT NULL, -- 'PHYSICAL', 'VIRTUAL'
+    delivery_address JSONB,
+    delivery_method VARCHAR(50),
+    branch_location VARCHAR(200),
+    status VARCHAR(30) DEFAULT 'PENDING_KYC',
+    -- 'PENDING_KYC', 'KYC_SUBMITTED', 'KYC_VERIFIED', 
+    -- 'CARD_ASSIGNED', 'CARD_DELIVERED', 'COMPLETED', 'REJECTED'
+    
+    -- Consent tracking
+    consent JSONB,
+    
+    -- Timestamps
+    submitted_at TIMESTAMPTZ DEFAULT NOW(),
+    kyc_submitted_at TIMESTAMPTZ,
+    kyc_verified_at TIMESTAMPTZ,
+    card_assigned_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    
+    -- Metadata
+    metadata JSONB DEFAULT '{}'::jsonb
+);
+
+-- Create indexes for performance
+CREATE INDEX idx_card_applications_user ON card_applications(user_id);
+CREATE INDEX idx_card_applications_status ON card_applications(status);
+CREATE INDEX idx_card_applications_phone ON card_applications(phone);
+CREATE INDEX idx_card_applications_email ON card_applications(email);
+
+-- Add trigger for updated_at
+CREATE OR REPLACE FUNCTION update_card_applications_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_card_applications_updated
+    BEFORE UPDATE ON card_applications
+    FOR EACH ROW
+    EXECUTE FUNCTION update_card_applications_updated_at();
 
 
