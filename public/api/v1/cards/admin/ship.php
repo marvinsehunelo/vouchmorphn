@@ -5,7 +5,7 @@ declare(strict_types=1);
  * VouchMorph - Admin: Mark Card as Shipped
  */
 
-define('ROOT_PATH', dirname(__DIR__, 6));
+define('ROOT_PATH', dirname(__DIR__, 5));
 
 // ... (same bootstrapping with admin auth)
 
