@@ -59,107 +59,107 @@ class SwapService
     ];
 
     public function __construct(PDO $swapDB, array $settings, string $country, string $encryptionKey, array $config)
-{
-    $this->swapDB = $swapDB;
-    $this->settings = $settings;
-    $this->countryCode = strtoupper($country);
-    $this->config = $config;
-    
-    if (isset($config['participants']) && is_array($config['participants'])) {
-        $this->participants = $config['participants'];
-        error_log("[SwapService] Using new config structure with 'participants' key");
-    } elseif (isset($config[0]) && is_array($config[0])) {
-        $this->participants = [];
-        foreach ($config as $participant) {
-            if (isset($participant['id'])) {
-                $this->participants[$participant['id']] = $participant;
+    {
+        $this->swapDB = $swapDB;
+        $this->settings = $settings;
+        $this->countryCode = strtoupper($country);
+        $this->config = $config;
+        
+        if (isset($config['participants']) && is_array($config['participants'])) {
+            $this->participants = $config['participants'];
+            error_log("[SwapService] Using new config structure with 'participants' key");
+        } elseif (isset($config[0]) && is_array($config[0])) {
+            $this->participants = [];
+            foreach ($config as $participant) {
+                if (isset($participant['id'])) {
+                    $this->participants[$participant['id']] = $participant;
+                }
             }
-        }
-        error_log("[SwapService] Using indexed participants array structure");
-    } else {
-        $this->participants = $config;
-        error_log("[SwapService] Using legacy direct participants array structure");
-    }
-    
-    if (!is_array($this->participants)) {
-        $this->participants = [];
-        error_log("[SwapService] WARNING: Participants was not an array, reset to empty array");
-    }
-    
-    $this->participants = array_change_key_case($this->participants, CASE_LOWER);
-    
-    error_log("=== SWAPSERVICE CONSTRUCTOR ===");
-    error_log("Country: " . $this->countryCode);
-    error_log("Participants count: " . count($this->participants));
-
-    try {
-        $this->swapStatusResolver = new SwapStatusResolver(
-            fn($event, $data) => $this->logEvent('RESOLVER', $event, $data),
-            $this->config,
-            $this->participants
-        );
-        error_log("[SwapService] SwapStatusResolver initialized successfully");
-    } catch (\Exception $e) {
-        error_log("[SwapService] ERROR initializing SwapStatusResolver: " . $e->getMessage());
-        $this->swapStatusResolver = null;
-    }
-
-    try {
-        $this->loadCountryFees();
-        error_log("[SwapService] Country fees loaded successfully");
-    } catch (\Exception $e) {
-        error_log("[SwapService] WARNING loading country fees: " . $e->getMessage());
-    }
-    
-    try {
-        $this->loadFlows();
-        error_log("[SwapService] Flows loaded successfully");
-    } catch (\Exception $e) {
-        error_log("[SwapService] WARNING loading flows: " . $e->getMessage());
-    }
-    
-    try {
-        $this->settlement = new HybridSettlementStrategy($this->swapDB);
-        error_log("[SwapService] HybridSettlementStrategy initialized");
-    } catch (\Exception $e) {
-        error_log("[SwapService] ERROR initializing settlement: " . $e->getMessage());
-        throw new RuntimeException("Failed to initialize settlement strategy: " . $e->getMessage());
-    }
-    
-    try {
-        $this->initSmsService();
-        error_log("[SwapService] SMS Service initialized successfully");
-    } catch (\Exception $e) {
-        error_log("[SwapService] WARNING: SMS Service initialization failed: " . $e->getMessage());
-    }
-    
-    // Initialize Card Service
-    try {
-        // Check if VouchMorph is in participants
-        if (isset($this->participants['vouchmorph'])) {
-            $this->cardService = new CardService(
-                $this->swapDB, 
-                $this->countryCode, 
-                $this->participants['vouchmorph']
-            );
-            error_log("[SwapService] ✅ Card Service initialized successfully");
+            error_log("[SwapService] Using indexed participants array structure");
         } else {
-            // Fallback to default config
-            $this->cardService = new CardService(
-                $this->swapDB, 
-                $this->countryCode, 
-                []
-            );
-            error_log("[SwapService] ✅ Card Service initialized with default config");
+            $this->participants = $config;
+            error_log("[SwapService] Using legacy direct participants array structure");
         }
-    } catch (\Exception $e) {
-        error_log("[SwapService] ❌ Card Service initialization failed: " . $e->getMessage());
-        $this->cardService = null;
+        
+        if (!is_array($this->participants)) {
+            $this->participants = [];
+            error_log("[SwapService] WARNING: Participants was not an array, reset to empty array");
+        }
+        
+        $this->participants = array_change_key_case($this->participants, CASE_LOWER);
+        
+        error_log("=== SWAPSERVICE CONSTRUCTOR ===");
+        error_log("Country: " . $this->countryCode);
+        error_log("Participants count: " . count($this->participants));
+
+        try {
+            $this->swapStatusResolver = new SwapStatusResolver(
+                fn($event, $data) => $this->logEvent('RESOLVER', $event, $data),
+                $this->config,
+                $this->participants
+            );
+            error_log("[SwapService] SwapStatusResolver initialized successfully");
+        } catch (\Exception $e) {
+            error_log("[SwapService] ERROR initializing SwapStatusResolver: " . $e->getMessage());
+            $this->swapStatusResolver = null;
+        }
+
+        try {
+            $this->loadCountryFees();
+            error_log("[SwapService] Country fees loaded successfully");
+        } catch (\Exception $e) {
+            error_log("[SwapService] WARNING loading country fees: " . $e->getMessage());
+        }
+        
+        try {
+            $this->loadFlows();
+            error_log("[SwapService] Flows loaded successfully");
+        } catch (\Exception $e) {
+            error_log("[SwapService] WARNING loading flows: " . $e->getMessage());
+        }
+        
+        try {
+            $this->settlement = new HybridSettlementStrategy($this->swapDB);
+            error_log("[SwapService] HybridSettlementStrategy initialized");
+        } catch (\Exception $e) {
+            error_log("[SwapService] ERROR initializing settlement: " . $e->getMessage());
+            throw new RuntimeException("Failed to initialize settlement strategy: " . $e->getMessage());
+        }
+        
+        try {
+            $this->initSmsService();
+            error_log("[SwapService] SMS Service initialized successfully");
+        } catch (\Exception $e) {
+            error_log("[SwapService] WARNING: SMS Service initialization failed: " . $e->getMessage());
+        }
+        
+        // Initialize Card Service
+        try {
+            // Check if VouchMorph is in participants
+            if (isset($this->participants['vouchmorph'])) {
+                $this->cardService = new CardService(
+                    $this->swapDB, 
+                    $this->countryCode, 
+                    $this->participants['vouchmorph']
+                );
+                error_log("[SwapService] ✅ Card Service initialized successfully");
+            } else {
+                // Fallback to default config
+                $this->cardService = new CardService(
+                    $this->swapDB, 
+                    $this->countryCode, 
+                    []
+                );
+                error_log("[SwapService] ✅ Card Service initialized with default config");
+            }
+        } catch (\Exception $e) {
+            error_log("[SwapService] ❌ Card Service initialization failed: " . $e->getMessage());
+            $this->cardService = null;
+        }
+        
+        error_log("=== SWAPSERVICE CONSTRUCTOR COMPLETE ===");
+        error_log("Card service status: " . ($this->cardService ? "ACTIVE" : "NOT AVAILABLE"));
     }
-    
-    error_log("=== SWAPSERVICE CONSTRUCTOR COMPLETE ===");
-    error_log("Card service status: " . ($this->cardService ? "ACTIVE" : "NOT AVAILABLE"));
-}
     
 
     private function loadCountryFees(): void
@@ -639,6 +639,252 @@ class SwapService
     }
 
     /**
+     * Verify source asset with institution
+     */
+    private function verifySourceAsset(string $swapRef, array $source, array $participant): array
+    {
+        $assetType = strtoupper($source['asset_type'] ?? 'UNKNOWN');
+
+        $this->logEvent($swapRef, 'VERIFYING_SOURCE', [
+            'institution' => $participant['provider_code'] ?? $source['institution'],
+            'asset_type' => $assetType,
+            'reference' => $this->maskIdentifier($source)
+        ]);
+
+        $walletTypes = array_map('strtoupper', $participant['capabilities']['wallet_types'] ?? []);
+        if (!in_array($assetType, $walletTypes)) {
+            throw new RuntimeException("Institution does not support asset type: {$assetType}");
+        }
+
+        $bankClient = new GenericBankClient($participant);
+
+        $verificationPayload = [
+            'reference' => $swapRef,
+            'institution' => $source['institution'],
+            'asset_type' => $assetType,
+            'amount' => $source['amount'] ?? 0
+        ];
+
+        switch ($assetType) {
+            case 'VOUCHER':
+                $voucher = $source['voucher'] ?? [];
+                $verificationPayload = array_merge($verificationPayload, [
+                    'claimant_phone' => $this->formatPhoneForInstitution($voucher['claimant_phone'] ?? null, $participant),
+                    'voucher_number' => $voucher['voucher_number'] ?? null,
+                    'voucher_pin' => $voucher['voucher_pin'] ?? null
+                ]);
+                break;
+
+            case 'ACCOUNT':
+                $account = $source['account'] ?? [];
+                $verificationPayload = array_merge($verificationPayload, [
+                    'account_holder' => $account['account_holder'] ?? null,
+                    'account_number' => $account['account_number'] ?? null,
+                    'account_pin' => $account['account_pin'] ?? null
+                ]);
+                break;
+
+            case 'WALLET':
+            case 'E-WALLET':
+                $phone = $source['ewallet']['phone'] ?? 
+                         $source['phone'] ?? 
+                         $source['ewallet_phone'] ?? 
+                         $source['wallet']['wallet_phone'] ??
+                         null;
+                
+                if (!$phone) {
+                    throw new RuntimeException("Phone number required for WALLET/E-WALLET verification");
+                }
+                
+                $verificationPayload = array_merge($verificationPayload, [
+                    'phone' => $this->formatPhoneForInstitution($phone, $participant)
+                ]);
+                break;
+
+            case 'CARD':
+                $card = $source['card'] ?? [];
+                $verificationPayload = array_merge($verificationPayload, [
+                    'card_number' => $card['card_number'] ?? null,
+                    'card_pin' => $card['card_pin'] ?? null,
+                    'card_holder' => $card['card_holder'] ?? null
+                ]);
+                break;
+
+            default:
+                throw new RuntimeException("Unsupported asset type: {$assetType}");
+        }
+
+        try {
+            $result = $bankClient->verifyAsset($verificationPayload);
+            
+            $this->debugApiCall('verify_asset', $verificationPayload, $result);
+            
+            $this->logApiMessage(
+                $swapRef,
+                'verify_asset',
+                'outgoing',
+                $participant,
+                '/api/verify-asset',
+                $verificationPayload,
+                $result,
+                null
+            );
+            
+            if (!isset($result['success']) || $result['success'] !== true) {
+                return [
+                    'verified' => false,
+                    'message' => 'Bank communication failed: ' . ($result['curl_error'] ?? 'HTTP ' . ($result['status_code'] ?? 'unknown'))
+                ];
+            }
+
+            $bankResponse = $result['data'] ?? [];
+
+            if (!isset($bankResponse['verified']) || $bankResponse['verified'] !== true) {
+                $errorMessage = $bankResponse['message'] ?? $bankResponse['error'] ?? 'Verification failed';
+                return [
+                    'verified' => false,
+                    'message' => $errorMessage
+                ];
+            }
+
+            return [
+                'verified' => true,
+                'asset_details' => [
+                    'id' => $bankResponse['asset_id'] ?? $bankResponse['wallet_id'] ?? $bankResponse['account_id'] ?? null,
+                    'available_balance' => $bankResponse['available_balance'] ?? $bankResponse['balance'] ?? null,
+                    'holder_name' => $bankResponse['holder_name'] ?? $bankResponse['account_holder'] ?? null,
+                    'expiry_date' => $bankResponse['expiry_date'] ?? null,
+                    'metadata' => $bankResponse['metadata'] ?? []
+                ]
+            ];
+            
+        } catch (\Throwable $e) {
+            throw new RuntimeException("Source verification failed: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * Place hold on source asset
+     */
+    private function placeHoldOnSourceAsset(string $swapRef, array $source, array $verificationResult, array $participant, array $destination): array
+    {
+        $this->logEvent($swapRef, 'PLACING_HOLD', [
+            'institution' => $participant['provider_code'] ?? $source['institution'],
+            'amount' => $source['amount'],
+            'asset_type' => $source['asset_type']
+        ]);
+
+        $bankClient = new GenericBankClient($participant);
+        
+        $holdPayload = [
+            'reference' => $swapRef,
+            'asset_type' => $source['asset_type'],
+            'asset_id' => $verificationResult['asset_details']['id'] ?? null,
+            'amount' => $source['amount'],
+            'currency' => $source['currency'] ?? 'BWP',
+            'expiry_hours' => self::HOLD_EXPIRY_HOURS,
+            'reason' => 'Swap transaction'
+        ];
+
+        switch ($source['asset_type']) {
+            case 'VOUCHER':
+                $voucher = $source['voucher'] ?? [];
+                $holdPayload = array_merge($holdPayload, [
+                    'voucher_number' => $voucher['voucher_number'] ?? null,
+                    'voucher_pin' => $voucher['voucher_pin'] ?? null,
+                    'claimant_phone' => $this->formatPhoneForInstitution($voucher['claimant_phone'] ?? null, $participant)
+                ]);
+                break;
+
+            case 'ACCOUNT':
+                $account = $source['account'] ?? [];
+                $holdPayload = array_merge($holdPayload, [
+                    'account_number' => $account['account_number'] ?? null,
+                    'account_pin' => $account['account_pin'] ?? null
+                ]);
+                break;
+
+            case 'WALLET':
+            case 'E-WALLET':
+                $phone = $source['ewallet']['phone'] ?? 
+                         $source['phone'] ?? 
+                         $source['ewallet_phone'] ?? 
+                         $source['wallet']['wallet_phone'] ??
+                         null;
+                $holdPayload = array_merge($holdPayload, [
+                    'phone' => $this->formatPhoneForInstitution($phone, $participant)
+                ]);
+                break;
+
+            case 'CARD':
+                $card = $source['card'] ?? [];
+                $holdPayload = array_merge($holdPayload, [
+                    'card_number' => $card['card_number'] ?? null,
+                    'card_pin' => $card['card_pin'] ?? null
+                ]);
+                break;
+        }
+
+        try {
+            $result = $bankClient->placeHold($holdPayload);
+            
+            $this->debugApiCall('place_hold', $holdPayload, $result);
+            
+            $this->logApiMessage(
+                $swapRef,
+                'place_hold',
+                'outgoing',
+                $participant,
+                '/api/place-hold',
+                $holdPayload,
+                $result,
+                null
+            );
+
+            if (!isset($result['success']) || $result['success'] !== true) {
+                $errorMsg = 'Bank communication failed';
+                if (isset($result['curl_error']) && !empty($result['curl_error'])) {
+                    $errorMsg .= ': ' . $result['curl_error'];
+                } elseif (isset($result['status_code'])) {
+                    $errorMsg .= ': HTTP ' . $result['status_code'];
+                }
+                return [
+                    'hold_placed' => false,
+                    'message' => $errorMsg
+                ];
+            }
+
+            $bankResponse = $result['data'] ?? [];
+
+            if (!isset($bankResponse['hold_placed']) || $bankResponse['hold_placed'] !== true) {
+                $errorMessage = $bankResponse['message'] ?? $bankResponse['error'] ?? 'Hold placement failed';
+                return [
+                    'hold_placed' => false,
+                    'message' => $errorMessage
+                ];
+            }
+
+            $holdResult = [
+                'hold_placed' => true,
+                'hold_reference' => $bankResponse['hold_reference'] ?? $swapRef . '-HOLD',
+                'hold_expiry' => $bankResponse['hold_expiry'] ?? date('Y-m-d H:i:s', strtotime('+' . self::HOLD_EXPIRY_HOURS . ' hours'))
+            ];
+
+            $this->recordHoldTransaction($swapRef, $holdResult, $source, $participant, $destination);
+            
+            $this->logEvent($swapRef, 'HOLD_PLACED', [
+                'hold_reference' => $holdResult['hold_reference'],
+                'expiry' => $holdResult['hold_expiry']
+            ]);
+
+            return $holdResult;
+
+        } catch (\Throwable $e) {
+            throw new RuntimeException("Hold placement failed: " . $e->getMessage());
+        }
+    }
+
+    /**
      * Execute swap with unified payload structure - ENHANCED WITH DEBUGGING
      */
     public function executeSwap(array $payload): array
@@ -853,6 +1099,63 @@ class SwapService
                 'debug' => $debugSteps
             ];
         }
+    }
+
+    /**
+     * Debit source funds after successful delivery
+     */
+    private function debitSourceFunds(string $swapRef, array $source, array $holdResult, array $participant): void
+    {
+        $this->logEvent($swapRef, 'DEBITING_FUNDS', [
+            'hold_reference' => $holdResult['hold_reference']
+        ]);
+
+        $bankClient = new GenericBankClient($participant);
+        
+        $debitPayload = [
+            'reference' => $swapRef,
+            'hold_reference' => $holdResult['hold_reference'],
+            'amount' => $source['amount'],
+            'reason' => 'Swap completed'
+        ];
+
+        $result = $bankClient->debitHold($debitPayload);
+        
+        $this->debugApiCall('debit_hold', $debitPayload, $result);
+        
+        $this->logApiMessage(
+            $swapRef,
+            'debit_hold',
+            'outgoing',
+            $participant,
+            '/api/debit-hold',
+            $debitPayload,
+            $result,
+            null
+        );
+
+        if (!isset($result['success']) || $result['success'] !== true) {
+            $errorMsg = 'Failed to debit funds';
+            if (isset($result['curl_error']) && !empty($result['curl_error'])) {
+                $errorMsg .= ': ' . $result['curl_error'];
+            } elseif (isset($result['status_code'])) {
+                $errorMsg .= ': HTTP ' . $result['status_code'];
+            }
+            throw new RuntimeException($errorMsg);
+        }
+
+        $bankResponse = $result['data'] ?? [];
+
+        if (!isset($bankResponse['debited']) || $bankResponse['debited'] !== true) {
+            $errorMessage = $bankResponse['message'] ?? $bankResponse['error'] ?? 'Debit failed';
+            throw new RuntimeException("Failed to debit funds: " . $errorMessage);
+        }
+
+        $this->updateHoldStatus($holdResult['hold_reference'], 'DEBITED');
+        
+        $this->logEvent($swapRef, 'FUNDS_DEBITED', [
+            'hold_reference' => $holdResult['hold_reference']
+        ]);
     }
 
     /**
@@ -2011,4 +2314,3 @@ class SwapService
         }
     }
 }
-
