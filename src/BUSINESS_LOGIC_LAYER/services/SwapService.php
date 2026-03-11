@@ -1697,34 +1697,32 @@ class SwapService
         // DO NOT debit funds here - Keep the hold active at source
     }
 
-    /**
-     * Record card authorization in database
-     */
-    private function recordCardAuthorization(int $swapId, string $swapRef, string $cardSuffix, float $amount, array $holdResult, array $feeDetails): void
-    {
-        $expiryDays = $this->cardConfig['authorization_expiry_days'] ?? self::MESSAGE_CARD_EXPIRY_DAYS;
-        
-        $stmt = $this->swapDB->prepare("
-            INSERT INTO card_authorizations 
-            (swap_id, swap_reference, card_suffix, authorized_amount, 
-             remaining_balance, hold_reference, source_institution, 
-             fee_amount, vat_amount, status, expiry_at, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', DATE_ADD(NOW(), INTERVAL ? DAY), NOW())
-        ");
-        
-        $stmt->execute([
-            $swapId,
-            $swapRef,
-            $cardSuffix,
-            $amount,
-            $amount,
-            $holdResult['hold_reference'],
-            $holdResult['source_institution'] ?? 'SACCUSSALIS',
-            $feeDetails['fee_amount'],
-            $feeDetails['vat_amount'],
-            $expiryDays
-        ]);
-    }
+   private function recordCardAuthorization(int $swapId, string $swapRef, string $cardSuffix, float $amount, array $holdResult, array $feeDetails): void
+{
+    $expiryDays = $this->cardConfig['authorization_expiry_days'] ?? self::MESSAGE_CARD_EXPIRY_DAYS;
+    
+    // For PostgreSQL
+    $stmt = $this->swapDB->prepare("
+        INSERT INTO card_authorizations 
+        (swap_id, swap_reference, card_suffix, authorized_amount, 
+         remaining_balance, hold_reference, source_institution, 
+         fee_amount, vat_amount, status, expiry_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', NOW() + (? || ' days')::INTERVAL, NOW())
+    ");
+    
+    $stmt->execute([
+        $swapId,
+        $swapRef,
+        $cardSuffix,
+        $amount,
+        $amount,
+        $holdResult['hold_reference'],
+        $holdResult['source_institution'] ?? 'SACCUSSALIS',
+        $feeDetails['fee_amount'],
+        $feeDetails['vat_amount'],
+        $expiryDays
+    ]);
+}
 
     /**
      * Process cashout to ATM/Agent
@@ -3019,3 +3017,4 @@ class SwapService
         }
     }
 }
+
