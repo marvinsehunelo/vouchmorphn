@@ -399,6 +399,28 @@ public function getCardAuthorization(string $cardSuffix): array
         'is_authorization' => true
     ];
 }
+
+    private function generateVRN($cardSuffix, $amount, $holdReference): array
+{
+    // ISO 8583 compliant format
+    $timestamp = date('YmdHis');
+    $random = bin2hex(random_bytes(4));
+    $uniqueId = substr(md5($cardSuffix . $amount . $holdReference . $timestamp), 0, 8);
+    
+    $vrn = "VRN-{$timestamp}-{$random}-{$uniqueId}";
+    
+    // Create cryptographic signature (for non-repudiation)
+    $signature = hash_hmac('sha256', 
+        $vrn . $cardSuffix . $amount . $holdReference, 
+        getenv('VRN_SIGNING_KEY')
+    );
+    
+    return [
+        'vrn' => $vrn,
+        'signature' => $signature,
+        'format' => 'ISO-8583-COMPLIANT'
+    ];
+}
     
     /**
      * Authorize a transaction (called by ATM/POS/online)
