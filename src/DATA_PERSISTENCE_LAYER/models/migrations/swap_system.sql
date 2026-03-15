@@ -1,7 +1,11 @@
+Here's your cleaned and organized schema with all updates incorporated and properly structured:
+
+```sql
 -- =========================================================
 -- SWAP SYSTEM CLEAN SCHEMA FOR DEPLOYMENT
 -- =========================================================
 -- This schema is organized for clarity and maintainability
+-- All updates and migrations are integrated in their proper sections
 -- =========================================================
 
 -- Drop existing objects (use with caution in production!)
@@ -19,6 +23,16 @@ CREATE TYPE participant_type AS ENUM ('FINANCIAL_INSTITUTION', 'MOBILE_MONEY_OPE
 CREATE TYPE participant_category AS ENUM ('BANK', 'MNO', 'EMI_CARD', 'PAYMENT_PROCESSOR');
 CREATE TYPE transaction_direction AS ENUM ('inbound', 'outbound', 'internal');
 CREATE TYPE notification_status AS ENUM ('pending', 'acknowledged', 'failed');
+CREATE TYPE card_category AS ENUM ('VIRTUAL', 'PHYSICAL');
+CREATE TYPE card_lifecycle_status AS ENUM (
+    'PENDING_ISSUANCE', 'ISSUED', 'IN_BATCH', 'ASSIGNED', 'SHIPPED', 
+    'DELIVERED', 'ACTIVE', 'BLOCKED', 'EXPIRED', 'CANCELLED'
+);
+CREATE TYPE card_financial_status AS ENUM ('UNFUNDED', 'FUNDED', 'ACTIVE', 'DEPLETED');
+CREATE TYPE card_application_status AS ENUM (
+    'PENDING_KYC', 'KYC_SUBMITTED', 'KYC_VERIFIED', 
+    'CARD_ASSIGNED', 'CARD_DELIVERED', 'COMPLETED', 'REJECTED'
+);
 
 -- =========================================================
 -- TIMESTAMP UPDATE FUNCTION
@@ -157,6 +171,8 @@ CREATE TABLE swap_requests (
     status swap_status DEFAULT 'pending',
     fraud_check_status fraud_status DEFAULT 'unchecked',
     processor_reference VARCHAR(255),
+    source_details JSONB,
+    destination_details JSONB,
     metadata JSONB DEFAULT '{}'::jsonb,
     completed_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
@@ -175,6 +191,7 @@ CREATE TABLE hold_transactions (
     currency CHAR(3) DEFAULT 'BWP',
     status VARCHAR(20) DEFAULT 'ACTIVE', -- 'ACTIVE', 'RELEASED', 'DEBITED', 'EXPIRED'
     hold_expiry TIMESTAMPTZ,
+    source_institution VARCHAR(100),
     source_details JSONB,
     destination_institution VARCHAR(100),
     destination_participant_id BIGINT REFERENCES participants(participant_id),
@@ -255,6 +272,17 @@ CREATE TABLE swap_fee_collections (
     settled_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 4.5 Settlement Queue
+CREATE TABLE settlement_queue (
+    id BIGSERIAL PRIMARY KEY,
+    debtor VARCHAR(100) NOT NULL,
+    creditor VARCHAR(100) NOT NULL,
+    amount NUMERIC(20,8) DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(debtor, creditor)
 );
 
 -- =========================================================
@@ -377,7 +405,7 @@ CREATE TABLE send_to_other_transactions (
 CREATE TABLE kyc_documents (
     kyc_id BIGSERIAL PRIMARY KEY,
     user_id BIGINT REFERENCES users(user_id),
-    document_type VARCHAR(50) CHECK (document_type IN ('passport', 'national_id', 'drivers_license', 'utility_bill', 'bank_statement')),
+    document_type VARCHAR(50) CHECK (document_type IN ('passport', 'national_id', 'drivers_license', 'utility_bill', 'bank_statement', 'identity')),
     document_number VARCHAR(100),
     status kyc_status DEFAULT 'pending',
     document_path VARCHAR(255),
@@ -386,6 +414,8 @@ CREATE TABLE kyc_documents (
     admin_reviewer_id BIGINT REFERENCES admins(admin_id),
     review_date TIMESTAMPTZ,
     review_notes TEXT,
+    submitted_at TIMESTAMPTZ DEFAULT NOW(),
+    reviewed_at TIMESTAMPTZ,
     metadata JSONB DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
@@ -430,11 +460,11 @@ CREATE TABLE otp_logs (
 -- 8.1 Message Outbox (For async processing)
 CREATE TABLE message_outbox (
     id SERIAL PRIMARY KEY,
-    message_id TEXT UNIQUE NOT NULL,
+    message_id VARCHAR(255) UNIQUE NOT NULL,
     channel VARCHAR(50) NOT NULL,
     destination VARCHAR(255) NOT NULL,
     payload JSONB NOT NULL,
-    status TEXT NOT NULL,
+    status VARCHAR(50) DEFAULT 'PENDING',
     attempts INT DEFAULT 0,
     last_error TEXT,
     last_attempt TIMESTAMPTZ,
@@ -474,18 +504,7 @@ CREATE TABLE settlement_messages (
     metadata JSONB
 );
 
--- 8.4 Settlement Queue
-CREATE TABLE settlement_queue (
-    id BIGSERIAL PRIMARY KEY,
-    debtor VARCHAR(100) NOT NULL,
-    creditor VARCHAR(100) NOT NULL,
-    amount NUMERIC(20,8) DEFAULT 0,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE(debtor, creditor)
-);
-
--- 8.5 VouchMorph Notifications
+-- 8.4 VouchMorph Notifications
 CREATE TABLE vouchmorph_notifications (
     id SERIAL PRIMARY KEY,
     swap_number VARCHAR(255) NOT NULL,
@@ -499,7 +518,7 @@ CREATE TABLE vouchmorph_notifications (
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
--- 8.6 API Message Logs
+-- 8.5 API Message Logs
 CREATE TABLE api_message_logs (
     log_id BIGSERIAL PRIMARY KEY,
     message_id VARCHAR(100) NOT NULL,
@@ -521,10 +540,246 @@ CREATE TABLE api_message_logs (
 );
 
 -- =========================================================
--- SECTION 9: AUDIT & MONITORING
+-- SECTION 9: CARD MANAGEMENT SYSTEM
 -- =========================================================
 
--- 9.1 Audit Logs
+-- 9.1 Card Batches (For Physical Card Inventory)
+CREATE TABLE card_batches (
+    batch_id BIGSERIAL PRIMARY KEY,
+    batch_reference VARCHAR(50) UNIQUE NOT NULL,
+    bin_prefix VARCHAR(6) NOT NULL,
+    card_scheme VARCHAR(20) NOT NULL,
+    card_type VARCHAR(20) NOT NULL DEFAULT 'PHYSICAL',
+    quantity_produced INT NOT NULL,
+    quantity_remaining INT NOT NULL,
+    expiry_year INT NOT NULL,
+    expiry_month INT NOT NULL,
+    status VARCHAR(20) DEFAULT 'PRODUCED',
+    ordered_at TIMESTAMPTZ,
+    produced_at TIMESTAMPTZ,
+    received_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    metadata JSONB DEFAULT '{}'::jsonb
+);
+
+-- 9.2 Message Cards (Unified table for both card types)
+CREATE TABLE message_cards (
+    card_id BIGSERIAL PRIMARY KEY,
+    
+    -- Card Identifiers (Security: never store plain PAN!)
+    card_number_hash VARCHAR(255) NOT NULL UNIQUE,
+    card_suffix VARCHAR(4) NOT NULL,
+    cvv_hash VARCHAR(255) NOT NULL,
+    pin_hash VARCHAR(255),
+    
+    -- Card Classification
+    card_category card_category NOT NULL DEFAULT 'PHYSICAL',
+    card_scheme VARCHAR(20) NOT NULL DEFAULT 'VOUCHMORPH',
+    
+    -- For Physical Cards: Link to batch
+    batch_id BIGINT REFERENCES card_batches(batch_id),
+    batch_sequence INT,
+    
+    -- Links to existing systems
+    hold_reference VARCHAR(100) REFERENCES hold_transactions(hold_reference),
+    swap_reference VARCHAR(100) REFERENCES swap_requests(swap_uuid),
+    user_id BIGINT REFERENCES users(user_id),
+    
+    -- Cardholder details
+    cardholder_name VARCHAR(200),
+    cardholder_phone VARCHAR(20),
+    
+    -- Balance tracking
+    initial_amount NUMERIC(20,4) DEFAULT 0,
+    remaining_amount NUMERIC(20,4) DEFAULT 0,
+    currency CHAR(3) DEFAULT 'BWP',
+    
+    -- Card Lifecycle Status
+    lifecycle_status card_lifecycle_status NOT NULL DEFAULT 'IN_BATCH',
+    financial_status card_financial_status NOT NULL DEFAULT 'UNFUNDED',
+    
+    -- Important Dates
+    issued_at TIMESTAMPTZ,
+    batch_assigned_at TIMESTAMPTZ,
+    activated_at TIMESTAMPTZ,
+    last_used_at TIMESTAMPTZ,
+    blocked_at TIMESTAMPTZ,
+    block_reason TEXT,
+    
+    -- Expiry (from batch or generated for virtual)
+    expiry_year INT NOT NULL,
+    expiry_month INT NOT NULL,
+    
+    -- Spending controls
+    daily_limit NUMERIC(20,4),
+    monthly_limit NUMERIC(20,4),
+    atm_daily_limit NUMERIC(20,4),
+    
+    -- Delivery tracking for physical cards
+    delivery_method VARCHAR(50),
+    delivery_address JSONB,
+    delivery_status VARCHAR(30),
+    
+    -- Metadata
+    metadata JSONB DEFAULT '{}'::jsonb,
+    
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 9.3 Card Transactions
+CREATE TABLE card_transactions (
+    transaction_id BIGSERIAL PRIMARY KEY,
+    card_id BIGINT NOT NULL REFERENCES message_cards(card_id),
+    
+    -- Transaction details
+    transaction_type VARCHAR(30) NOT NULL,
+    -- 'ISSUANCE', 'LOAD', 'ATM_WITHDRAWAL', 'PURCHASE', 'REFUND', 'VOID', 'AUTHORIZATION'
+    
+    amount NUMERIC(20,4) NOT NULL,
+    currency CHAR(3) DEFAULT 'BWP',
+    
+    -- Authorization
+    auth_code VARCHAR(20),
+    auth_status VARCHAR(20) DEFAULT 'APPROVED',
+    rrn VARCHAR(12),
+    stan VARCHAR(12),
+    
+    -- Merchant/ATM details
+    merchant_name VARCHAR(200),
+    merchant_id VARCHAR(50),
+    merchant_category VARCHAR(10),
+    terminal_id VARCHAR(50),
+    
+    -- ATM specific
+    atm_id VARCHAR(50),
+    atm_location VARCHAR(200),
+    
+    -- Channel
+    channel VARCHAR(20), -- 'POS', 'ATM', 'ECOMMERCE', 'MOTO', 'LOAD'
+    
+    -- Links
+    settlement_queue_id BIGINT REFERENCES settlement_queue(id),
+    hold_reference VARCHAR(100),
+    swap_reference VARCHAR(100),
+    reference VARCHAR(100),
+    
+    -- Timestamps
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    settled_at TIMESTAMPTZ,
+    
+    -- Response codes
+    response_code VARCHAR(2),
+    response_message TEXT
+);
+
+-- 9.4 Card Loads (Funding cards via swaps)
+CREATE TABLE card_loads (
+    load_id BIGSERIAL PRIMARY KEY,
+    card_id BIGINT NOT NULL REFERENCES message_cards(card_id),
+    swap_reference VARCHAR(100) REFERENCES swap_requests(swap_uuid),
+    hold_reference VARCHAR(100) REFERENCES hold_transactions(hold_reference),
+    
+    amount NUMERIC(20,4) NOT NULL,
+    currency CHAR(3) DEFAULT 'BWP',
+    
+    -- Status
+    status VARCHAR(20) DEFAULT 'PENDING',
+    -- 'PENDING', 'COMPLETED', 'FAILED', 'REVERSED'
+    
+    -- Timestamps
+    initiated_at TIMESTAMPTZ DEFAULT NOW(),
+    completed_at TIMESTAMPTZ,
+    
+    -- Metadata
+    metadata JSONB DEFAULT '{}'::jsonb
+);
+
+-- 9.5 Card Authorizations
+CREATE TABLE card_authorizations (
+    authorization_id SERIAL PRIMARY KEY,
+    swap_id INTEGER NOT NULL,
+    swap_reference VARCHAR(64) NOT NULL,
+    card_suffix VARCHAR(10) NOT NULL,
+    authorized_amount DECIMAL(10,2) NOT NULL,
+    remaining_balance DECIMAL(10,2) NOT NULL,
+    hold_reference VARCHAR(64) NOT NULL,
+    source_institution VARCHAR(50) NOT NULL,
+    fee_amount DECIMAL(10,2) DEFAULT 0.00,
+    vat_amount DECIMAL(10,2) DEFAULT 0.00,
+    status VARCHAR(20) DEFAULT 'ACTIVE',
+    expiry_at TIMESTAMP NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 9.6 Card Authorization Logs (for debugging and audit)
+CREATE TABLE card_auth_logs (
+    log_id BIGSERIAL PRIMARY KEY,
+    card_id BIGINT REFERENCES message_cards(card_id),
+    request_payload JSONB,
+    response_payload JSONB,
+    http_status_code INT,
+    response_time_ms INT,
+    success BOOLEAN,
+    error_message TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 9.7 Card Applications
+CREATE TABLE card_applications (
+    application_id VARCHAR(50) PRIMARY KEY,
+    user_id BIGINT REFERENCES users(user_id) NOT NULL,
+    card_id BIGINT REFERENCES message_cards(card_id),
+    
+    -- Personal details
+    full_name VARCHAR(200) NOT NULL,
+    id_number VARCHAR(50) NOT NULL,
+    id_type VARCHAR(30) NOT NULL,
+    date_of_birth DATE NOT NULL,
+    phone VARCHAR(20) NOT NULL,
+    email VARCHAR(150) NOT NULL,
+    
+    -- Address
+    address JSONB,
+    delivery_address JSONB,
+    
+    -- Optional (for students/professionals)
+    institution VARCHAR(200),
+    course VARCHAR(200),
+    year INT,
+    occupation VARCHAR(100),
+    employer VARCHAR(200),
+    income_range VARCHAR(50),
+    source_of_funds TEXT,
+    
+    -- Application details
+    card_type card_category NOT NULL,
+    delivery_method VARCHAR(50),
+    branch_location VARCHAR(200),
+    status card_application_status DEFAULT 'PENDING_KYC',
+    
+    -- Consent tracking
+    consent JSONB,
+    
+    -- Timestamps
+    submitted_at TIMESTAMPTZ DEFAULT NOW(),
+    kyc_submitted_at TIMESTAMPTZ,
+    kyc_verified_at TIMESTAMPTZ,
+    card_assigned_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    
+    -- Metadata
+    metadata JSONB DEFAULT '{}'::jsonb
+);
+
+-- =========================================================
+-- SECTION 10: AUDIT & MONITORING
+-- =========================================================
+
+-- 10.1 Audit Logs
 CREATE TABLE audit_logs (
     audit_id BIGSERIAL PRIMARY KEY,
     audit_uuid UUID DEFAULT gen_random_uuid() UNIQUE,
@@ -547,7 +802,7 @@ CREATE TABLE audit_logs (
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
--- 9.2 Supervisory Heartbeat
+-- 10.2 Supervisory Heartbeat
 CREATE TABLE supervisory_heartbeat (
     heartbeat_id SERIAL PRIMARY KEY,
     status VARCHAR(20) DEFAULT 'ACTIVE',
@@ -561,7 +816,7 @@ CREATE TABLE supervisory_heartbeat (
 INSERT INTO supervisory_heartbeat (status) VALUES ('ACTIVE');
 
 -- =========================================================
--- SECTION 10: SANDBOX & TESTING
+-- SECTION 11: SANDBOX & TESTING
 -- =========================================================
 
 CREATE TABLE sandbox_disclosures (
@@ -576,10 +831,10 @@ CREATE TABLE sandbox_disclosures (
 );
 
 -- =========================================================
--- SECTION 11: VIEWS
+-- SECTION 12: VIEWS
 -- =========================================================
 
--- 11.1 Transaction Log View
+-- 12.1 Transaction Log View
 CREATE OR REPLACE VIEW transaction_log_view AS
 SELECT 
     COALESCE(ht.swap_reference, aml.message_id) as transaction_id,
@@ -602,8 +857,76 @@ FROM hold_transactions ht
 FULL OUTER JOIN api_message_logs aml ON ht.swap_reference = aml.message_id
 LEFT JOIN participants p ON COALESCE(ht.participant_id, aml.participant_id) = p.participant_id;
 
+-- 12.2 Card Balances View
+CREATE OR REPLACE VIEW card_balances_view AS
+SELECT 
+    mc.card_id,
+    mc.card_suffix,
+    mc.cardholder_name,
+    mc.remaining_amount as balance,
+    mc.currency,
+    mc.expiry_month || '/' || mc.expiry_year as expiry,
+    mc.lifecycle_status,
+    mc.financial_status,
+    ht.hold_reference,
+    ht.source_institution,
+    COALESCE(SUM(ct.amount) FILTER (WHERE ct.auth_status = 'APPROVED'), 0) as total_spent,
+    COUNT(ct.transaction_id) as transaction_count,
+    MAX(ct.created_at) as last_transaction
+FROM message_cards mc
+LEFT JOIN hold_transactions ht ON mc.hold_reference = ht.hold_reference
+LEFT JOIN card_transactions ct ON mc.card_id = ct.card_id
+GROUP BY mc.card_id, mc.card_suffix, mc.cardholder_name, mc.remaining_amount,
+         mc.currency, mc.expiry_month, mc.expiry_year, mc.lifecycle_status,
+         mc.financial_status, ht.hold_reference, ht.source_institution;
+
+-- 12.3 Card Inventory View (Physical cards only)
+CREATE OR REPLACE VIEW card_inventory_view AS
+SELECT 
+    cb.batch_id,
+    cb.batch_reference,
+    cb.bin_prefix,
+    cb.card_scheme,
+    cb.quantity_produced,
+    cb.quantity_remaining,
+    cb.expiry_month || '/' || cb.expiry_year as expiry,
+    COUNT(mc.card_id) as cards_assigned,
+    cb.quantity_remaining - COUNT(mc.card_id) as available_in_inventory
+FROM card_batches cb
+LEFT JOIN message_cards mc ON cb.batch_id = mc.batch_id
+WHERE cb.card_type = 'PHYSICAL'
+GROUP BY cb.batch_id, cb.batch_reference, cb.bin_prefix, cb.card_scheme,
+         cb.quantity_produced, cb.quantity_remaining, cb.expiry_month, cb.expiry_year;
+
+-- 12.4 Card Lifecycle Status View
+CREATE OR REPLACE VIEW card_lifecycle_view AS
+SELECT 
+    lifecycle_status,
+    card_category,
+    COUNT(*) as card_count,
+    SUM(CASE WHEN financial_status IN ('FUNDED', 'ACTIVE') THEN 1 ELSE 0 END) as funded_count,
+    SUM(remaining_amount) as total_remaining_value
+FROM message_cards
+GROUP BY lifecycle_status, card_category
+ORDER BY lifecycle_status;
+
+-- 12.5 Student Card Summary View
+CREATE OR REPLACE VIEW student_cards_summary AS
+SELECT 
+    u.user_id,
+    u.username,
+    u.email,
+    u.phone,
+    COUNT(mc.card_id) as total_cards,
+    SUM(CASE WHEN mc.financial_status IN ('FUNDED', 'ACTIVE') THEN 1 ELSE 0 END) as active_cards,
+    SUM(mc.remaining_amount) as total_available_balance,
+    MAX(mc.last_used_at) as last_card_activity
+FROM users u
+LEFT JOIN message_cards mc ON u.user_id = mc.user_id
+GROUP BY u.user_id, u.username, u.email, u.phone;
+
 -- =========================================================
--- SECTION 12: INDEXES (Performance)
+-- SECTION 13: INDEXES (Performance)
 -- =========================================================
 
 -- Participants indexes
@@ -621,6 +944,8 @@ CREATE INDEX idx_holds_reference ON hold_transactions(hold_reference);
 CREATE INDEX idx_holds_swap ON hold_transactions(swap_reference);
 CREATE INDEX idx_holds_status ON hold_transactions(status);
 CREATE INDEX idx_holds_participant ON hold_transactions(participant_id);
+CREATE INDEX idx_holds_expiry_status ON hold_transactions(hold_expiry, status) WHERE status = 'ACTIVE';
+CREATE INDEX idx_holds_source ON hold_transactions(source_institution);
 
 -- Transaction indexes
 CREATE INDEX idx_transactions_user ON transactions(user_id);
@@ -666,8 +991,43 @@ CREATE INDEX idx_audit_logs_entity ON audit_logs(entity_type, entity_id);
 CREATE INDEX idx_audit_logs_performed ON audit_logs(performed_by_type, performed_by_id);
 CREATE INDEX idx_audit_logs_performed_at ON audit_logs(performed_at);
 
+-- Card batches indexes
+CREATE INDEX idx_card_batches_status ON card_batches(status);
+CREATE INDEX idx_card_batches_expiry ON card_batches(expiry_year, expiry_month);
+
+-- Message cards indexes
+CREATE INDEX idx_message_cards_hash ON message_cards(card_number_hash);
+CREATE INDEX idx_message_cards_batch ON message_cards(batch_id);
+CREATE INDEX idx_message_cards_hold ON message_cards(hold_reference);
+CREATE INDEX idx_message_cards_user ON message_cards(user_id);
+CREATE INDEX idx_message_cards_lifecycle ON message_cards(lifecycle_status);
+CREATE INDEX idx_message_cards_expiry ON message_cards(expiry_year, expiry_month);
+
+-- Card transactions indexes
+CREATE INDEX idx_card_transactions_card ON card_transactions(card_id);
+CREATE INDEX idx_card_transactions_date ON card_transactions(created_at);
+CREATE INDEX idx_card_transactions_auth ON card_transactions(auth_code);
+CREATE INDEX idx_card_transactions_rrn ON card_transactions(rrn);
+
+-- Card loads indexes
+CREATE INDEX idx_card_loads_card ON card_loads(card_id);
+CREATE INDEX idx_card_loads_swap ON card_loads(swap_reference);
+CREATE INDEX idx_card_loads_status ON card_loads(status);
+
+-- Card authorizations indexes
+CREATE INDEX idx_card_auth_swap_ref ON card_authorizations(swap_reference);
+CREATE INDEX idx_card_auth_card_suffix ON card_authorizations(card_suffix);
+CREATE INDEX idx_card_auth_hold_ref ON card_authorizations(hold_reference);
+
+-- Card applications indexes
+CREATE INDEX idx_card_applications_user ON card_applications(user_id);
+CREATE INDEX idx_card_applications_status ON card_applications(status);
+CREATE INDEX idx_card_applications_phone ON card_applications(phone);
+CREATE INDEX idx_card_applications_email ON card_applications(email);
+CREATE INDEX idx_card_applications_created ON card_applications(created_at);
+
 -- =========================================================
--- SECTION 13: TRIGGERS
+-- SECTION 14: TRIGGERS
 -- =========================================================
 
 -- Function to apply updated_at triggers to all tables
@@ -688,15 +1048,33 @@ BEGIN
                 FOR EACH ROW
                 EXECUTE FUNCTION update_updated_at_column();
         ', r.table_name);
-    END LOOP;
+    LOOP
+        EXCEPTION WHEN OTHERS THEN
+            RAISE NOTICE 'Could not create trigger for table %: %', r.table_name, SQLERRM;
+    END;
 END;
 $$ LANGUAGE plpgsql;
 
 -- Apply all triggers
 SELECT apply_updated_at_triggers();
 
+-- Special trigger for card_applications (if not covered by generic trigger)
+CREATE OR REPLACE FUNCTION update_card_applications_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_card_applications_updated ON card_applications;
+CREATE TRIGGER trg_card_applications_updated
+    BEFORE UPDATE ON card_applications
+    FOR EACH ROW
+    EXECUTE FUNCTION update_card_applications_updated_at();
+
 -- =========================================================
--- SECTION 14: INITIAL DATA
+-- SECTION 15: INITIAL DATA
 -- =========================================================
 
 -- Insert default roles
@@ -709,7 +1087,7 @@ INSERT INTO roles (role_name, description, permissions) VALUES
 ON CONFLICT (role_name) DO NOTHING;
 
 -- =========================================================
--- SECTION 15: LOAD PARTICIPANTS FUNCTION
+-- SECTION 16: LOAD PARTICIPANTS FUNCTION
 -- =========================================================
 
 CREATE OR REPLACE FUNCTION load_participants_from_json(json_file_path TEXT)
@@ -810,6 +1188,15 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- =========================================================
+-- SCHEMA CONSTANTS
+-- =========================================================
+
+-- Hold and voucher expiry constants (for reference)
+-- private const HOLD_EXPIRY_HOURS = 24;
+-- private const VOUCHER_EXPIRY_HOURS = 24;
+-- private const EXPIRY_BATCH_SIZE = 100;
+
+-- =========================================================
 -- SCHEMA CREATION COMPLETE
 -- =========================================================
 
@@ -819,979 +1206,6 @@ COMMENT ON TABLE swap_requests IS 'Main swap transaction requests';
 COMMENT ON TABLE hold_transactions IS 'Funds held during swap processing';
 COMMENT ON TABLE swap_fee_collections IS 'Fees collected from swaps for later settlement';
 COMMENT ON TABLE api_message_logs IS 'Logs of all API calls to/from participants';
+COMMENT ON TABLE message_cards IS 'Virtual and physical cards issued to users';
+COMMENT ON TABLE card_applications IS 'Card applications from users';
 
--- =========================================================
--- END OF SCHEMA
--- =========================================================
-
-ALTER TABLE swap_vouchers 
-ADD COLUMN IF NOT EXISTS code_hash VARCHAR(255),
-ADD COLUMN IF NOT EXISTS attempts INT DEFAULT 0;
-
--- 3. Create indexes for performance
-CREATE INDEX IF NOT EXISTS idx_net_positions_debtor_creditor ON net_positions(debtor, creditor);
-CREATE INDEX IF NOT EXISTS idx_swap_vouchers_code_hash ON swap_vouchers(code_hash) WHERE status = 'ACTIVE';
-
--- =========================================================
--- FIX 1: Create message_outbox table if it doesn't exist
--- =========================================================
-CREATE TABLE IF NOT EXISTS message_outbox (
-    id SERIAL PRIMARY KEY,
-    message_id VARCHAR(255) UNIQUE NOT NULL,
-    channel VARCHAR(50) NOT NULL,
-    destination VARCHAR(255) NOT NULL,
-    payload JSONB NOT NULL,
-    status VARCHAR(50) DEFAULT 'PENDING',
-    attempts INT DEFAULT 0,
-    last_error TEXT,
-    last_attempt TIMESTAMP,
-    processed_at TIMESTAMP,
-    created_at TIMESTAMP DEFAULT NOW(),
-    updated_at TIMESTAMP DEFAULT NOW()
-);
-
--- =========================================================
--- FIX 2: Create swap_vouchers table if not exists (for cashouts)
--- =========================================================
-CREATE TABLE IF NOT EXISTS swap_vouchers (
-    voucher_id SERIAL PRIMARY KEY,
-    swap_id INTEGER,
-    code_hash VARCHAR(255) NOT NULL,
-    code_suffix VARCHAR(4),
-    amount NUMERIC(20,4) NOT NULL,
-    expiry_at TIMESTAMP NOT NULL,
-    status VARCHAR(20) DEFAULT 'ACTIVE',
-    redeemed_at TIMESTAMP,
-    claimant_phone VARCHAR(20),
-    is_cardless_redemption BOOLEAN DEFAULT TRUE,
-    attempts INT DEFAULT 0,
-    created_at TIMESTAMP DEFAULT NOW(),
-    updated_at TIMESTAMP DEFAULT NOW()
-);
-
--- =========================================================
--- FIX 3: Ensure swap_requests has all needed columns
--- =========================================================
-ALTER TABLE swap_requests 
-ADD COLUMN IF NOT EXISTS source_details JSONB,
-ADD COLUMN IF NOT EXISTS destination_details JSONB;
-
--- =========================================================
--- FIX 4: Create indexes for performance
--- =========================================================
-CREATE INDEX IF NOT EXISTS idx_message_outbox_status ON message_outbox(status);
-CREATE INDEX IF NOT EXISTS idx_message_outbox_created ON message_outbox(created_at);
-CREATE INDEX IF NOT EXISTS idx_swap_vouchers_code_hash ON swap_vouchers(code_hash);
-CREATE INDEX IF NOT EXISTS idx_swap_vouchers_status ON swap_vouchers(status);
-
-ALTER TABLE swap_requests 
-ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::jsonb;
-
--- Add if missing
-ALTER TABLE hold_transactions 
-ADD COLUMN IF NOT EXISTS hold_expiry TIMESTAMPTZ,
-ADD COLUMN IF NOT EXISTS released_at TIMESTAMPTZ,
-ADD COLUMN IF NOT EXISTS debited_at TIMESTAMPTZ;
-
--- Index for expiry queries
-CREATE INDEX IF NOT EXISTS idx_holds_expiry_status 
-ON hold_transactions(hold_expiry, status) 
-WHERE status = 'ACTIVE';
-
-private const HOLD_EXPIRY_HOURS = 24;  // Standard hold duration
-private const VOUCHER_EXPIRY_HOURS = 24;  // Standard voucher duration
-private const EXPIRY_BATCH_SIZE = 100;  // For cron job
-
--- =========================================================
--- MIGRATION: 015_create_card_tables.sql
--- Run this on your VouchMorph database
--- =========================================================
-
--- 1. MESSAGE CARDS TABLE (links holds to cards)
-CREATE TABLE IF NOT EXISTS message_cards (
-    card_id BIGSERIAL PRIMARY KEY,
-    
-    -- Card identifiers (security: never store plain PAN!)
-    card_number_hash VARCHAR(255) NOT NULL UNIQUE,
-    card_suffix VARCHAR(4) NOT NULL,
-    cvv_hash VARCHAR(255) NOT NULL,
-    
-    -- Links to your existing systems
-    hold_reference VARCHAR(100) NOT NULL REFERENCES hold_transactions(hold_reference),
-    swap_reference VARCHAR(100) REFERENCES swap_requests(swap_uuid),
-    user_id BIGINT REFERENCES users(user_id),
-    
-    -- Cardholder details
-    cardholder_name VARCHAR(200) NOT NULL,
-    
-    -- Balance tracking (mirrors the hold)
-    initial_amount NUMERIC(20,4) NOT NULL,
-    remaining_amount NUMERIC(20,4) NOT NULL,
-    currency CHAR(3) DEFAULT 'BWP',
-    
-    -- Card status
-    status VARCHAR(20) DEFAULT 'ACTIVE',
-    -- 'ACTIVE', 'BLOCKED', 'EXPIRED', 'USED', 'CANCELLED'
-    
-    -- Dates
-    issued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    activated_at TIMESTAMPTZ,
-    last_used_at TIMESTAMPTZ,
-    blocked_at TIMESTAMPTZ,
-    block_reason TEXT,
-    
-    -- Expiry (standard 3 years)
-    expiry_year INT NOT NULL,
-    expiry_month INT NOT NULL,
-    
-    -- Spending controls
-    daily_limit NUMERIC(20,4) DEFAULT 10000,
-    monthly_limit NUMERIC(20,4) DEFAULT 50000,
-    atm_daily_limit NUMERIC(20,4) DEFAULT 2000,
-    
-    -- Metadata
-    metadata JSONB DEFAULT '{}'::jsonb,
-    
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Indexes for performance
-CREATE INDEX idx_message_cards_hash ON message_cards(card_number_hash);
-CREATE INDEX idx_message_cards_hold ON message_cards(hold_reference);
-CREATE INDEX idx_message_cards_user ON message_cards(user_id);
-CREATE INDEX idx_message_cards_status ON message_cards(status);
-CREATE INDEX idx_message_cards_expiry ON message_cards(expiry_year, expiry_month);
-
--- 2. CARD TRANSACTIONS TABLE
-CREATE TABLE IF NOT EXISTS card_transactions (
-    transaction_id BIGSERIAL PRIMARY KEY,
-    card_id BIGINT NOT NULL REFERENCES message_cards(card_id),
-    
-    -- Transaction details
-    transaction_type VARCHAR(30) NOT NULL,
-    -- 'ISSUANCE', 'ATM_WITHDRAWAL', 'PURCHASE', 'REFUND', 'VOID', 'AUTHORIZATION'
-    
-    amount NUMERIC(20,4) NOT NULL,
-    currency CHAR(3) DEFAULT 'BWP',
-    
-    -- Authorization
-    auth_code VARCHAR(20),
-    auth_status VARCHAR(20) DEFAULT 'APPROVED',
-    -- 'APPROVED', 'DECLINED', 'PENDING', 'REVERSED'
-    
-    -- Merchant/ATM details
-    merchant_name VARCHAR(200),
-    merchant_id VARCHAR(50),
-    merchant_category VARCHAR(10),
-    terminal_id VARCHAR(50),
-    
-    -- ATM specific
-    atm_id VARCHAR(50),
-    atm_location VARCHAR(200),
-    
-    -- Channel
-    channel VARCHAR(20), -- 'POS', 'ATM', 'ECOMMERCE', 'MOTO'
-    
-    -- Links
-    settlement_queue_id BIGINT REFERENCES settlement_queue(id),
-    hold_reference VARCHAR(100),
-    reference VARCHAR(100),
-    
-    -- Timestamps
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    settled_at TIMESTAMPTZ,
-    
-    -- Response codes
-    response_code VARCHAR(2),
-    response_message TEXT
-);
-
-CREATE INDEX idx_card_transactions_card ON card_transactions(card_id);
-CREATE INDEX idx_card_transactions_date ON card_transactions(created_at);
-CREATE INDEX idx_card_transactions_auth ON card_transactions(auth_code);
-
--- 3. CARD AUTHORIZATION LOGS (for debugging and audit)
-CREATE TABLE IF NOT EXISTS card_auth_logs (
-    log_id BIGSERIAL PRIMARY KEY,
-    card_id BIGINT REFERENCES message_cards(card_id),
-    request_payload JSONB,
-    response_payload JSONB,
-    http_status_code INT,
-    response_time_ms INT,
-    success BOOLEAN,
-    error_message TEXT,
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- 4. VIEW FOR CARD BALANCES
-CREATE OR REPLACE VIEW card_balances_view AS
-SELECT 
-    mc.card_id,
-    mc.card_suffix,
-    mc.cardholder_name,
-    mc.remaining_amount as balance,
-    mc.currency,
-    mc.expiry_month || '/' || mc.expiry_year as expiry,
-    mc.status,
-    ht.hold_reference,
-    ht.source_institution,
-    COALESCE(SUM(ct.amount) FILTER (WHERE ct.auth_status = 'APPROVED'), 0) as total_spent,
-    COUNT(ct.transaction_id) as transaction_count,
-    MAX(ct.created_at) as last_transaction
-FROM message_cards mc
-LEFT JOIN hold_transactions ht ON mc.hold_reference = ht.hold_reference
-LEFT JOIN card_transactions ct ON mc.card_id = ct.card_id
-GROUP BY mc.card_id, mc.card_suffix, mc.cardholder_name, mc.remaining_amount,
-         mc.currency, mc.expiry_month, mc.expiry_year, mc.status,
-         ht.hold_reference, ht.source_institution;
-
--- 5. Add source_institution to hold_transactions if missing
-ALTER TABLE hold_transactions 
-ADD COLUMN IF NOT EXISTS source_institution VARCHAR(100),
-ADD COLUMN IF NOT EXISTS source_details JSONB;
-
--- =========================================================
--- SECTION 16: CARD MANAGEMENT SYSTEM
--- Supports both Virtual and Physical cards
--- Clear separation of concerns for easy understanding
--- =========================================================
-
--- 16.1 Card Batches (For Physical Card Inventory)
--- Tracks batches of pre-printed cards from manufacturer
-CREATE TABLE IF NOT EXISTS card_batches (
-    batch_id BIGSERIAL PRIMARY KEY,
-    batch_reference VARCHAR(50) UNIQUE NOT NULL,
-    
-    -- Card details (same for all cards in batch)
-    bin_prefix VARCHAR(6) NOT NULL, -- First 6 digits (e.g., 411111)
-    card_scheme VARCHAR(20) NOT NULL, -- 'VISA', 'MASTERCARD'
-    card_type VARCHAR(20) NOT NULL, -- 'PHYSICAL', 'VIRTUAL' (for this batch)
-    
-    -- Production details
-    quantity_produced INT NOT NULL,
-    quantity_remaining INT NOT NULL,
-    expiry_year INT NOT NULL,
-    expiry_month INT NOT NULL,
-    
-    -- Status tracking
-    status VARCHAR(20) DEFAULT 'PRODUCED',
-    -- 'ORDERED', 'PRODUCED', 'RECEIVED', 'INVENTORY', 'DEPLETED'
-    
-    -- Timestamps
-    ordered_at TIMESTAMPTZ,
-    produced_at TIMESTAMPTZ,
-    received_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW(),
-    
-    -- Metadata
-    metadata JSONB DEFAULT '{}'::jsonb,
-    
-    CONSTRAINT valid_card_type CHECK (card_type IN ('PHYSICAL', 'VIRTUAL'))
-);
-
--- 16.2 Message Cards (Unified table for both card types)
-CREATE TABLE IF NOT EXISTS message_cards (
-    card_id BIGSERIAL PRIMARY KEY,
-    
-    -- Card Identifiers (Security: never store plain PAN!)
-    card_number_hash VARCHAR(255) NOT NULL UNIQUE,
-    card_suffix VARCHAR(4) NOT NULL, -- Last 4 digits for display
-    cvv_hash VARCHAR(255) NOT NULL,
-    pin_hash VARCHAR(255), -- Optional for ATM PIN
-    
-    -- Card Classification
-    card_category VARCHAR(20) NOT NULL, -- 'VIRTUAL', 'PHYSICAL'
-    card_scheme VARCHAR(20) NOT NULL, -- 'VISA', 'MASTERCARD', 'VOUCHMORPH'
-    
-    -- For Physical Cards: Link to batch
-    batch_id BIGINT REFERENCES card_batches(batch_id),
-    batch_sequence INT, -- Which number in the batch (e.g., card 123 of 1000)
-    
-    -- Links to your existing systems
-    hold_reference VARCHAR(100) REFERENCES hold_transactions(hold_reference),
-    swap_reference VARCHAR(100) REFERENCES swap_requests(swap_uuid),
-    user_id BIGINT REFERENCES users(user_id),
-    
-    -- Cardholder details
-    cardholder_name VARCHAR(200) NOT NULL,
-    cardholder_phone VARCHAR(20),
-    student_id VARCHAR(50),
-    
-    -- Balance tracking (mirrors the hold)
-    initial_amount NUMERIC(20,4) NOT NULL DEFAULT 0,
-    remaining_amount NUMERIC(20,4) NOT NULL DEFAULT 0,
-    currency CHAR(3) DEFAULT 'BWP',
-    
-    -- Card Lifecycle Status
-    lifecycle_status VARCHAR(30) NOT NULL DEFAULT 'PENDING_ACTIVATION',
-    -- For VIRTUAL cards:
-    --   'PENDING_ISSUANCE' → 'ISSUED' → 'ACTIVE' → 'BLOCKED' → 'EXPIRED'
-    -- For PHYSICAL cards:
-    --   'IN_BATCH' → 'ASSIGNED' → 'SHIPPED' → 'DELIVERED' → 'ACTIVE' → 'BLOCKED' → 'EXPIRED'
-    
-    -- Financial Status (separate from lifecycle)
-    financial_status VARCHAR(20) DEFAULT 'UNFUNDED',
-    -- 'UNFUNDED', 'FUNDED', 'ACTIVE', 'DEPLETED'
-    
-    -- Important Dates
-    issued_at TIMESTAMPTZ, -- When card record created
-    batch_assigned_at TIMESTAMPTZ, -- When PHYSICAL card assigned to student
-    shipped_at TIMESTAMPTZ,
-    delivered_at TIMESTAMPTZ,
-    activated_at TIMESTAMPTZ, -- When first funded/swiped
-    last_used_at TIMESTAMPTZ,
-    blocked_at TIMESTAMPTZ,
-    block_reason TEXT,
-    
-    -- Expiry (from batch or generated for virtual)
-    expiry_year INT NOT NULL,
-    expiry_month INT NOT NULL,
-    
-    -- Spending controls (can override batch defaults)
-    daily_limit NUMERIC(20,4),
-    monthly_limit NUMERIC(20,4),
-    atm_daily_limit NUMERIC(20,4),
-    
-    -- Delivery tracking for physical cards
-    delivery_address TEXT,
-    delivery_method VARCHAR(50), -- 'COURIER', 'BRANCH_PICKUP', 'MAIL'
-    delivery_status VARCHAR(30),
-    tracking_number VARCHAR(100),
-    delivered_at TIMESTAMPTZ,
-    
-    -- Metadata
-    metadata JSONB DEFAULT '{}'::jsonb,
-    
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW(),
-    
-    -- Constraints
-    CONSTRAINT valid_card_category CHECK (card_category IN ('VIRTUAL', 'PHYSICAL')),
-    CONSTRAINT valid_lifecycle_status CHECK (lifecycle_status IN (
-        'PENDING_ISSUANCE', 'ISSUED', 'IN_BATCH', 'ASSIGNED', 'SHIPPED', 
-        'DELIVERED', 'ACTIVE', 'BLOCKED', 'EXPIRED', 'CANCELLED'
-    )),
-    CONSTRAINT valid_financial_status CHECK (financial_status IN (
-        'UNFUNDED', 'FUNDED', 'ACTIVE', 'DEPLETED'
-    ))
-);
-
--- 16.3 Card Transactions
-CREATE TABLE IF NOT EXISTS card_transactions (
-    transaction_id BIGSERIAL PRIMARY KEY,
-    card_id BIGINT NOT NULL REFERENCES message_cards(card_id),
-    
-    -- Transaction details
-    transaction_type VARCHAR(30) NOT NULL,
-    -- 'ISSUANCE', 'LOAD', 'ATM_WITHDRAWAL', 'PURCHASE', 'REFUND', 'VOID', 'AUTHORIZATION'
-    
-    amount NUMERIC(20,4) NOT NULL,
-    currency CHAR(3) DEFAULT 'BWP',
-    
-    -- Authorization
-    auth_code VARCHAR(20),
-    auth_status VARCHAR(20) DEFAULT 'APPROVED',
-    rrn VARCHAR(12), -- Retrieval Reference Number
-    stan VARCHAR(12), -- System Trace Audit Number
-    
-    -- Merchant/ATM details
-    merchant_name VARCHAR(200),
-    merchant_id VARCHAR(50),
-    merchant_category VARCHAR(10),
-    terminal_id VARCHAR(50),
-    
-    -- ATM specific
-    atm_id VARCHAR(50),
-    atm_location VARCHAR(200),
-    
-    -- Channel
-    channel VARCHAR(20), -- 'POS', 'ATM', 'ECOMMERCE', 'MOTO', 'LOAD'
-    
-    -- Links
-    settlement_queue_id BIGINT REFERENCES settlement_queue(id),
-    hold_reference VARCHAR(100),
-    swap_reference VARCHAR(100),
-    
-    -- Timestamps
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    settled_at TIMESTAMPTZ,
-    
-    -- Response codes
-    response_code VARCHAR(2),
-    response_message TEXT
-);
-
--- 16.4 Card Loads (Funding cards via swaps)
-CREATE TABLE IF NOT EXISTS card_loads (
-    load_id BIGSERIAL PRIMARY KEY,
-    card_id BIGINT NOT NULL REFERENCES message_cards(card_id),
-    swap_reference VARCHAR(100) REFERENCES swap_requests(swap_uuid),
-    hold_reference VARCHAR(100) REFERENCES hold_transactions(hold_reference),
-    
-    amount NUMERIC(20,4) NOT NULL,
-    currency CHAR(3) DEFAULT 'BWP',
-    
-    -- Status
-    status VARCHAR(20) DEFAULT 'PENDING',
-    -- 'PENDING', 'COMPLETED', 'FAILED', 'REVERSED'
-    
-    -- Timestamps
-    initiated_at TIMESTAMPTZ DEFAULT NOW(),
-    completed_at TIMESTAMPTZ,
-    
-    -- Metadata
-    metadata JSONB DEFAULT '{}'::jsonb
-);
-
--- =========================================================
--- INDEXES FOR PERFORMANCE
--- =========================================================
-
--- Card batches indexes
-CREATE INDEX idx_card_batches_status ON card_batches(status);
-CREATE INDEX idx_card_batches_expiry ON card_batches(expiry_year, expiry_month);
-
--- Message cards indexes
-CREATE INDEX idx_message_cards_hash ON message_cards(card_number_hash);
-CREATE INDEX idx_message_cards_hold ON message_cards(hold_reference);
-CREATE INDEX idx_message_cards_user ON message_cards(user_id);
-CREATE INDEX idx_message_cards_lifecycle ON message_cards(lifecycle_status);
-CREATE INDEX idx_message_cards_financial ON message_cards(financial_status);
-CREATE INDEX idx_message_cards_expiry ON message_cards(expiry_year, expiry_month);
-CREATE INDEX idx_message_cards_batch ON message_cards(batch_id);
-
--- Card transactions indexes
-CREATE INDEX idx_card_transactions_card ON card_transactions(card_id);
-CREATE INDEX idx_card_transactions_date ON card_transactions(created_at);
-CREATE INDEX idx_card_transactions_auth ON card_transactions(auth_code);
-CREATE INDEX idx_card_transactions_rrn ON card_transactions(rrn);
-
--- Card loads indexes
-CREATE INDEX idx_card_loads_card ON card_loads(card_id);
-CREATE INDEX idx_card_loads_swap ON card_loads(swap_reference);
-CREATE INDEX idx_card_loads_status ON card_loads(status);
-
--- =========================================================
--- VIEWS FOR CLEAR REPORTING
--- =========================================================
-
--- 16.5 View: Card Inventory (Physical cards only)
-CREATE OR REPLACE VIEW card_inventory_view AS
-SELECT 
-    cb.batch_id,
-    cb.batch_reference,
-    cb.bin_prefix,
-    cb.card_scheme,
-    cb.quantity_produced,
-    cb.quantity_remaining,
-    cb.expiry_month || '/' || cb.expiry_year as expiry,
-    COUNT(mc.card_id) as cards_assigned,
-    cb.quantity_remaining - COUNT(mc.card_id) as available_in_inventory
-FROM card_batches cb
-LEFT JOIN message_cards mc ON cb.batch_id = mc.batch_id
-WHERE cb.card_type = 'PHYSICAL'
-GROUP BY cb.batch_id, cb.batch_reference, cb.bin_prefix, cb.card_scheme,
-         cb.quantity_produced, cb.quantity_remaining, cb.expiry_month, cb.expiry_year;
-
--- 16.6 View: Card Lifecycle Status
-CREATE OR REPLACE VIEW card_lifecycle_view AS
-SELECT 
-    lifecycle_status,
-    card_category,
-    COUNT(*) as card_count,
-    SUM(CASE WHEN financial_status = 'FUNDED' THEN 1 ELSE 0 END) as funded_count,
-    SUM(remaining_amount) as total_remaining_value
-FROM message_cards
-GROUP BY lifecycle_status, card_category
-ORDER BY lifecycle_status;
-
--- 16.7 View: Student Card Summary
-CREATE OR REPLACE VIEW student_cards_summary AS
-SELECT 
-    u.user_id,
-    u.full_name,
-    u.phone,
-    COUNT(mc.card_id) as total_cards,
-    SUM(CASE WHEN mc.financial_status IN ('FUNDED', 'ACTIVE') THEN 1 ELSE 0 END) as active_cards,
-    SUM(mc.remaining_amount) as total_available_balance,
-    MAX(mc.last_used_at) as last_card_activity
-FROM users u
-LEFT JOIN message_cards mc ON u.user_id = mc.user_id
-GROUP BY u.user_id, u.full_name, u.phone;
-
-https://github.com/marvinsehunelo/vouchmorphn/tree/main/public/api/v1/cards
--- Create message_cards table
-CREATE TABLE IF NOT EXISTS message_cards (
-    card_id BIGSERIAL PRIMARY KEY,
-    card_number_hash VARCHAR(255) NOT NULL UNIQUE,
-    card_suffix VARCHAR(4) NOT NULL,
-    cvv_hash VARCHAR(255) NOT NULL,
-    hold_reference VARCHAR(100) REFERENCES hold_transactions(hold_reference),
-    user_id BIGINT REFERENCES users(user_id),
-    cardholder_name VARCHAR(200) NOT NULL,
-    initial_amount NUMERIC(20,4) NOT NULL DEFAULT 0,
-    remaining_amount NUMERIC(20,4) NOT NULL DEFAULT 0,
-    currency CHAR(3) DEFAULT 'BWP',
-    status VARCHAR(20) DEFAULT 'ACTIVE',
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Create indexes
-CREATE INDEX idx_message_cards_hash ON message_cards(card_number_hash);
-CREATE INDEX idx_message_cards_hold ON message_cards(hold_reference);
-
-
-
-CREATE TABLE IF NOT EXISTS card_batches (
-    batch_id BIGSERIAL PRIMARY KEY,
-    batch_reference VARCHAR(50) UNIQUE NOT NULL,
-    bin_prefix VARCHAR(6) NOT NULL,
-    card_scheme VARCHAR(20) NOT NULL,
-    card_type VARCHAR(20) NOT NULL DEFAULT 'PHYSICAL',
-    quantity_produced INT NOT NULL,
-    quantity_remaining INT NOT NULL,
-    expiry_year INT NOT NULL,
-    expiry_month INT NOT NULL,
-    status VARCHAR(20) DEFAULT 'PRODUCED',
-    ordered_at TIMESTAMPTZ,
-    produced_at TIMESTAMPTZ,
-    received_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW(),
-    metadata JSONB DEFAULT '{}'::jsonb
-);
-
-CREATE INDEX idx_card_batches_status ON card_batches(status);
-CREATE INDEX idx_card_batches_expiry ON card_batches(expiry_year, expiry_month);
-CREATE INDEX idx_message_cards_hash ON message_cards(card_number_hash);
-CREATE INDEX idx_message_cards_hold ON message_cards(hold_reference);
-CREATE INDEX idx_message_cards_user ON message_cards(user_id);
-CREATE INDEX idx_message_cards_lifecycle ON message_cards(lifecycle_status);
-CREATE INDEX idx_message_cards_batch ON message_cards(batch_id);
-
--- Add missing card_category column
-ALTER TABLE message_cards 
-ADD COLUMN IF NOT EXISTS card_category VARCHAR(20) NOT NULL DEFAULT 'PHYSICAL';
-
--- Also add any other columns that might be missing
-ALTER TABLE message_cards 
-ADD COLUMN IF NOT EXISTS card_scheme VARCHAR(20) NOT NULL DEFAULT 'VOUCHMORPH',
-ADD COLUMN IF NOT EXISTS batch_sequence INT,
-ADD COLUMN IF NOT EXISTS lifecycle_status VARCHAR(30) NOT NULL DEFAULT 'PENDING_ACTIVATION',
-ADD COLUMN IF NOT EXISTS financial_status VARCHAR(20) DEFAULT 'UNFUNDED';
-
--- Verify the table structure
-\d message_cards
-
-
--- Add batch_id column to message_cards
-ALTER TABLE message_cards 
-ADD COLUMN IF NOT EXISTS batch_id BIGINT REFERENCES card_batches(batch_id);
-
--- Also add any other columns that might be missing from our INSERT statement
-ALTER TABLE message_cards 
-ADD COLUMN IF NOT EXISTS card_category VARCHAR(20) NOT NULL DEFAULT 'PHYSICAL',
-ADD COLUMN IF NOT EXISTS card_scheme VARCHAR(20) NOT NULL DEFAULT 'VOUCHMORPH',
-ADD COLUMN IF NOT EXISTS batch_sequence INT,
-ADD COLUMN IF NOT EXISTS lifecycle_status VARCHAR(30) NOT NULL DEFAULT 'PENDING_ACTIVATION',
-ADD COLUMN IF NOT EXISTS financial_status VARCHAR(20) DEFAULT 'UNFUNDED',
-ADD COLUMN IF NOT EXISTS cardholder_name VARCHAR(200),
-ADD COLUMN IF NOT EXISTS cardholder_phone VARCHAR(20),
-ADD COLUMN IF NOT EXISTS daily_limit NUMERIC(20,4),
-ADD COLUMN IF NOT EXISTS monthly_limit NUMERIC(20,4),
-ADD COLUMN IF NOT EXISTS atm_daily_limit NUMERIC(20,4),
-ADD COLUMN IF NOT EXISTS batch_assigned_at TIMESTAMPTZ,
-ADD COLUMN IF NOT EXISTS activated_at TIMESTAMPTZ,
-ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMPTZ,
-ADD COLUMN IF NOT EXISTS blocked_at TIMESTAMPTZ,
-ADD COLUMN IF NOT EXISTS block_reason TEXT;
-
--- Verify the table structure
-SELECT column_name, data_type 
-FROM information_schema.columns 
-WHERE table_name = 'message_cards' 
-ORDER BY ordinal_position;
-
-ALTER TABLE message_cards 
-ADD COLUMN IF NOT EXISTS card_number_hash VARCHAR(255) NOT NULL,
-ADD COLUMN IF NOT EXISTS card_suffix VARCHAR(4) NOT NULL,
-ADD COLUMN IF NOT EXISTS cvv_hash VARCHAR(255) NOT NULL,
-ADD COLUMN IF NOT EXISTS card_category VARCHAR(20) NOT NULL DEFAULT 'PHYSICAL',
-ADD COLUMN IF NOT EXISTS card_scheme VARCHAR(20) NOT NULL DEFAULT 'VOUCHMORPH',
-ADD COLUMN IF NOT EXISTS batch_id BIGINT REFERENCES card_batches(batch_id),
-ADD COLUMN IF NOT EXISTS batch_sequence INT,
-ADD COLUMN IF NOT EXISTS lifecycle_status VARCHAR(30) NOT NULL DEFAULT 'PENDING_ACTIVATION',
-ADD COLUMN IF NOT EXISTS financial_status VARCHAR(20) DEFAULT 'UNFUNDED',
-ADD COLUMN IF NOT EXISTS expiry_year INT NOT NULL DEFAULT 2026,
-ADD COLUMN IF NOT EXISTS expiry_month INT NOT NULL DEFAULT 12,
-ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::jsonb,
-ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW(),
-ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
-
-ALTER TABLE message_cards 
-ADD COLUMN IF NOT EXISTS hold_reference VARCHAR(100) REFERENCES hold_transactions(hold_reference),
-ADD COLUMN IF NOT EXISTS swap_reference VARCHAR(100) REFERENCES swap_requests(swap_uuid),
-ADD COLUMN IF NOT EXISTS user_id BIGINT REFERENCES users(user_id),
-ADD COLUMN IF NOT EXISTS cardholder_name VARCHAR(200),
-ADD COLUMN IF NOT EXISTS cardholder_phone VARCHAR(20),
-ADD COLUMN IF NOT EXISTS initial_amount NUMERIC(20,4) DEFAULT 0,
-ADD COLUMN IF NOT EXISTS remaining_amount NUMERIC(20,4) DEFAULT 0,
-ADD COLUMN IF NOT EXISTS currency CHAR(3) DEFAULT 'BWP',
-ADD COLUMN IF NOT EXISTS issued_at TIMESTAMPTZ,
-ADD COLUMN IF NOT EXISTS batch_assigned_at TIMESTAMPTZ,
-ADD COLUMN IF NOT EXISTS activated_at TIMESTAMPTZ,
-ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMPTZ,
-ADD COLUMN IF NOT EXISTS blocked_at TIMESTAMPTZ,
-ADD COLUMN IF NOT EXISTS block_reason TEXT,
-ADD COLUMN IF NOT EXISTS daily_limit NUMERIC(20,4),
-ADD COLUMN IF NOT EXISTS monthly_limit NUMERIC(20,4),
-ADD COLUMN IF NOT EXISTS atm_daily_limit NUMERIC(20,4),
-ADD COLUMN IF NOT EXISTS pin_hash VARCHAR(255);
-
-CREATE INDEX IF NOT EXISTS idx_message_cards_hash ON message_cards(card_number_hash);
-CREATE INDEX IF NOT EXISTS idx_message_cards_batch ON message_cards(batch_id);
-CREATE INDEX IF NOT EXISTS idx_message_cards_lifecycle ON message_cards(lifecycle_status);
-
--- First, drop the existing table (this will delete all data!)
-DROP TABLE IF EXISTS message_cards CASCADE;
-
--- Now recreate with ONLY the columns needed for batch creation
-CREATE TABLE message_cards (
-    card_id BIGSERIAL PRIMARY KEY,
-    card_number_hash VARCHAR(255) NOT NULL UNIQUE,
-    card_suffix VARCHAR(4) NOT NULL,
-    cvv_hash VARCHAR(255) NOT NULL,
-    card_category VARCHAR(20) NOT NULL DEFAULT 'PHYSICAL',
-    card_scheme VARCHAR(20) NOT NULL DEFAULT 'VOUCHMORPH',
-    batch_id BIGINT REFERENCES card_batches(batch_id),
-    batch_sequence INT,
-    lifecycle_status VARCHAR(30) NOT NULL DEFAULT 'IN_BATCH',
-    financial_status VARCHAR(20) NOT NULL DEFAULT 'UNFUNDED',
-    expiry_year INT NOT NULL,
-    expiry_month INT NOT NULL,
-    metadata JSONB DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW(),
-    
-    -- Optional fields (nullable)
-    hold_reference VARCHAR(100) REFERENCES hold_transactions(hold_reference),
-    swap_reference VARCHAR(100) REFERENCES swap_requests(swap_uuid),
-    user_id BIGINT REFERENCES users(user_id),
-    cardholder_name VARCHAR(200),
-    cardholder_phone VARCHAR(20),
-    initial_amount NUMERIC(20,4) DEFAULT 0,
-    remaining_amount NUMERIC(20,4) DEFAULT 0,
-    currency CHAR(3) DEFAULT 'BWP',
-    activated_at TIMESTAMPTZ,
-    last_used_at TIMESTAMPTZ,
-    blocked_at TIMESTAMPTZ,
-    block_reason TEXT,
-    daily_limit NUMERIC(20,4),
-    monthly_limit NUMERIC(20,4),
-    atm_daily_limit NUMERIC(20,4),
-    pin_hash VARCHAR(255)
-);
-
--- Create indexes for performance
-CREATE INDEX idx_message_cards_hash ON message_cards(card_number_hash);
-CREATE INDEX idx_message_cards_batch ON message_cards(batch_id);
-CREATE INDEX idx_message_cards_hold ON message_cards(hold_reference);
-CREATE INDEX idx_message_cards_user ON message_cards(user_id);
-CREATE INDEX idx_message_cards_lifecycle ON message_cards(lifecycle_status);
-
-ALTER TABLE kyc_documents 
-ADD COLUMN IF NOT EXISTS submitted_at TIMESTAMPTZ DEFAULT NOW();
-ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ,
-ADD COLUMN IF NOT EXISTS admin_reviewer_id INT,
-ADD COLUMN IF NOT EXISTS review_notes TEXT;
-
-ALTER TABLE kyc_documents 
-ADD COLUMN IF NOT EXISTS submitted_at TIMESTAMPTZ DEFAULT NOW(),
-ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ,
-ADD COLUMN IF NOT EXISTS admin_reviewer_id INT,
-ADD COLUMN IF NOT EXISTS review_notes TEXT;
-
--- First, drop the existing check constraint
-ALTER TABLE kyc_documents DROP CONSTRAINT IF EXISTS kyc_documents_document_type_check;
-
--- Add new constraint with 'identity' included
-ALTER TABLE kyc_documents ADD CONSTRAINT kyc_documents_document_type_check 
-CHECK (document_type IN ('passport', 'national_id', 'drivers_license', 'utility_bill', 'bank_statement', 'identity'));
-
-CREATE TABLE IF NOT EXISTS card_applications (
-    application_id VARCHAR(50) PRIMARY KEY,
-    user_id BIGINT REFERENCES users(user_id) NOT NULL,
-    card_id BIGINT REFERENCES message_cards(card_id),
-    
-    -- Personal details
-    full_name VARCHAR(200) NOT NULL,
-    id_number VARCHAR(50) NOT NULL,
-    id_type VARCHAR(30) NOT NULL, -- 'omang', 'passport', 'drivers_license'
-    date_of_birth DATE NOT NULL,
-    phone VARCHAR(20) NOT NULL,
-    email VARCHAR(150) NOT NULL,
-    
-    -- Optional (for students/professionals)
-    institution VARCHAR(200),
-    course VARCHAR(200),
-    year INT,
-    occupation VARCHAR(100),
-    employer VARCHAR(200),
-    income_range VARCHAR(50),
-    source_of_funds TEXT,
-    
-    -- Application details
-    card_type VARCHAR(20) NOT NULL, -- 'PHYSICAL', 'VIRTUAL'
-    delivery_address JSONB,
-    delivery_method VARCHAR(50),
-    branch_location VARCHAR(200),
-    status VARCHAR(30) DEFAULT 'PENDING_KYC',
-    -- 'PENDING_KYC', 'KYC_SUBMITTED', 'KYC_VERIFIED', 
-    -- 'CARD_ASSIGNED', 'CARD_DELIVERED', 'COMPLETED', 'REJECTED'
-    
-    -- Consent tracking
-    consent JSONB,
-    
-    -- Timestamps
-    submitted_at TIMESTAMPTZ DEFAULT NOW(),
-    kyc_submitted_at TIMESTAMPTZ,
-    kyc_verified_at TIMESTAMPTZ,
-    card_assigned_at TIMESTAMPTZ,
-    completed_at TIMESTAMPTZ,
-    updated_at TIMESTAMPTZ DEFAULT NOW(),
-    
-    -- Metadata
-    metadata JSONB DEFAULT '{}'::jsonb
-);
-
--- =========================================================
--- CARD APPLICATIONS TABLE
--- Tracks all card applications from the public
--- =========================================================
-CREATE TABLE IF NOT EXISTS card_applications (
-    application_id VARCHAR(50) PRIMARY KEY,
-    user_id BIGINT REFERENCES users(user_id) NOT NULL,
-    card_id BIGINT REFERENCES message_cards(card_id),
-    
-    -- Personal details
-    full_name VARCHAR(200) NOT NULL,
-    id_number VARCHAR(50) NOT NULL,
-    id_type VARCHAR(30) NOT NULL, -- 'omang', 'passport', 'drivers_license'
-    date_of_birth DATE NOT NULL,
-    phone VARCHAR(20) NOT NULL,
-    email VARCHAR(150) NOT NULL,
-    
-    -- Optional (for students/professionals)
-    institution VARCHAR(200),
-    course VARCHAR(200),
-    year INT,
-    occupation VARCHAR(100),
-    employer VARCHAR(200),
-    income_range VARCHAR(50),
-    source_of_funds TEXT,
-    
-    -- Application details
-    card_type VARCHAR(20) NOT NULL, -- 'PHYSICAL', 'VIRTUAL'
-    delivery_address JSONB,
-    delivery_method VARCHAR(50),
-    branch_location VARCHAR(200),
-    status VARCHAR(30) DEFAULT 'PENDING_KYC',
-    -- 'PENDING_KYC', 'KYC_SUBMITTED', 'KYC_VERIFIED', 
-    -- 'CARD_ASSIGNED', 'CARD_DELIVERED', 'COMPLETED', 'REJECTED'
-    
-    -- Consent tracking
-    consent JSONB,
-    
-    -- Timestamps
-    submitted_at TIMESTAMPTZ DEFAULT NOW(),
-    kyc_submitted_at TIMESTAMPTZ,
-    kyc_verified_at TIMESTAMPTZ,
-    card_assigned_at TIMESTAMPTZ,
-    completed_at TIMESTAMPTZ,
-    updated_at TIMESTAMPTZ DEFAULT NOW(),
-    
-    -- Metadata
-    metadata JSONB DEFAULT '{}'::jsonb
-);
-
--- Create indexes for performance
-CREATE INDEX idx_card_applications_user ON card_applications(user_id);
-CREATE INDEX idx_card_applications_status ON card_applications(status);
-CREATE INDEX idx_card_applications_phone ON card_applications(phone);
-CREATE INDEX idx_card_applications_email ON card_applications(email);
-
--- Add trigger for updated_at
-CREATE OR REPLACE FUNCTION update_card_applications_updated_at()
-RETURNS TRIGGER AS $$
-BEGIN
-    NEW.updated_at = NOW();
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE TRIGGER trg_card_applications_updated
-    BEFORE UPDATE ON card_applications
-    FOR EACH ROW
-    EXECUTE FUNCTION update_card_applications_updated_at();
-
-
-CREATE TABLE card_applications (
-    application_id VARCHAR(50) PRIMARY KEY,
-    user_id BIGINT REFERENCES users(user_id) NOT NULL,
-    card_id BIGINT REFERENCES message_cards(card_id),
-    full_name VARCHAR(200) NOT NULL,
-    id_number VARCHAR(50) NOT NULL,
-    id_type VARCHAR(30) NOT NULL,
-    date_of_birth DATE NOT NULL,
-    phone VARCHAR(20) NOT NULL,
-    email VARCHAR(150) NOT NULL,
-    address JSONB,
-    delivery_address JSONB,
-    occupation VARCHAR(100),
-    employer VARCHAR(200),
-    income_range VARCHAR(50),
-    source_of_funds TEXT,
-    card_type VARCHAR(20) NOT NULL,
-    delivery_method VARCHAR(50),
-    branch_location VARCHAR(200),
-    status VARCHAR(30) DEFAULT 'PENDING_KYC',
-    consent JSONB,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    submitted_at TIMESTAMPTZ DEFAULT NOW(),
-    kyc_submitted_at TIMESTAMPTZ,
-    kyc_verified_at TIMESTAMPTZ,
-    card_assigned_at TIMESTAMPTZ,
-    completed_at TIMESTAMPTZ,
-    updated_at TIMESTAMPTZ DEFAULT NOW(),
-    
-    metadata JSONB DEFAULT '{}'::jsonb
-);
-
--- Create indexes for performance
-CREATE INDEX idx_card_applications_user ON card_applications(user_id);
-CREATE INDEX idx_card_applications_status ON card_applications(status);
-CREATE INDEX idx_card_applications_phone ON card_applications(phone);
-CREATE INDEX idx_card_applications_email ON card_applications(email);
-CREATE INDEX idx_card_applications_created ON card_applications(created_at);
-
-CREATE OR REPLACE FUNCTION update_card_applications_updated_at()
-RETURNS TRIGGER AS $$
-BEGIN
-    NEW.updated_at = NOW();
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE TRIGGER trg_card_applications_updated
-    BEFORE UPDATE ON card_applications
-    FOR EACH ROW
-    EXECUTE FUNCTION update_card_applications_updated_at();
-
-ALTER TABLE message_cards 
-ADD COLUMN IF NOT EXISTS cardholder_name VARCHAR(200),
-ADD COLUMN IF NOT EXISTS user_id BIGINT REFERENCES users(user_id),
-ADD COLUMN IF NOT EXISTS batch_assigned_at TIMESTAMPTZ,
-ADD COLUMN IF NOT EXISTS delivery_method VARCHAR(50),
-ADD COLUMN IF NOT EXISTS delivery_address JSONB,
-ADD COLUMN IF NOT EXISTS delivery_status VARCHAR(30),
-ADD COLUMN IF NOT EXISTS batch_sequence INT,
-ADD COLUMN IF NOT EXISTS lifecycle_status VARCHAR(30) NOT NULL DEFAULT 'IN_BATCH',
-ADD COLUMN IF NOT EXISTS financial_status VARCHAR(20) NOT NULL DEFAULT 'UNFUNDED',
-ADD COLUMN IF NOT EXISTS initial_amount NUMERIC(20,4) DEFAULT 0,
-ADD COLUMN IF NOT EXISTS remaining_amount NUMERIC(20,4) DEFAULT 0,
-ADD COLUMN IF NOT EXISTS currency CHAR(3) DEFAULT 'BWP',
-ADD COLUMN IF NOT EXISTS activated_at TIMESTAMPTZ,
-ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMPTZ,
-ADD COLUMN IF NOT EXISTS blocked_at TIMESTAMPTZ,
-ADD COLUMN IF NOT EXISTS block_reason TEXT,
-ADD COLUMN IF NOT EXISTS daily_limit NUMERIC(20,4),
-ADD COLUMN IF NOT EXISTS monthly_limit NUMERIC(20,4),
-ADD COLUMN IF NOT EXISTS atm_daily_limit NUMERIC(20,4),
-ADD COLUMN IF NOT EXISTS pin_hash VARCHAR(255),
-ADD COLUMN IF NOT EXISTS hold_reference VARCHAR(100) REFERENCES hold_transactions(hold_reference),
-ADD COLUMN IF NOT EXISTS swap_reference VARCHAR(100) REFERENCES swap_requests(swap_uuid);
-
-
--- Create indexes for performance
-CREATE INDEX IF NOT EXISTS idx_message_cards_user ON message_cards(user_id);
-CREATE INDEX IF NOT EXISTS idx_message_cards_hold ON message_cards(hold_reference);
-CREATE INDEX IF NOT EXISTS idx_message_cards_lifecycle ON message_cards(lifecycle_status);
-
--- =========================================================
--- CARD TRANSACTIONS TABLE
--- Tracks all card transactions (loads, purchases, ATM withdrawals)
--- =========================================================
-CREATE TABLE IF NOT EXISTS card_transactions (
-    transaction_id BIGSERIAL PRIMARY KEY,
-    card_id BIGINT NOT NULL REFERENCES message_cards(card_id),
-    
-    -- Transaction details
-    transaction_type VARCHAR(30) NOT NULL,
-    -- 'ISSUANCE', 'LOAD', 'ATM_WITHDRAWAL', 'PURCHASE', 'REFUND', 'VOID', 'AUTHORIZATION'
-    
-    amount NUMERIC(20,4) NOT NULL,
-    currency CHAR(3) DEFAULT 'BWP',
-    
-    -- Authorization
-    auth_code VARCHAR(20),
-    auth_status VARCHAR(20) DEFAULT 'APPROVED',
-    -- 'APPROVED', 'DECLINED', 'PENDING', 'REVERSED'
-    
-    -- Merchant/ATM details
-    merchant_name VARCHAR(200),
-    merchant_id VARCHAR(50),
-    merchant_category VARCHAR(10),
-    terminal_id VARCHAR(50),
-    
-    -- ATM specific
-    atm_id VARCHAR(50),
-    atm_location VARCHAR(200),
-    
-    -- Channel
-    channel VARCHAR(20), -- 'POS', 'ATM', 'ECOMMERCE', 'MOTO', 'LOAD'
-    
-    -- Links
-    settlement_queue_id BIGINT REFERENCES settlement_queue(id),
-    hold_reference VARCHAR(100),
-    reference VARCHAR(100),
-    
-    -- Timestamps
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    settled_at TIMESTAMPTZ,
-    
-    -- Response codes
-    response_code VARCHAR(2),
-    response_message TEXT
-);
-
--- Create indexes for performance
-CREATE INDEX idx_card_transactions_card ON card_transactions(card_id);
-CREATE INDEX idx_card_transactions_date ON card_transactions(created_at);
-CREATE INDEX idx_card_transactions_auth ON card_transactions(auth_code);
-
-CREATE TABLE IF NOT EXISTS card_authorizations (
-    authorization_id SERIAL PRIMARY KEY,
-    swap_id INTEGER NOT NULL,
-    swap_reference VARCHAR(64) NOT NULL,
-    card_suffix VARCHAR(10) NOT NULL,
-    authorized_amount DECIMAL(10,2) NOT NULL,
-    remaining_balance DECIMAL(10,2) NOT NULL,
-    hold_reference VARCHAR(64) NOT NULL,
-    source_institution VARCHAR(50) NOT NULL,
-    fee_amount DECIMAL(10,2) DEFAULT 0.00,
-    vat_amount DECIMAL(10,2) DEFAULT 0.00,
-    status VARCHAR(20) DEFAULT 'ACTIVE',
-    expiry_at TIMESTAMP NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_swap_ref (swap_reference),
-    INDEX idx_card_suffix (card_suffix),
-    INDEX idx_hold_ref (hold_reference)
-);
-
-ALTER TABLE hold_transactions ADD COLUMN IF NOT EXISTS source_institution VARCHAR(50);
-
-
-ALTER TABLE hold_transactions ADD COLUMN IF NOT EXISTS source_institution VARCHAR(50);
