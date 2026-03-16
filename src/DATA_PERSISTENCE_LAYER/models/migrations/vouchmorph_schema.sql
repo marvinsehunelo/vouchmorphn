@@ -1209,3 +1209,243 @@ COMMENT ON TABLE api_message_logs IS 'Logs of all API calls to/from participants
 COMMENT ON TABLE message_cards IS 'Virtual and physical cards issued to users';
 COMMENT ON TABLE card_applications IS 'Card applications from users';
 
+
+ALTER TABLE admins 
+ADD COLUMN IF NOT EXISTS full_name VARCHAR(100),
+ADD COLUMN IF NOT EXISTS country_code VARCHAR(2),
+ADD COLUMN IF NOT EXISTS mfa_secret VARCHAR(255),
+ADD COLUMN IF NOT EXISTS last_login_ip INET,
+ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ,
+ADD COLUMN IF NOT EXISTS created_by INTEGER REFERENCES admins(admin_id),
+ADD COLUMN IF NOT EXISTS updated_by INTEGER REFERENCES admins(admin_id),
+ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+
+ALTER TABLE audit_logs 
+ADD COLUMN IF NOT EXISTS integrity_hash VARCHAR(64),
+ADD COLUMN IF NOT EXISTS timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
+
+-- Add the integrity hash trigger
+CREATE OR REPLACE FUNCTION audit_log_integrity_trigger()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.integrity_hash = encode(
+        sha256(
+            COALESCE(NEW.timestamp::text, '') || 
+            COALESCE(NEW.entity_type, '') || 
+            COALESCE(NEW.entity_id::text, '') || 
+            COALESCE(NEW.performed_by_id::text, '') || 
+            COALESCE(NEW.action, '')
+        ),
+        'hex'
+    );
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_audit_logs_integrity ON audit_logs;
+CREATE TRIGGER trg_audit_logs_integrity
+    BEFORE INSERT ON audit_logs
+    FOR EACH ROW
+    EXECUTE FUNCTION audit_log_integrity_trigger();
+
+-- =========================================================
+-- SECTION 17: REGULATORY COMPLIANCE (Bank of Botswana)
+-- 7-Year Audit Trail Requirements
+-- =========================================================
+
+-- 17.1 Admin Actions Log
+CREATE TABLE admin_actions (
+    action_id BIGSERIAL PRIMARY KEY,
+    admin_id INTEGER NOT NULL REFERENCES admins(admin_id),
+    action_type VARCHAR(50) NOT NULL, -- LOGIN, LOGOUT, CREATE, UPDATE, DELETE, EXPORT, REPORT
+    entity_type VARCHAR(50), -- admin, transaction, settlement, report
+    entity_id VARCHAR(100),
+    ip_address INET,
+    user_agent TEXT,
+    request_data JSONB,
+    response_data JSONB,
+    status VARCHAR(20) DEFAULT 'SUCCESS',
+    error_message TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 17.2 Regulatory Reports
+CREATE TABLE regulatory_reports (
+    report_id BIGSERIAL PRIMARY KEY,
+    report_type VARCHAR(50) NOT NULL, -- DAILY, WEEKLY, MONTHLY, QUARTERLY, ANNUAL
+    report_date DATE NOT NULL,
+    generated_by INTEGER NOT NULL REFERENCES admins(admin_id),
+    generated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    report_format VARCHAR(10) NOT NULL, -- PDF, CSV, JSON, XML
+    report_data JSONB,
+    file_path VARCHAR(255),
+    integrity_hash VARCHAR(64), -- SHA-256 for non-repudiation
+    regulator_acknowledged BOOLEAN DEFAULT FALSE,
+    regulator_acknowledged_at TIMESTAMPTZ,
+    regulator_notes TEXT
+);
+
+-- 17.3 Regulator Notifications
+CREATE TABLE regulator_notifications (
+    notification_id BIGSERIAL PRIMARY KEY,
+    notification_type VARCHAR(50) NOT NULL, -- SETTLEMENT, FRAUD_ALERT, LIMIT_BREACH
+    severity VARCHAR(20) NOT NULL, -- INFO, WARNING, CRITICAL
+    title VARCHAR(200) NOT NULL,
+    message TEXT NOT NULL,
+    related_entity_type VARCHAR(50),
+    related_entity_id VARCHAR(100),
+    is_read BOOLEAN DEFAULT FALSE,
+    read_by INTEGER REFERENCES admins(admin_id),
+    read_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 17.4 Settlement Reports (For regulator download)
+CREATE TABLE settlement_reports (
+    settlement_report_id BIGSERIAL PRIMARY KEY,
+    report_date DATE NOT NULL,
+    cycle_id INTEGER,
+    total_settlements INTEGER NOT NULL,
+    total_amount DECIMAL(18,2) NOT NULL,
+    net_positions JSONB, -- Bilateral net positions
+    participant_breakdown JSONB,
+    biss_references JSONB,
+    generated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    report_hash VARCHAR(64) UNIQUE
+);
+
+-- =========================================================
+-- INDEXES FOR REGULATORY TABLES
+-- =========================================================
+
+CREATE INDEX idx_admin_actions_admin ON admin_actions(admin_id);
+CREATE INDEX idx_admin_actions_type ON admin_actions(action_type);
+CREATE INDEX idx_admin_actions_created ON admin_actions(created_at);
+
+CREATE INDEX idx_regulatory_reports_type_date ON regulatory_reports(report_type, report_date);
+
+CREATE INDEX idx_regulator_notifications_read ON regulator_notifications(is_read);
+CREATE INDEX idx_regulator_notifications_severity ON regulator_notifications(severity);
+
+CREATE INDEX idx_settlement_reports_date ON settlement_reports(report_date);
+
+-- =========================================================
+-- COMPLETE ROLES TABLE RESET
+-- Drop existing and recreate with enhanced structure
+-- =========================================================
+
+-- First, temporarily disable foreign key constraints
+-- (since admins and users reference roles)
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_id_fkey;
+ALTER TABLE admins DROP CONSTRAINT IF EXISTS admins_role_id_fkey;
+
+-- Now drop and recreate the roles table
+DROP TABLE IF EXISTS roles CASCADE;
+
+-- Create enhanced roles table
+CREATE TABLE roles (
+    role_id INTEGER PRIMARY KEY,
+    role_name VARCHAR(50) NOT NULL UNIQUE,
+    role_level INTEGER NOT NULL DEFAULT 999, -- 100=GLOBAL, 200=COUNTRY, 300=REGULATOR, 400=COMPLIANCE, 500=AUDITOR, 600=SUPPORT, 999=USER
+    description TEXT,
+    
+    -- Permission flags
+    can_manage_admins BOOLEAN DEFAULT FALSE,
+    can_view_transactions BOOLEAN DEFAULT TRUE,
+    can_edit_config BOOLEAN DEFAULT FALSE,
+    can_broadcast BOOLEAN DEFAULT FALSE,
+    can_trigger_cron BOOLEAN DEFAULT FALSE,
+    can_generate_reports BOOLEAN DEFAULT TRUE,
+    can_export_data BOOLEAN DEFAULT FALSE,
+    can_view_audit_logs BOOLEAN DEFAULT FALSE,
+    
+    -- For backward compatibility with existing JSONB permissions
+    permissions JSONB DEFAULT '[]'::jsonb,
+    
+    -- Timestamps
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+-- =========================================================
+-- INSERT ALL ROLES (Combined original + regulatory)
+-- =========================================================
+
+INSERT INTO roles (role_id, role_name, role_level, description, 
+                   can_manage_admins, can_view_transactions, can_edit_config, 
+                   can_broadcast, can_trigger_cron, can_generate_reports, 
+                   can_export_data, can_view_audit_logs, permissions) VALUES
+
+-- Original roles from your schema
+(1, 'user', 999, 'Regular system user',
+ FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE,
+ '["basic_access", "create_swaps", "view_own_transactions"]'::jsonb),
+
+(2, 'admin', 200, 'System administrator',
+ TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE,
+ '["full_access", "manage_users", "manage_swaps", "view_all_transactions"]'::jsonb),
+
+-- Regulatory roles (Bank of Botswana compliance)
+(3, 'REGULATOR', 300, 'Bank of Botswana supervisory staff',
+ FALSE, TRUE, FALSE, FALSE, FALSE, TRUE, FALSE, TRUE,
+ '["view_audit_logs", "view_transactions", "view_reports", "regulatory_oversight"]'::jsonb),
+
+(4, 'COMPLIANCE', 400, 'AML/KYC monitoring officer',
+ FALSE, TRUE, FALSE, FALSE, FALSE, TRUE, TRUE, TRUE,
+ '["view_kyc", "approve_kyc", "view_audit_logs", "fraud_investigation"]'::jsonb),
+
+(5, 'AUDITOR', 500, 'External/Internal audit',
+ FALSE, TRUE, FALSE, FALSE, FALSE, TRUE, TRUE, TRUE,
+ '["view_audit_logs", "view_transactions", "view_reports", "export_data"]'::jsonb),
+
+(6, 'SUPPORT', 600, 'Customer service representative',
+ FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE,
+ '["view_basic_info", "customer_support"]'::jsonb),
+
+-- Keep super_admin from original (highest level)
+(999, 'super_admin', 100, 'Super administrator (Global Owner)',
+ TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE,
+ '["full_access", "manage_admins", "system_configuration"]'::jsonb)
+
+ON CONFLICT (role_id) DO UPDATE SET
+    role_name = EXCLUDED.role_name,
+    role_level = EXCLUDED.role_level,
+    description = EXCLUDED.description,
+    can_manage_admins = EXCLUDED.can_manage_admins,
+    can_view_transactions = EXCLUDED.can_view_transactions,
+    can_edit_config = EXCLUDED.can_edit_config,
+    can_broadcast = EXCLUDED.can_broadcast,
+    can_trigger_cron = EXCLUDED.can_trigger_cron,
+    can_generate_reports = EXCLUDED.can_generate_reports,
+    can_export_data = EXCLUDED.can_export_data,
+    can_view_audit_logs = EXCLUDED.can_view_audit_logs,
+    permissions = EXCLUDED.permissions,
+    updated_at = CURRENT_TIMESTAMP;
+
+-- =========================================================
+-- RESTORE FOREIGN KEY CONSTRAINTS
+-- =========================================================
+
+-- Re-add constraints to users table
+ALTER TABLE users 
+ADD CONSTRAINT users_role_id_fkey 
+FOREIGN KEY (role_id) REFERENCES roles(role_id) 
+ON DELETE SET NULL DEFAULT 1;
+
+-- Update any users with NULL role_id to default (user role)
+UPDATE users SET role_id = 1 WHERE role_id IS NULL;
+
+-- Re-add constraints to admins table
+ALTER TABLE admins 
+ADD CONSTRAINT admins_role_id_fkey 
+FOREIGN KEY (role_id) REFERENCES roles(role_id);
+
+-- =========================================================
+-- VERIFY THE ROLES
+-- =========================================================
+
+-- Check all roles were inserted correctly
+SELECT role_id, role_name, role_level, description,
+       can_manage_admins, can_view_audit_logs, can_generate_reports
+FROM roles
+ORDER BY role_level, role_id;
