@@ -40,7 +40,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         // MFA verification
         $result = $auth->verifyMfa($_POST['mfa_code'], $systemCountry);
         if ($result['success']) {
-            header('Location: dashboard.php');
+            header('Location: admin_dashboard.php');
             exit;
         } else {
             $error = $result['message'];
@@ -60,7 +60,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $mfaRequired = true;
                     $adminId = $result['admin_id'];
                 } else {
-                    header('Location: dashboard.php');
+                    header('Location: admin_dashboard.php');
                     exit;
                 }
             } else {
