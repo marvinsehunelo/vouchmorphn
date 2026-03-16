@@ -8,7 +8,6 @@ require_once __DIR__ . '/../../../src/DATA_PERSISTENCE_LAYER/config/DBConnection
 use ADMIN_LAYER\Auth\AdminAuth;
 use DATA_PERSISTENCE_LAYER\config\DBConnection;
 
-// Check authentication
 $config = require __DIR__ . '/../../../src/CORE_CONFIG/load_country.php';
 $db = DBConnection::getInstance($config['db']['swap']);
 $auth = new AdminAuth($db);
@@ -39,6 +38,5 @@ try {
     
     echo json_encode($swaps);
 } catch (Exception $e) {
-    http_response_code(500);
-    echo json_encode(['error' => $e->getMessage()]);
+    echo json_encode([]);
 }
