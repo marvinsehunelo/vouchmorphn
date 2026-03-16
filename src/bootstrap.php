@@ -22,6 +22,7 @@ $projectRoot = dirname(__DIR__);
 
 spl_autoload_register(function ($class) use ($projectRoot) {
     $prefixes = [
+        'ADMIN_LAYER\\'            => $projectRoot . '/src/ADMIN_LAYER/', 
         'DFSP_ADAPTER_LAYER\\'     => $projectRoot . '/src/DFSP_ADAPTER_LAYER/',
         'BUSINESS_LOGIC_LAYER\\'   => $projectRoot . '/src/BUSINESS_LOGIC_LAYER/',
         'DATA_PERSISTENCE_LAYER\\' => $projectRoot . '/src/DATA_PERSISTENCE_LAYER/',
