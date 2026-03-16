@@ -17,9 +17,17 @@ use ADMIN_LAYER\Auth\AdminAuth;
 use ADMIN_LAYER\Middleware\RoleMiddleware;
 use DATA_PERSISTENCE_LAYER\config\DBConnection;
 
-// Initialize
-$config = require __DIR__ . '/../../src/CORE_CONFIG/load_country.php';
-$db = DBConnection::getInstance($config['db']['swap']);
+// Initialize - Use bootstrap's DB connection instead of creating new one
+// The bootstrap already created $pdo and set it in $GLOBALS
+if (!isset($GLOBALS['databases']['primary']) || !($GLOBALS['databases']['primary'] instanceof PDO)) {
+    error_log("[ADMIN] WARNING: Global PDO not available, creating new connection");
+    $config = require PROJECT_ROOT . '/src/CORE_CONFIG/load_country.php';
+    $db = DBConnection::getInstance($config['db']['swap']);
+} else {
+    $db = $GLOBALS['databases']['primary'];
+    error_log("[ADMIN] Using global PDO connection");
+}
+
 $auth = new AdminAuth($db);
 $roleMiddleware = new RoleMiddleware();
 
@@ -31,19 +39,52 @@ if (!$admin) {
 }
 
 // Get role-based permissions
-$role = $admin['role_name'];
+$role = $admin['role_name'] ?? 'user';
 $visibleMetrics = $roleMiddleware->getVisibleMetrics($role);
 $hasAccess = function($permission) use ($roleMiddleware, $role) {
     return $roleMiddleware->hasAccess($role, $permission);
 };
 
 // Load country-specific data
-$countryCode = $admin['country'];
-$participantsPath = __DIR__ . "/../../src/CORE_CONFIG/countries/{$countryCode}/participants_{$countryCode}.json";
+$countryCode = $admin['country'] ?? SYSTEM_COUNTRY ?? 'BW';
+$participantsPath = PROJECT_ROOT . "/src/CORE_CONFIG/countries/{$countryCode}/participants_{$countryCode}.json";
 $participants = [];
 if (file_exists($participantsPath)) {
     $data = json_decode(file_get_contents($participantsPath), true);
     $participants = $data['participants'] ?? $data;
+}
+
+// Get system metrics
+$metrics = [];
+try {
+    // Get today's transaction count
+    $stmt = $db->prepare("SELECT COUNT(*) FROM swap_requests WHERE DATE(created_at) = CURRENT_DATE");
+    $stmt->execute();
+    $metrics['today_transactions'] = $stmt->fetchColumn();
+    
+    // Get today's volume
+    $stmt = $db->prepare("SELECT COALESCE(SUM(amount), 0) FROM swap_requests WHERE DATE(created_at) = CURRENT_DATE");
+    $stmt->execute();
+    $metrics['today_volume'] = number_format((float)$stmt->fetchColumn(), 2);
+    
+    // Get active holds
+    $stmt = $db->prepare("SELECT COUNT(*) FROM hold_transactions WHERE status = 'ACTIVE'");
+    $stmt->execute();
+    $metrics['active_holds'] = $stmt->fetchColumn();
+    
+    // Get pending settlements
+    $stmt = $db->prepare("SELECT COUNT(*) FROM settlement_queue WHERE status = 'PENDING'");
+    $stmt->execute();
+    $metrics['pending_settlements'] = $stmt->fetchColumn();
+    
+} catch (Exception $e) {
+    error_log("[ADMIN] Error fetching metrics: " . $e->getMessage());
+    $metrics = [
+        'today_transactions' => 0,
+        'today_volume' => '0.00',
+        'active_holds' => 0,
+        'pending_settlements' => 0
+    ];
 }
 ?>
 <!DOCTYPE html>
@@ -442,14 +483,14 @@ if (file_exists($participantsPath)) {
     <header class="admin-header">
         <div class="header-left">
             <div class="logo">VOUCHMORPH <span>ADMIN</span></div>
-            <div class="country-badge"><?php echo $countryCode; ?> · SYSTEM</div>
+            <div class="country-badge"><?php echo htmlspecialchars($countryCode); ?> · SYSTEM</div>
         </div>
         <div class="user-info">
             <div class="user-details">
-                <div class="user-name"><?php echo htmlspecialchars($admin['username']); ?></div>
-                <div class="user-role"><?php echo htmlspecialchars($admin['role_name']); ?></div>
+                <div class="user-name"><?php echo htmlspecialchars($admin['username'] ?? 'Admin'); ?></div>
+                <div class="user-role"><?php echo htmlspecialchars($role); ?></div>
             </div>
-            <a href="logout.php" class="logout-btn">LOGOUT</a>
+            <a href="admin_logout.php" class="logout-btn">LOGOUT</a>
         </div>
     </header>
 
@@ -479,62 +520,138 @@ if (file_exists($participantsPath)) {
 
     <main class="admin-content">
         <div class="content-header">
-            <h1><?php echo match($_GET['view'] ?? 'dashboard') {
-                'dashboard' => 'EXECUTIVE DASHBOARD',
-                'transactions' => 'TRANSACTION MONITORING',
-                'audit' => 'AUDIT TRAIL',
-                'reports' => 'REGULATORY REPORTS',
-                'admins' => 'ADMINISTRATOR MANAGEMENT',
-                'config' => 'SYSTEM CONFIGURATION',
-                default => 'DASHBOARD'
-            }; ?></h1>
+            <h1>EXECUTIVE DASHBOARD</h1>
             <div class="timestamp">Last updated: <?php echo date('Y-m-d H:i:s'); ?></div>
         </div>
 
-        <?php
-        $view = $_GET['view'] ?? 'dashboard';
-        
-        // Role-based view routing
-        if ($view === 'dashboard') {
-            include 'views/dashboard_view.php';
-        } elseif ($view === 'transactions' && $hasAccess('view_transactions')) {
-            include 'views/transactions_view.php';
-        } elseif ($view === 'audit' && $hasAccess('view_audit_logs')) {
-            include 'views/audit_view.php';
-        } elseif ($view === 'reports' && $hasAccess('generate_reports')) {
-            include 'views/reports_view.php';
-        } elseif ($view === 'admins' && $hasAccess('manage_admins')) {
-            include 'views/admins_view.php';
-        } elseif ($view === 'config' && $hasAccess('edit_config')) {
-            include 'views/config_view.php';
-        } else {
-            echo '<div class="card"><p>You do not have permission to view this section.</p></div>';
-        }
-        ?>
+        <!-- METRICS GRID -->
+        <div class="metrics-grid" id="metrics-data">
+            <div class="metric-card">
+                <div class="metric-label">TODAY'S TRANSACTIONS</div>
+                <div class="metric-value" id="metric-today_transactions"><?php echo $metrics['today_transactions']; ?></div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">TODAY'S VOLUME (BWP)</div>
+                <div class="metric-value" id="metric-today_volume"><?php echo $metrics['today_volume']; ?></div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">ACTIVE HOLDS</div>
+                <div class="metric-value" id="metric-active_holds"><?php echo $metrics['active_holds']; ?></div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">PENDING SETTLEMENTS</div>
+                <div class="metric-value" id="metric-pending_settlements"><?php echo $metrics['pending_settlements']; ?></div>
+            </div>
+        </div>
+
+        <!-- QUICK STATS ROW -->
+        <div class="grid-2">
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">PARTICIPANTS OVERVIEW</span>
+                    <span class="card-badge"><?php echo count($participants); ?> ACTIVE</span>
+                </div>
+                <div class="table-responsive">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Provider</th>
+                                <th>Type</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php 
+                            $count = 0;
+                            foreach ($participants as $code => $p): 
+                                if ($count++ >= 5) break;
+                                $type = $p['type'] ?? $p['category'] ?? 'Unknown';
+                                $status = $p['status'] ?? 'ACTIVE';
+                            ?>
+                            <tr>
+                                <td><?php echo htmlspecialchars($code); ?></td>
+                                <td><?php echo htmlspecialchars($type); ?></td>
+                                <td><span class="status status-success"><?php echo htmlspecialchars($status); ?></span></td>
+                            </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">SYSTEM HEALTH</span>
+                    <span class="card-badge">LIVE</span>
+                </div>
+                <div style="padding: 20px;">
+                    <p><strong>Country:</strong> <?php echo htmlspecialchars($countryCode); ?></p>
+                    <p><strong>Environment:</strong> <?php echo htmlspecialchars(getenv('APP_ENV') ?: 'production'); ?></p>
+                    <p><strong>Database:</strong> Connected</p>
+                    <p><strong>Last Cron:</strong> <?php echo date('Y-m-d H:i:s', filemtime(PROJECT_ROOT . '/src/APP_LAYER/logs/cron.log') ?: time()); ?></p>
+                    <p><strong>PHP Version:</strong> <?php echo phpversion(); ?></p>
+                </div>
+            </div>
+        </div>
+
+        <!-- REPORTS SECTION (for regulators/compliance) -->
+        <?php if ($hasAccess('generate_reports')): ?>
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">REGULATORY REPORTS</span>
+                <span class="card-badge">BANK OF BOTSWANA</span>
+            </div>
+            <div class="reports-grid">
+                <div class="report-card" onclick="openReport('reports/daily_settlement.php')">
+                    <div class="report-icon">📊</div>
+                    <div class="report-title">Daily Settlement Report</div>
+                    <div class="report-desc">End-of-day net positions and settlement amounts</div>
+                </div>
+                <div class="report-card" onclick="openReport('reports/transaction_audit.php')">
+                    <div class="report-icon">🔍</div>
+                    <div class="report-title">Transaction Audit Log</div>
+                    <div class="report-desc">7-year audit trail of all swaps</div>
+                </div>
+                <div class="report-card" onclick="openReport('reports/fraud_monitoring.php')">
+                    <div class="report-icon">⚠️</div>
+                    <div class="report-title">Fraud Monitoring</div>
+                    <div class="report-desc">Suspicious transaction patterns</div>
+                </div>
+            </div>
+        </div>
+        <?php endif; ?>
     </main>
 
     <footer class="admin-footer">
-        <p>VOUCHMORPH · <?php echo $countryCode; ?> · PRODUCTION SYSTEM</p>
+        <p>VOUCHMORPH · <?php echo htmlspecialchars($countryCode); ?> · PRODUCTION SYSTEM</p>
         <p style="margin-top: 5px;">Bank of Botswana Regulatory Sandbox Participant</p>
     </footer>
+
+    <!-- REPORT MODAL -->
+    <div id="reportModal" class="modal">
+        <div class="modal-content">
+            <span class="modal-close" onclick="document.getElementById('reportModal').style.display='none'">&times;</span>
+            <div id="reportContent"></div>
+        </div>
+    </div>
 
     <script>
         // Auto-refresh metrics every 30 seconds
         setInterval(() => {
-            if (document.getElementById('metrics-data')) {
-                fetch('api/get_metrics.php')
-                    .then(res => res.json())
-                    .then(data => updateMetrics(data))
-                    .catch(err => console.error('Metrics update failed:', err));
-            }
+            fetch('api/get_metrics.php')
+                .then(res => res.json())
+                .then(data => {
+                    if (data.today_transactions !== undefined) 
+                        document.getElementById('metric-today_transactions').textContent = data.today_transactions;
+                    if (data.today_volume !== undefined) 
+                        document.getElementById('metric-today_volume').textContent = data.today_volume;
+                    if (data.active_holds !== undefined) 
+                        document.getElementById('metric-active_holds').textContent = data.active_holds;
+                    if (data.pending_settlements !== undefined) 
+                        document.getElementById('metric-pending_settlements').textContent = data.pending_settlements;
+                })
+                .catch(err => console.error('Metrics update failed:', err));
         }, 30000);
-
-        function updateMetrics(data) {
-            Object.keys(data).forEach(key => {
-                const el = document.getElementById(`metric-${key}`);
-                if (el) el.textContent = data[key];
-            });
-        }
 
         function openReport(url) {
             const modal = document.getElementById('reportModal');
@@ -548,7 +665,7 @@ if (file_exists($participantsPath)) {
                     content.innerHTML = html;
                 })
                 .catch(err => {
-                    content.innerHTML = '<p>Error loading report</p>';
+                    content.innerHTML = '<p>Error loading report: ' + err.message + '</p>';
                 });
         }
     </script>
