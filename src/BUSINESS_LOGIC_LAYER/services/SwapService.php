@@ -1540,7 +1540,6 @@ private function processMessageBasedCardLoad(int $swapId, string $swapRef, array
     
     // DO NOT debit funds here - Keep the hold active at source
 }
-    }
 
     /**
      * Process card issuance - Handles both message-based and balance-based cards
