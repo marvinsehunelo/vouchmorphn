@@ -1,11 +1,18 @@
 <?php
 declare(strict_types=1);
 
-require_once __DIR__ . '/../../src/bootstrap.php';
-require_once __DIR__ . '/../../src/ADMIN_LAYER/Auth/AdminAuth.php';
-require_once __DIR__ . '/../../src/ADMIN_LAYER/Middleware/RoleMiddleware.php';
-require_once __DIR__ . '/../../src/DATA_PERSISTENCE_LAYER/config/DBConnection.php';
+// Define project root explicitly
+define('PROJECT_ROOT', dirname(__DIR__, 2)); // Goes up 2 levels: /public/admin/ -> /var/www/html/
 
+// Debug: Check paths
+error_log("[ADMIN] PROJECT_ROOT: " . PROJECT_ROOT);
+error_log("[ADMIN] Bootstrap path: " . PROJECT_ROOT . '/src/bootstrap.php');
+error_log("[ADMIN] Bootstrap exists: " . (file_exists(PROJECT_ROOT . '/src/bootstrap.php') ? 'YES' : 'NO'));
+
+// Load bootstrap
+require_once PROJECT_ROOT . '/src/bootstrap.php';
+
+// Now use the autoloader - NO require_once for these classes
 use ADMIN_LAYER\Auth\AdminAuth;
 use ADMIN_LAYER\Middleware\RoleMiddleware;
 use DATA_PERSISTENCE_LAYER\config\DBConnection;
