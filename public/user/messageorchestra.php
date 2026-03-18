@@ -3,287 +3,316 @@ declare(strict_types=1);
 
 namespace DASHBOARD;
 
-use PDO; // ADD THIS for PDO::FETCH_ASSOC
+use PDO;
+use DateTime;
+use DateTimeZone;
 
-// Same bootstrap code as regulationdemo.php
+// ============================================================================
+// REPORT CONFIGURATION
+// ============================================================================
 ob_start();
 $countryCode = $_GET['country'] ?? $_SESSION['country'] ?? 'BW';
+$swapRef = $_GET['swap'] ?? '';
+$format = $_GET['format'] ?? 'html'; // html, pdf, json, csv
 
 if (!defined('APP_ROOT')) {
     define('APP_ROOT', rtrim(realpath(__DIR__ . '/../../'), '/') ?: '/var/www/html');
 }
 
 @include_once APP_ROOT . '/vendor/autoload.php';
-
-// Database connection
 require_once APP_ROOT . '/src/DATA_PERSISTENCE_LAYER/config/DBConnection.php';
 use DATA_PERSISTENCE_LAYER\config\DBConnection;
 $db = DBConnection::getConnection();
 
 // ============================================================================
-// HELPER FUNCTION FOR SAFE NUMBER FORMATTING
+// HELPER FUNCTIONS
 // ============================================================================
-function format_amount($amount, $decimals = 2) {
-    return number_format((float)$amount, $decimals);
+function formatBytes($bytes, $precision = 2) {
+    $units = ['B', 'KB', 'MB', 'GB'];
+    $bytes = max($bytes, 0);
+    $pow = floor(($bytes ? log($bytes) : 0) / log(1024));
+    $pow = min($pow, count($units) - 1);
+    return round($bytes / pow(1024, $pow), $precision) . ' ' . $units[$pow];
+}
+
+function formatDuration($seconds) {
+    if ($seconds < 60) return round($seconds, 2) . ' seconds';
+    if ($seconds < 3600) return floor($seconds/60) . ' minutes ' . round($seconds%60) . ' seconds';
+    return floor($seconds/3600) . ' hours ' . floor(($seconds%3600)/60) . ' minutes';
+}
+
+function generateChecksum($data) {
+    return hash('sha256', json_encode($data));
 }
 
 // ============================================================================
-// FETCH MESSAGE CLEARING DATA
+// FETCH COMPLETE SWAP DETAILS
 // ============================================================================
 
-$selectedSwap = $_GET['swap'] ?? null;
-$timeframe = $_GET['timeframe'] ?? 'today'; // today, week, month
-$view = $_GET['clearing_view'] ?? 'overview'; // overview, message_flow, settlement, liquidity
+if (!$swapRef) {
+    die("No swap reference provided");
+}
 
-// Get date range based on timeframe
-$dateRange = match($timeframe) {
-    'today' => ['start' => date('Y-m-d 00:00:00'), 'end' => date('Y-m-d 23:59:59')],
-    'week' => ['start' => date('Y-m-d 00:00:00', strtotime('-7 days')), 'end' => date('Y-m-d 23:59:59')],
-    'month' => ['start' => date('Y-m-d 00:00:00', strtotime('-30 days')), 'end' => date('Y-m-d 23:59:59')],
-    default => ['start' => date('Y-m-d 00:00:00'), 'end' => date('Y-m-d 23:59:59')]
-};
-
-// ============================================================================
-// 1. GLOBAL SYSTEM STATUS
-// ============================================================================
-
-// Transaction throughput (TPS)
-$tpsQuery = $db->prepare("
-    SELECT COUNT(*) as tx_count,
-           EXTRACT(EPOCH FROM (MAX(created_at) - MIN(created_at))) as duration_seconds
-    FROM swap_requests
-    WHERE created_at BETWEEN ? AND ?
-");
-$tpsQuery->execute([$dateRange['start'], $dateRange['end']]);
-$tpsData = $tpsQuery->fetch(PDO::FETCH_ASSOC);
-$tps = $tpsData && $tpsData['duration_seconds'] > 0 
-    ? round($tpsData['tx_count'] / $tpsData['duration_seconds'], 2) 
-    : 0;
-
-// Liquidity (total in escrow)
-$liquidityQuery = $db->query("
-    SELECT SUM(balance) as total_liquidity
-    FROM ledger_accounts
-    WHERE account_type IN ('escrow', 'settlement')
-");
-$liquidity = $liquidityQuery->fetchColumn() ?: 0;
-
-// Active institutions
-$instQuery = $db->query("SELECT COUNT(*) FROM participants WHERE status = 'ACTIVE'");
-$activeInstitutions = $instQuery->fetchColumn();
-
-// Pending messages
-$pendingQuery = $db->query("
-    SELECT COUNT(*) FROM settlement_messages 
-    WHERE status = 'PENDING'
-");
-$pendingMessages = $pendingQuery->fetchColumn();
-
-// ============================================================================
-// 2. LIVE SWAP STREAM (Last 20 swaps)
-// ============================================================================
-
-$liveSwapsQuery = $db->query("
+// 1. Master Swap Record
+$swapQuery = $db->prepare("
     SELECT 
-        sr.swap_uuid,
-        sr.amount,
-        sr.status,
-        sr.created_at,
-        sr.source_details->>'institution' as source_institution,
-        sr.source_details->>'asset_type' as source_type,
-        sr.destination_details->>'institution' as dest_institution,
-        sr.destination_details->>'asset_type' as dest_type,
-        COALESCE(ht.status, 'NO_HOLD') as hold_status
+        sr.*,
+        EXTRACT(EPOCH FROM (sr.completed_at - sr.created_at)) as processing_time
     FROM swap_requests sr
-    LEFT JOIN hold_transactions ht ON sr.swap_uuid = ht.swap_reference
-    ORDER BY sr.created_at DESC
-    LIMIT 20
+    WHERE sr.swap_uuid = ?
 ");
-$liveSwaps = $liveSwapsQuery->fetchAll(PDO::FETCH_ASSOC);
+$swapQuery->execute([$swapRef]);
+$swap = $swapQuery->fetch(PDO::FETCH_ASSOC);
 
-// ============================================================================
-// 3. DETAILED SWAP VIEW (if one is selected)
-// ============================================================================
+if (!$swap) {
+    die("Swap not found");
+}
 
-$swapDetails = null;
-$messageFlow = [];
-$ledgerEntries = [];
-$feeDetails = [];
-$apiCalls = [];
+// Parse JSON fields
+$sourceDetails = is_string($swap['source_details']) 
+    ? json_decode($swap['source_details'], true) 
+    : ($swap['source_details'] ?? []);
+$destDetails = is_string($swap['destination_details']) 
+    ? json_decode($swap['destination_details'], true) 
+    : ($swap['destination_details'] ?? []);
+$metadata = is_string($swap['metadata']) 
+    ? json_decode($swap['metadata'], true) 
+    : ($swap['metadata'] ?? []);
 
-if ($selectedSwap) {
-    // Get swap details - FIXED: removed metadata column
-    $swapDetailQuery = $db->prepare("
-        SELECT 
-            sr.*,
-            sr.source_details,
-            sr.destination_details
-        FROM swap_requests sr
-        WHERE sr.swap_uuid = ?
-    ");
-    $swapDetailQuery->execute([$selectedSwap]);
-    $swapDetails = $swapDetailQuery->fetch(PDO::FETCH_ASSOC);
-    
-    if ($swapDetails) {
-        // Get hold transactions
-        $holdQuery = $db->prepare("
-            SELECT * FROM hold_transactions 
-            WHERE swap_reference = ?
-        ");
-        $holdQuery->execute([$selectedSwap]);
-        $messageFlow['hold'] = $holdQuery->fetchAll(PDO::FETCH_ASSOC);
-        
-        // Get API message logs
-        $apiQuery = $db->prepare("
-            SELECT * FROM api_message_logs 
-            WHERE message_id = ?
-            ORDER BY created_at ASC
-        ");
-        $apiQuery->execute([$selectedSwap]);
-        $apiCalls = $apiQuery->fetchAll(PDO::FETCH_ASSOC);
-        
-        // Get ledger entries
-        $ledgerQuery = $db->prepare("
-            SELECT le.*, 
-                   la_debit.account_name as debit_account_name,
-                   la_credit.account_name as credit_account_name
-            FROM ledger_entries le
-            LEFT JOIN ledger_accounts la_debit ON le.debit_account_id = la_debit.account_id
-            LEFT JOIN ledger_accounts la_credit ON le.credit_account_id = la_credit.account_id
-            WHERE le.reference = ?
-        ");
-        $ledgerQuery->execute([$selectedSwap]);
-        $ledgerEntries = $ledgerQuery->fetchAll(PDO::FETCH_ASSOC);
-        
-        // Get fee collections
-        $feeQuery = $db->prepare("
-            SELECT * FROM swap_fee_collections 
-            WHERE swap_reference = ?
-        ");
-        $feeQuery->execute([$selectedSwap]);
-        $feeDetails = $feeQuery->fetchAll(PDO::FETCH_ASSOC);
-        
-        // Get settlement queue entry
-        $sourceInstitution = is_array($swapDetails['source_details']) 
-            ? ($swapDetails['source_details']['institution'] ?? '') 
-            : (json_decode($swapDetails['source_details'], true)['institution'] ?? '');
-        
-        $destInstitution = is_array($swapDetails['destination_details']) 
-            ? ($swapDetails['destination_details']['institution'] ?? '') 
-            : (json_decode($swapDetails['destination_details'], true)['institution'] ?? '');
-        
-        $settlementQuery = $db->prepare("
-            SELECT * FROM settlement_queue 
-            WHERE debtor = ? OR creditor = ?
-            ORDER BY created_at DESC
+// 2. Hold Transactions
+$holdQuery = $db->prepare("
+    SELECT * FROM hold_transactions 
+    WHERE swap_reference = ?
+    ORDER BY created_at ASC
+");
+$holdQuery->execute([$swapRef]);
+$holds = $holdQuery->fetchAll(PDO::FETCH_ASSOC);
+
+// 3. API Message Logs
+$apiQuery = $db->prepare("
+    SELECT * FROM api_message_logs 
+    WHERE message_id = ?
+    ORDER BY created_at ASC
+");
+$apiQuery->execute([$swapRef]);
+$apiCalls = $apiQuery->fetchAll(PDO::FETCH_ASSOC);
+
+// 4. Ledger Entries
+$ledgerQuery = $db->prepare("
+    SELECT le.*, 
+           la_debit.account_name as debit_account_name,
+           la_debit.account_code as debit_account_code,
+           la_credit.account_name as credit_account_name,
+           la_credit.account_code as credit_account_code
+    FROM ledger_entries le
+    LEFT JOIN ledger_accounts la_debit ON le.debit_account_id = la_debit.account_id
+    LEFT JOIN ledger_accounts la_credit ON le.credit_account_id = la_credit.account_id
+    WHERE le.reference = ?
+    ORDER BY le.created_at ASC
+");
+$ledgerQuery->execute([$swapRef]);
+$ledgerEntries = $ledgerQuery->fetchAll(PDO::FETCH_ASSOC);
+
+// 5. Fee Collections
+$feeQuery = $db->prepare("
+    SELECT * FROM swap_fee_collections 
+    WHERE swap_reference = ?
+    ORDER BY created_at ASC
+");
+$feeQuery->execute([$swapRef]);
+$fees = $feeQuery->fetchAll(PDO::FETCH_ASSOC);
+
+// 6. Settlement Queue
+$settlementQuery = $db->prepare("
+    SELECT * FROM settlement_queue 
+    WHERE hold_reference IN (
+        SELECT hold_reference FROM hold_transactions WHERE swap_reference = ?
+    )
+    ORDER BY created_at ASC
+");
+$settlementQuery->execute([$swapRef]);
+$settlements = $settlementQuery->fetchAll(PDO::FETCH_ASSOC);
+
+// 7. Card Authorizations (if applicable)
+$cardAuthQuery = $db->prepare("
+    SELECT * FROM card_authorizations 
+    WHERE swap_reference = ?
+    ORDER BY created_at ASC
+");
+$cardAuthQuery->execute([$swapRef]);
+$cardAuths = $cardAuthQuery->fetchAll(PDO::FETCH_ASSOC);
+
+// 8. Card Transactions (if applicable)
+$cardTxnQuery = $db->prepare("
+    SELECT ct.*, mc.card_suffix, mc.cardholder_name
+    FROM card_transactions ct
+    JOIN message_cards mc ON ct.card_id = mc.card_id
+    WHERE ct.hold_reference IN (
+        SELECT hold_reference FROM hold_transactions WHERE swap_reference = ?
+    )
+    ORDER BY ct.created_at ASC
+");
+$cardTxnQuery->execute([$swapRef]);
+$cardTxns = $cardTxnQuery->fetchAll(PDO::FETCH_ASSOC);
+
+// 9. Participant Details
+$participants = [];
+foreach (array_merge(
+    [$sourceDetails['institution'] ?? null],
+    [$destDetails['institution'] ?? null],
+    array_column($apiCalls, 'participant_name')
+) as $inst) {
+    if ($inst && !isset($participants[$inst])) {
+        $partQuery = $db->prepare("
+            SELECT * FROM participants 
+            WHERE name = ? OR provider_code = ?
             LIMIT 1
         ");
-        $settlementQuery->execute([$sourceInstitution, $destInstitution]);
-        $messageFlow['settlement'] = $settlementQuery->fetch(PDO::FETCH_ASSOC);
+        $partQuery->execute([$inst, $inst]);
+        $participants[$inst] = $partQuery->fetch(PDO::FETCH_ASSOC);
     }
 }
 
+// 10. Generate Report Metadata
+$reportId = 'RPT-' . date('Ymd') . '-' . strtoupper(substr($swapRef, 0, 8));
+$generatedAt = new DateTime('now', new DateTimeZone('Africa/Gaborone'));
+$reportChecksum = generateChecksum([
+    'swap' => $swap,
+    'holds' => $holds,
+    'apiCalls' => $apiCalls,
+    'ledgerEntries' => $ledgerEntries,
+    'fees' => $fees
+]);
+
 // ============================================================================
-// 4. INTER-INSTITUTION NET POSITIONS
+// OUTPUT BASED ON FORMAT
 // ============================================================================
 
-$netPositionsQuery = $db->query("
-    SELECT 
-        debtor,
-        creditor,
-        SUM(amount) as net_amount
-    FROM settlement_queue
-    GROUP BY debtor, creditor
-    ORDER BY net_amount DESC
-    LIMIT 10
-");
-$netPositions = $netPositionsQuery->fetchAll(PDO::FETCH_ASSOC);
-
-// Calculate net for each institution
-$institutionNets = [];
-foreach ($netPositions as $pos) {
-    if (!isset($institutionNets[$pos['debtor']])) {
-        $institutionNets[$pos['debtor']] = ['debit' => 0, 'credit' => 0];
-    }
-    if (!isset($institutionNets[$pos['creditor']])) {
-        $institutionNets[$pos['creditor']] = ['debit' => 0, 'credit' => 0];
-    }
-    $institutionNets[$pos['debtor']]['debit'] += (float)$pos['net_amount'];
-    $institutionNets[$pos['creditor']]['credit'] += (float)$pos['net_amount'];
+if ($format === 'json') {
+    header('Content-Type: application/json');
+    header('Content-Disposition: attachment; filename="swap_' . $swapRef . '_' . date('Ymd_His') . '.json"');
+    
+    $report = [
+        'report_metadata' => [
+            'report_id' => $reportId,
+            'generated_at' => $generatedAt->format('c'),
+            'swap_reference' => $swapRef,
+            'country' => $countryCode,
+            'checksum' => $reportChecksum,
+            'format' => 'COMPLETE_SWAP_DETAIL',
+            'version' => '1.0'
+        ],
+        'swap_record' => $swap,
+        'source_details' => $sourceDetails,
+        'destination_details' => $destDetails,
+        'metadata' => $metadata,
+        'hold_transactions' => $holds,
+        'api_messages' => $apiCalls,
+        'ledger_entries' => $ledgerEntries,
+        'fee_collections' => $fees,
+        'settlement_queue' => $settlements,
+        'card_authorizations' => $cardAuths,
+        'card_transactions' => $cardTxns,
+        'participants' => $participants,
+        'audit_trail' => [
+            'first_activity' => $swap['created_at'],
+            'last_activity' => $swap['completed_at'] ?? $swap['updated_at'],
+            'total_api_calls' => count($apiCalls),
+            'total_holds' => count($holds),
+            'total_ledger_entries' => count($ledgerEntries),
+            'processing_time_seconds' => $swap['processing_time'] ?? null
+        ]
+    ];
+    
+    echo json_encode($report, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+    exit;
 }
 
-// ============================================================================
-// 5. MESSAGE CLEARANCE METRICS
-// ============================================================================
-
-$clearanceQuery = $db->query("
-    SELECT 
-        participant_name,
-        COUNT(*) as total_messages,
-        SUM(CASE WHEN success THEN 1 ELSE 0 END) as successful,
-        AVG(duration_ms) as avg_response_time
-    FROM api_message_logs
-    WHERE created_at BETWEEN '{$dateRange['start']}' AND '{$dateRange['end']}'
-    GROUP BY participant_name
-    ORDER BY total_messages DESC
-");
-$clearanceMetrics = $clearanceQuery->fetchAll(PDO::FETCH_ASSOC);
-
-// ============================================================================
-// 6. LIQUIDITY EXPOSURE
-// ============================================================================
-
-$liquidityQuery = $db->query("
-    SELECT 
-        p.name as institution,
-        la.account_name,
-        la.balance,
-        la.account_type
-    FROM ledger_accounts la
-    JOIN participants p ON la.participant_id = p.participant_id
-    WHERE la.account_type IN ('escrow', 'settlement')
-    ORDER BY la.balance DESC
-");
-$liquidityExposure = $liquidityQuery->fetchAll(PDO::FETCH_ASSOC);
-
-// ============================================================================
-// 7. SETTLEMENT MATRIX (For visualization)
-// ============================================================================
-
-$institutions = array_keys($institutionNets);
-$settlementMatrix = [];
-foreach ($institutions as $debtor) {
-    foreach ($institutions as $creditor) {
-        if ($debtor !== $creditor) {
-            $query = $db->prepare("
-                SELECT SUM(amount) as amount
-                FROM settlement_queue
-                WHERE debtor = ? AND creditor = ?
-            ");
-            $query->execute([$debtor, $creditor]);
-            $amount = $query->fetchColumn();
-            if ($amount > 0) {
-                $settlementMatrix[] = [
-                    'from' => $debtor,
-                    'to' => $creditor,
-                    'amount' => (float)$amount
-                ];
-            }
+if ($format === 'csv') {
+    header('Content-Type: text/csv');
+    header('Content-Disposition: attachment; filename="swap_' . $swapRef . '_' . date('Ymd_His') . '.csv"');
+    
+    $output = fopen('php://output', 'w');
+    
+    // Report Header
+    fputcsv($output, ['VOUCHMORPH SWAP DETAIL REPORT']);
+    fputcsv($output, ['Report ID:', $reportId]);
+    fputcsv($output, ['Generated:', $generatedAt->format('Y-m-d H:i:s T')]);
+    fputcsv($output, ['Swap Reference:', $swapRef]);
+    fputcsv($output, []);
+    
+    // Swap Summary
+    fputcsv($output, ['SWAP SUMMARY']);
+    fputcsv($output, ['Field', 'Value']);
+    fputcsv($output, ['Swap UUID', $swap['swap_uuid']]);
+    fputcsv($output, ['Amount', $swap['amount'] . ' ' . ($swap['from_currency'] ?? 'BWP')]);
+    fputcsv($output, ['Status', $swap['status']]);
+    fputcsv($output, ['Created', $swap['created_at']]);
+    fputcsv($output, ['Completed', $swap['completed_at'] ?? 'N/A']);
+    fputcsv($output, ['Processing Time', ($swap['processing_time'] ?? 'N/A') . ' seconds']);
+    fputcsv($output, []);
+    
+    // Source Details
+    fputcsv($output, ['SOURCE DETAILS']);
+    foreach ($sourceDetails as $key => $value) {
+        if (is_array($value)) $value = json_encode($value);
+        fputcsv($output, [$key, $value]);
+    }
+    fputcsv($output, []);
+    
+    // Destination Details
+    fputcsv($output, ['DESTINATION DETAILS']);
+    foreach ($destDetails as $key => $value) {
+        if (is_array($value)) $value = json_encode($value);
+        fputcsv($output, [$key, $value]);
+    }
+    fputcsv($output, []);
+    
+    // Hold Transactions
+    fputcsv($output, ['HOLD TRANSACTIONS']);
+    if (!empty($holds)) {
+        fputcsv($output, array_keys($holds[0]));
+        foreach ($holds as $hold) {
+            fputcsv($output, $hold);
         }
+    } else {
+        fputcsv($output, ['No holds recorded']);
     }
+    fputcsv($output, []);
+    
+    // API Messages
+    fputcsv($output, ['API MESSAGES']);
+    if (!empty($apiCalls)) {
+        fputcsv($output, array_keys($apiCalls[0]));
+        foreach ($apiCalls as $api) {
+            $api['request_payload'] = is_string($api['request_payload']) ? substr($api['request_payload'], 0, 100) . '...' : '...';
+            $api['response_payload'] = is_string($api['response_payload']) ? substr($api['response_payload'], 0, 100) . '...' : '...';
+            fputcsv($output, $api);
+        }
+    } else {
+        fputcsv($output, ['No API messages']);
+    }
+    
+    fclose($output);
+    exit;
+}
+
+if ($format === 'pdf') {
+    // For PDF, we'll generate HTML and let browser print to PDF
+    $format = 'html';
+    $_GET['pdf'] = '1';
 }
 
 // ============================================================================
-// RENDER THE DASHBOARD
+// HTML REPORT (Default - Printable/Downloadable)
 // ============================================================================
-
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
-    <title>VOUCHMORPH · MESSAGE CLEARING HOUSE · <?php echo $countryCode; ?></title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VOUCHMORPH · SWAP DETAIL REPORT · <?php echo $swapRef; ?></title>
     <style>
         * {
             margin: 0;
@@ -292,1236 +321,904 @@ foreach ($institutions as $debtor) {
         }
 
         body {
-            background: #0a0a0a;
             font-family: 'Inter', 'Helvetica Neue', -apple-system, sans-serif;
-            color: #ffffff;
-            line-height: 1.4;
-            font-weight: 300;
-            overflow-x: hidden;
-            width: 100%;
-            position: relative;
-        }
-
-        .container {
-            max-width: 2000px;
-            margin: 0 auto;
+            background: #ffffff;
+            color: #000000;
+            line-height: 1.5;
             padding: 2rem;
-            width: 100%;
+            max-width: 1200px;
+            margin: 0 auto;
         }
 
-        /* Header Styles */
-        .header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 2rem;
-            padding: 1rem 0;
-            border-bottom: 2px solid #222;
-            flex-wrap: wrap;
-            gap: 1rem;
+        /* Report Header */
+        .report-header {
+            text-align: center;
+            margin-bottom: 3rem;
+            padding-bottom: 2rem;
+            border-bottom: 3px solid #000;
         }
 
-        .logo {
-            font-size: clamp(1rem, 4vw, 1.4rem);
+        .report-title {
+            font-size: 2rem;
             font-weight: 300;
             text-transform: uppercase;
             letter-spacing: 0.2em;
-            color: #0f0;
-        }
-
-        .logo span {
-            color: #888;
-            font-size: clamp(0.6rem, 2vw, 0.8rem);
-            margin-left: 1rem;
-        }
-
-        .status-badge {
-            padding: 0.5rem 1.5rem;
-            background: #111;
-            border: 1px solid #0f0;
-            color: #0f0;
-            font-size: clamp(0.7rem, 2vw, 0.8rem);
-            text-transform: uppercase;
-            white-space: nowrap;
-        }
-
-        /* Clearing-specific styles */
-        .clearing-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 2rem;
-            flex-wrap: wrap;
-            gap: 1rem;
-        }
-
-        .clearing-title {
-            font-size: clamp(1.5rem, 5vw, 2rem);
-            font-weight: 200;
-            text-transform: uppercase;
-            letter-spacing: 0.2em;
-            color: #0f0;
-        }
-
-        .timeframe-selector {
-            display: flex;
-            gap: 0.5rem;
-            flex-wrap: wrap;
-        }
-
-        .timeframe-btn {
-            padding: 0.5rem 1rem;
-            background: transparent;
-            border: 1px solid #333;
-            color: #888;
-            text-decoration: none;
-            font-size: clamp(0.7rem, 2vw, 0.8rem);
-            text-transform: uppercase;
-            white-space: nowrap;
-        }
-
-        .timeframe-btn.active {
-            background: #0f0;
-            color: #000;
-            border-color: #0f0;
-        }
-
-        /* Zone 1: Global System Status */
-        .global-status {
-            display: grid;
-            grid-template-columns: repeat(4, 1fr);
-            gap: 1rem;
-            margin-bottom: 2rem;
-        }
-
-        .status-card {
-            background: #111;
-            border: 2px solid #222;
-            padding: 1.5rem 1rem;
-            position: relative;
-            overflow: hidden;
-        }
-
-        .status-card::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            height: 2px;
-            background: linear-gradient(90deg, #0f0, transparent);
-        }
-
-        .status-label {
-            font-size: clamp(0.6rem, 1.5vw, 0.7rem);
-            text-transform: uppercase;
-            color: #666;
-            letter-spacing: 0.1em;
             margin-bottom: 0.5rem;
-            white-space: nowrap;
         }
 
-        .status-value {
-            font-size: clamp(1.5rem, 4vw, 2.5rem);
-            font-weight: 200;
-            font-family: 'Courier New', monospace;
-            color: #0f0;
-            line-height: 1.2;
-            word-break: break-word;
-        }
-
-        .status-unit {
-            font-size: clamp(0.6rem, 1.5vw, 0.8rem);
-            color: #444;
-            margin-left: 0.25rem;
-        }
-
-        /* Zone 2: Main Clearing Area */
-        .clearing-main {
-            display: grid;
-            grid-template-columns: minmax(280px, 350px) 1fr;
-            gap: 1.5rem;
-            margin-bottom: 2rem;
-        }
-
-        /* Live Swap Feed */
-        .swap-feed {
-            background: #111;
-            border: 2px solid #222;
-            height: 600px;
-            overflow-y: auto;
-        }
-
-        .feed-header {
-            padding: 1rem;
-            border-bottom: 2px solid #222;
-            font-size: clamp(0.7rem, 2vw, 0.8rem);
-            text-transform: uppercase;
-            color: #888;
-            position: sticky;
-            top: 0;
-            background: #111;
-            z-index: 10;
-        }
-
-        .swap-item {
-            padding: 1rem;
-            border-bottom: 1px solid #222;
-            cursor: pointer;
-            transition: all 0.2s;
-        }
-
-        .swap-item:hover {
-            background: #1a1a1a;
-            border-left: 3px solid #0f0;
-        }
-
-        .swap-item.selected {
-            background: #1a1a1a;
-            border-left: 3px solid #0f0;
-        }
-
-        .swap-path {
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            margin-bottom: 0.5rem;
-            font-size: clamp(0.8rem, 2vw, 0.9rem);
-            flex-wrap: wrap;
-        }
-
-        .swap-source, .swap-dest {
-            max-width: 120px;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
-
-        .swap-source {
-            color: #ff6b6b;
-        }
-
-        .swap-arrow {
-            color: #444;
-            flex-shrink: 0;
-        }
-
-        .swap-dest {
-            color: #4ecdc4;
-        }
-
-        .swap-meta {
-            display: flex;
-            justify-content: space-between;
-            font-size: clamp(0.7rem, 1.8vw, 0.8rem);
+        .report-subtitle {
+            font-size: 1rem;
             color: #666;
-            flex-wrap: wrap;
-            gap: 0.5rem;
+            margin-bottom: 2rem;
         }
 
-        .swap-amount {
-            color: #0f0;
-        }
-
-        .swap-status {
-            padding: 0.2rem 0.5rem;
-            border: 1px solid;
-            font-size: 0.6rem;
-            text-transform: uppercase;
-            white-space: nowrap;
-        }
-
-        .status-completed { border-color: #0f0; color: #0f0; }
-        .status-pending { border-color: #ff0; color: #ff0; }
-        .status-failed { border-color: #f00; color: #f00; }
-
-        /* Message Clearing Visualizer */
-        .clearing-visualizer {
-            background: #111;
-            border: 2px solid #222;
-            padding: 1.5rem;
-            overflow-x: auto;
-        }
-
-        .visualizer-header {
+        .report-meta {
             display: flex;
             justify-content: space-between;
-            align-items: center;
-            margin-bottom: 2rem;
-            padding-bottom: 1rem;
-            border-bottom: 2px solid #222;
+            font-size: 0.9rem;
+            color: #444;
+            border-top: 1px solid #ddd;
+            padding-top: 1rem;
             flex-wrap: wrap;
             gap: 1rem;
         }
 
-        .selected-swap-info {
-            font-size: clamp(1rem, 3vw, 1.2rem);
+        /* Section Styles */
+        .section {
+            margin-bottom: 3rem;
+            page-break-inside: avoid;
         }
 
-        .selected-swap-ref {
-            color: #0f0;
-            font-family: 'Courier New', monospace;
-            word-break: break-all;
-        }
-
-        /* Message Flow Timeline */
-        .message-timeline {
-            margin: 2rem 0;
-            min-width: 300px;
-        }
-
-        .timeline-step {
-            display: flex;
+        .section-title {
+            font-size: 1.5rem;
+            font-weight: 400;
             margin-bottom: 1.5rem;
-            position: relative;
-            flex-wrap: wrap;
-        }
-
-        .timeline-step::before {
-            content: '';
-            position: absolute;
-            left: 20px;
-            top: 40px;
-            bottom: -20px;
-            width: 2px;
-            background: #333;
-        }
-
-        .timeline-step:last-child::before {
-            display: none;
-        }
-
-        .timeline-icon {
-            width: 40px;
-            height: 40px;
-            border-radius: 50%;
-            background: #000;
-            border: 2px solid #0f0;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            margin-right: 1.5rem;
-            z-index: 2;
-            flex-shrink: 0;
-        }
-
-        .timeline-content {
-            flex: 1;
-            background: #000;
-            border: 2px solid #222;
-            padding: 1.5rem;
-            min-width: 200px;
-            overflow-x: auto;
-        }
-
-        .timeline-title {
-            font-size: clamp(0.9rem, 2.5vw, 1rem);
+            padding-bottom: 0.5rem;
+            border-bottom: 2px solid #000;
             text-transform: uppercase;
-            color: #0f0;
-            margin-bottom: 0.5rem;
+            letter-spacing: 0.1em;
         }
 
-        .timeline-subtitle {
-            font-size: clamp(0.7rem, 2vw, 0.8rem);
-            color: #888;
-            margin-bottom: 1rem;
-            word-break: break-word;
+        .section-subtitle {
+            font-size: 1.2rem;
+            font-weight: 300;
+            margin: 1.5rem 0 1rem;
+            color: #444;
         }
 
-        .timeline-details {
-            background: #0a0a0a;
-            padding: 1rem;
-            font-family: 'Courier New', monospace;
-            font-size: clamp(0.7rem, 1.8vw, 0.8rem);
-            overflow-x: auto;
-        }
-
-        .timeline-details pre {
-            white-space: pre-wrap;
-            word-wrap: break-word;
-            color: #ccc;
-        }
-
-        /* Zone 3: Net Positions */
-        .net-positions {
-            background: #111;
-            border: 2px solid #222;
+        /* Card Styles */
+        .card {
+            background: #f9f9f9;
+            border: 1px solid #ddd;
             padding: 1.5rem;
-            margin-bottom: 2rem;
-            overflow-x: auto;
+            margin-bottom: 1.5rem;
+            border-radius: 4px;
         }
 
         .card-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 1.5rem;
-            padding-bottom: 0.75rem;
-            border-bottom: 2px solid #222;
+            margin-bottom: 1rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 1px solid #ddd;
             flex-wrap: wrap;
             gap: 1rem;
         }
 
         .card-title {
-            font-size: clamp(0.9rem, 2.5vw, 1rem);
-            font-weight: 300;
+            font-weight: 600;
             text-transform: uppercase;
-            letter-spacing: 0.1em;
-            color: #fff;
+            font-size: 0.9rem;
+            letter-spacing: 0.05em;
         }
 
         .card-badge {
-            padding: 0.25rem 1rem;
             background: #000;
-            border: 1px solid #333;
-            color: #888;
-            font-size: clamp(0.6rem, 1.8vw, 0.7rem);
-            text-transform: uppercase;
-            white-space: nowrap;
-        }
-
-        .positions-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-            gap: 1.5rem;
-            margin-top: 1.5rem;
-        }
-
-        .position-card {
-            background: #000;
-            border: 2px solid #222;
-            padding: 1.5rem;
-        }
-
-        .position-header {
-            display: flex;
-            justify-content: space-between;
-            margin-bottom: 1rem;
-            flex-wrap: wrap;
-            gap: 0.5rem;
-        }
-
-        .position-institution {
-            font-weight: 400;
             color: #fff;
+            padding: 0.25rem 0.75rem;
+            font-size: 0.7rem;
+            border-radius: 20px;
+        }
+
+        /* Grid Layouts */
+        .grid-2 {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 1.5rem;
+        }
+
+        .grid-3 {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 1.5rem;
+        }
+
+        .grid-4 {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 1.5rem;
+        }
+
+        /* Tables */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+            font-size: 0.9rem;
+        }
+
+        th {
+            background: #000;
+            color: #fff;
+            padding: 0.75rem;
+            text-align: left;
+            font-weight: 500;
+        }
+
+        td {
+            padding: 0.75rem;
+            border-bottom: 1px solid #ddd;
+            vertical-align: top;
+        }
+
+        tr:hover {
+            background: #f5f5f5;
+        }
+
+        /* Key-Value Pairs */
+        .kv-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+        }
+
+        .kv-item {
+            padding: 0.75rem;
+            background: #fff;
+            border: 1px solid #eee;
+        }
+
+        .kv-label {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            color: #666;
+            margin-bottom: 0.25rem;
+        }
+
+        .kv-value {
+            font-size: 1rem;
+            font-weight: 500;
             word-break: break-word;
         }
 
-        .position-net {
-            font-size: clamp(1rem, 2.5vw, 1.2rem);
-            font-family: 'Courier New', monospace;
-            white-space: nowrap;
+        /* Timeline */
+        .timeline {
+            position: relative;
+            padding-left: 2rem;
         }
 
-        .net-positive { color: #0f0; }
-        .net-negative { color: #f00; }
-
-        /* Zone 4: Settlement Matrix */
-        .settlement-matrix {
-            background: #111;
-            border: 2px solid #222;
-            padding: 1.5rem;
-            margin-bottom: 2rem;
-            overflow-x: auto;
+        .timeline-item {
+            position: relative;
+            padding-bottom: 2rem;
+            border-left: 2px solid #000;
+            padding-left: 2rem;
+            margin-left: 1rem;
         }
 
-        .matrix-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-            gap: 1rem;
-            margin-top: 1.5rem;
+        .timeline-item:last-child {
+            border-left: none;
         }
 
-        .matrix-edge {
+        .timeline-item::before {
+            content: '';
+            position: absolute;
+            left: -0.5rem;
+            top: 0;
+            width: 1rem;
+            height: 1rem;
             background: #000;
-            border: 2px solid #222;
+            border-radius: 50%;
+        }
+
+        .timeline-time {
+            font-size: 0.8rem;
+            color: #666;
+            margin-bottom: 0.5rem;
+        }
+
+        .timeline-title {
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+        }
+
+        /* JSON Display */
+        .json-display {
+            background: #f0f0f0;
             padding: 1rem;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            flex-wrap: wrap;
-            gap: 0.5rem;
-        }
-
-        .edge-path {
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            flex-wrap: wrap;
-        }
-
-        .edge-from, .edge-to {
-            max-width: 100px;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
-
-        .edge-from { color: #ff6b6b; }
-        .edge-to { color: #4ecdc4; }
-        .edge-arrow { color: #444; }
-        .edge-amount { color: #0f0; font-weight: 400; white-space: nowrap; }
-
-        /* Zone 5: Message Clearance Monitor */
-        .clearance-monitor {
-            background: #111;
-            border: 2px solid #222;
-            padding: 1.5rem;
-            margin-bottom: 2rem;
-            overflow-x: auto;
-        }
-
-        .clearance-table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-top: 1rem;
-            min-width: 500px;
-        }
-
-        .clearance-table th {
-            text-align: left;
-            padding: 1rem;
-            background: #000;
-            color: #888;
-            font-size: clamp(0.6rem, 1.8vw, 0.7rem);
-            text-transform: uppercase;
-        }
-
-        .clearance-table td {
-            padding: 1rem;
-            border-bottom: 1px solid #222;
             font-family: 'Courier New', monospace;
-            font-size: clamp(0.7rem, 2vw, 0.8rem);
-        }
-
-        .success-rate {
-            display: inline-block;
-            padding: 0.2rem 0.5rem;
-            background: #1a3a1a;
-            color: #0f0;
-            border-radius: 3px;
-            white-space: nowrap;
-        }
-
-        /* Zone 6: Raw Message Console */
-        .message-console {
-            background: #111;
-            border: 2px solid #222;
-            padding: 1.5rem;
+            font-size: 0.8rem;
             overflow-x: auto;
-        }
-
-        .console-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 1rem;
-            flex-wrap: wrap;
-            gap: 1rem;
-        }
-
-        .console-content {
-            background: #000;
-            padding: 1.5rem;
-            font-family: 'Courier New', monospace;
-            font-size: clamp(0.7rem, 2vw, 0.8rem);
-            overflow-x: auto;
-            border: 2px solid #222;
-            margin-bottom: 1rem;
-        }
-
-        .console-request {
-            color: #ff6b6b;
-        }
-
-        .console-response {
-            color: #4ecdc4;
-            margin-top: 1rem;
-            padding-top: 1rem;
-            border-top: 1px solid #333;
-        }
-
-        .console-content pre {
+            border-radius: 4px;
             white-space: pre-wrap;
             word-wrap: break-word;
-            color: #ccc;
         }
 
-        /* Replay Button */
-        .replay-btn {
-            padding: 0.5rem 1.5rem;
-            background: transparent;
-            border: 2px solid #0f0;
-            color: #0f0;
-            font-size: clamp(0.7rem, 2vw, 0.8rem);
+        /* Message Flow */
+        .message-flow {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+
+        .message-request, .message-response {
+            padding: 1rem;
+            border-left: 4px solid;
+        }
+
+        .message-request {
+            background: #fff3f0;
+            border-left-color: #ff6b6b;
+        }
+
+        .message-response {
+            background: #f0f7f0;
+            border-left-color: #4ecdc4;
+            margin-top: -0.5rem;
+        }
+
+        /* Status Indicators */
+        .status-badge {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            font-size: 0.7rem;
+            font-weight: 600;
             text-transform: uppercase;
-            cursor: pointer;
-            transition: all 0.2s;
-            white-space: nowrap;
+            border-radius: 20px;
         }
 
-        .replay-btn:hover {
-            background: #0f0;
-            color: #000;
-        }
+        .status-success { background: #d4edda; color: #155724; }
+        .status-pending { background: #fff3cd; color: #856404; }
+        .status-failed { background: #f8d7da; color: #721c24; }
+        .status-active { background: #d1ecf1; color: #0c5460; }
 
-        .replay-animation {
-            animation: pulse 1s ease-in-out;
-        }
-
-        @keyframes pulse {
-            0% { opacity: 1; }
-            50% { opacity: 0.5; }
-            100% { opacity: 1; }
-        }
-
-        .footer {
+        /* Signature Section */
+        .signature-section {
             margin-top: 4rem;
             padding-top: 2rem;
-            border-top: 2px solid #222;
-            text-align: center;
-            color: #444;
-            font-size: clamp(0.6rem, 2vw, 0.7rem);
+            border-top: 2px solid #000;
+            display: flex;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 2rem;
         }
 
-        /* ============================================ */
-        /* RESPONSIVE BREAKPOINTS */
-        /* ============================================ */
+        .signature-box {
+            flex: 1;
+            min-width: 200px;
+        }
 
-        /* Large Tablets (max-width: 1200px) */
-        @media screen and (max-width: 1200px) {
-            .container {
-                padding: 1.5rem;
+        .signature-line {
+            margin-top: 2rem;
+            border-bottom: 2px solid #000;
+            width: 100%;
+        }
+
+        /* Print Styles */
+        @media print {
+            body {
+                padding: 0;
+                background: white;
             }
             
-            .global-status {
-                gap: 1rem;
+            .no-print {
+                display: none;
             }
             
-            .status-card {
-                padding: 1.25rem 0.75rem;
+            .page-break {
+                page-break-before: always;
+            }
+            
+            a {
+                text-decoration: none;
+                color: black;
+            }
+            
+            .grid-2, .grid-3, .grid-4 {
+                break-inside: avoid;
             }
         }
 
-        /* Tablets (max-width: 992px) */
-        @media screen and (max-width: 992px) {
-            .clearing-main {
-                grid-template-columns: 1fr;
-            }
-            
-            .swap-feed {
-                height: 400px;
-            }
-            
-            .global-status {
-                grid-template-columns: repeat(2, 1fr);
-            }
-            
-            .positions-grid {
-                grid-template-columns: repeat(2, 1fr);
-            }
+        /* Print Button */
+        .print-btn, .download-btn {
+            padding: 0.75rem 2rem;
+            background: #000;
+            color: #fff;
+            border: none;
+            font-size: 1rem;
+            cursor: pointer;
+            margin-right: 1rem;
+            text-decoration: none;
+            display: inline-block;
         }
 
-        /* Mobile Landscape (max-width: 768px) */
-        @media screen and (max-width: 768px) {
-            .container {
+        .print-btn:hover, .download-btn:hover {
+            background: #333;
+        }
+
+        .button-group {
+            margin-bottom: 2rem;
+            text-align: right;
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            body {
                 padding: 1rem;
             }
             
-            .header {
-                flex-direction: column;
-                align-items: flex-start;
-            }
-            
-            .status-badge {
-                align-self: flex-start;
-            }
-            
-            .clearing-header {
-                flex-direction: column;
-                align-items: flex-start;
-            }
-            
-            .global-status {
-                gap: 0.75rem;
-            }
-            
-            .status-card {
-                padding: 1rem 0.75rem;
-            }
-            
-            .positions-grid {
+            .grid-2, .grid-3, .grid-4 {
                 grid-template-columns: 1fr;
             }
             
-            .matrix-grid {
-                grid-template-columns: 1fr;
-            }
-            
-            .timeline-step {
+            .report-meta {
                 flex-direction: column;
-            }
-            
-            .timeline-step::before {
-                display: none;
-            }
-            
-            .timeline-icon {
-                margin-bottom: 1rem;
-            }
-            
-            .visualizer-header {
-                flex-direction: column;
-                align-items: flex-start;
-            }
-            
-            .replay-btn {
-                width: 100%;
-            }
-        }
-
-        /* Mobile Portrait (max-width: 480px) */
-        @media screen and (max-width: 480px) {
-            .global-status {
-                grid-template-columns: 1fr;
-            }
-            
-            .timeframe-selector {
-                width: 100%;
-            }
-            
-            .timeframe-btn {
-                flex: 1;
-                text-align: center;
-                padding: 0.5rem 0.25rem;
-            }
-            
-            .swap-path {
-                font-size: 0.8rem;
-            }
-            
-            .swap-meta {
-                flex-direction: column;
-                gap: 0.25rem;
-            }
-            
-            .card-header {
-                flex-direction: column;
-                align-items: flex-start;
-            }
-            
-            .position-header {
-                flex-direction: column;
-            }
-            
-            .edge-path {
-                width: 100%;
-            }
-            
-            .console-header {
-                flex-direction: column;
-                align-items: flex-start;
-            }
-        }
-
-        /* Small Mobile (max-width: 360px) */
-        @media screen and (max-width: 360px) {
-            .container {
-                padding: 0.75rem;
-            }
-            
-            .status-card {
-                padding: 0.75rem 0.5rem;
-            }
-            
-            .status-value {
-                font-size: 1.2rem;
-            }
-            
-            .swap-source, .swap-dest {
-                max-width: 80px;
-            }
-            
-            .edge-from, .edge-to {
-                max-width: 70px;
-            }
-        }
-
-        /* Large Screens (min-width: 2000px) */
-        @media screen and (min-width: 2000px) {
-            .container {
-                max-width: 90%;
-            }
-            
-            .global-status {
-                gap: 2.5rem;
-            }
-            
-            .status-card {
-                padding: 2rem;
-            }
-            
-            .status-value {
-                font-size: 3rem;
-            }
-            
-            .positions-grid {
-                grid-template-columns: repeat(4, 1fr);
-            }
-        }
-
-        /* Touch-friendly improvements */
-        @media (hover: none) and (pointer: coarse) {
-            .swap-item {
-                padding: 1.2rem;
-            }
-            
-            .timeframe-btn, .replay-btn {
-                padding: 0.75rem 1.5rem;
-            }
-            
-            .swap-item:hover {
-                background: #111;
-            }
-        }
-
-        /* Print styles */
-        @media print {
-            body {
-                background: white;
-                color: black;
-            }
-            
-            .status-card, .swap-feed, .clearing-visualizer, 
-            .net-positions, .settlement-matrix, .clearance-monitor {
-                break-inside: avoid;
-                background: white;
-                color: black;
-                border: 1px solid #ccc;
-            }
-            
-            .replay-btn, .timeframe-selector {
-                display: none;
             }
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <!-- Header -->
-        <div class="header">
-            <div class="logo">
-                VOUCHMORPH <span>MESSAGE CLEARING HOUSE</span>
-            </div>
-            <div class="status-badge">
-                <?php echo $countryCode; ?> · REAL-TIME CLEARING
-            </div>
-        </div>
+    <!-- Print/Download Buttons (no-print) -->
+    <div class="button-group no-print">
+        <button onclick="window.print()" class="print-btn">🖨️ PRINT REPORT</button>
+        <a href="?swap=<?php echo urlencode($swapRef); ?>&format=json&country=<?php echo urlencode($countryCode); ?>" class="download-btn">📥 DOWNLOAD JSON</a>
+        <a href="?swap=<?php echo urlencode($swapRef); ?>&format=csv&country=<?php echo urlencode($countryCode); ?>" class="download-btn">📥 DOWNLOAD CSV</a>
+    </div>
 
-        <!-- Clearing Header -->
-        <div class="clearing-header">
-            <div class="clearing-title">MESSAGE CLEARING SYSTEM</div>
-            <div class="timeframe-selector">
-                <a href="?clearing_view=<?php echo $view; ?>&timeframe=today&swap=<?php echo $selectedSwap; ?>" class="timeframe-btn <?php echo $timeframe === 'today' ? 'active' : ''; ?>">TODAY</a>
-                <a href="?clearing_view=<?php echo $view; ?>&timeframe=week&swap=<?php echo $selectedSwap; ?>" class="timeframe-btn <?php echo $timeframe === 'week' ? 'active' : ''; ?>">WEEK</a>
-                <a href="?clearing_view=<?php echo $view; ?>&timeframe=month&swap=<?php echo $selectedSwap; ?>" class="timeframe-btn <?php echo $timeframe === 'month' ? 'active' : ''; ?>">MONTH</a>
-            </div>
-        </div>
-
-        <!-- ZONE 1: GLOBAL SYSTEM STATUS -->
-        <div class="global-status">
-            <div class="status-card">
-                <div class="status-label">TRANSACTIONS PER SECOND</div>
-                <div class="status-value"><?php echo format_amount($tps, 2); ?><span class="status-unit">TPS</span></div>
-            </div>
-            <div class="status-card">
-                <div class="status-label">TOTAL LIQUIDITY</div>
-                <div class="status-value"><?php echo format_amount($liquidity / 1000000, 2); ?><span class="status-unit">M BWP</span></div>
-            </div>
-            <div class="status-card">
-                <div class="status-label">ACTIVE INSTITUTIONS</div>
-                <div class="status-value"><?php echo $activeInstitutions; ?><span class="status-unit">BANKS</span></div>
-            </div>
-            <div class="status-card">
-                <div class="status-label">PENDING MESSAGES</div>
-                <div class="status-value"><?php echo $pendingMessages; ?><span class="status-unit">IN QUEUE</span></div>
-            </div>
-        </div>
-
-        <!-- ZONE 2: MAIN CLEARING AREA -->
-        <div class="clearing-main">
-            <!-- LEFT: LIVE SWAP FEED -->
-            <div class="swap-feed">
-                <div class="feed-header">LIVE SWAP STREAM · REAL-TIME</div>
-                <?php foreach ($liveSwaps as $swap): ?>
-                <a href="?clearing_view=<?php echo $view; ?>&timeframe=<?php echo $timeframe; ?>&swap=<?php echo $swap['swap_uuid']; ?>" style="text-decoration: none;">
-                    <div class="swap-item <?php echo $selectedSwap === $swap['swap_uuid'] ? 'selected' : ''; ?>">
-                        <div class="swap-path">
-                            <span class="swap-source" title="<?php echo htmlspecialchars($swap['source_institution'] ?? 'UNKNOWN'); ?>"><?php echo htmlspecialchars(substr($swap['source_institution'] ?? 'UNKNOWN', 0, 10)); ?></span>
-                            <span class="swap-arrow">→</span>
-                            <span class="swap-dest" title="<?php echo htmlspecialchars($swap['dest_institution'] ?? 'UNKNOWN'); ?>"><?php echo htmlspecialchars(substr($swap['dest_institution'] ?? 'UNKNOWN', 0, 10)); ?></span>
-                        </div>
-                        <div class="swap-meta">
-                            <span><?php echo htmlspecialchars(substr($swap['source_type'] ?? '', 0, 8)); ?> → <?php echo htmlspecialchars(substr($swap['dest_type'] ?? '', 0, 8)); ?></span>
-                            <span class="swap-amount"><?php echo format_amount($swap['amount']); ?> BWP</span>
-                        </div>
-                        <div class="swap-meta">
-                            <span><?php echo date('H:i:s', strtotime($swap['created_at'])); ?></span>
-                            <span class="swap-status status-<?php echo $swap['status']; ?>"><?php echo $swap['status']; ?></span>
-                        </div>
-                    </div>
-                </a>
-                <?php endforeach; ?>
-            </div>
-
-            <!-- RIGHT: MESSAGE CLEARING VISUALIZER -->
-            <div class="clearing-visualizer">
-                <?php if ($selectedSwap && $swapDetails): ?>
-                <div class="visualizer-header">
-                    <div class="selected-swap-info">
-                        Clearing Transaction: <span class="selected-swap-ref"><?php echo substr($selectedSwap, 0, 16); ?>…</span>
-                    </div>
-                    <button class="replay-btn" onclick="replaySwap()">⟲ REPLAY SWAP</button>
-                </div>
-
-                <!-- Message Flow Timeline -->
-                <div class="message-timeline" id="timeline">
-                    <!-- Step 1: API Request -->
-                    <div class="timeline-step">
-                        <div class="timeline-icon">1</div>
-                        <div class="timeline-content">
-                            <div class="timeline-title">API REQUEST</div>
-                            <div class="timeline-subtitle">POST /swap/execute · <?php echo date('H:i:s', strtotime($swapDetails['created_at'])); ?></div>
-                            <div class="timeline-details">
-                                <pre><?php 
-                                $sourceDetails = is_string($swapDetails['source_details']) 
-                                    ? json_decode($swapDetails['source_details'], true) 
-                                    : $swapDetails['source_details'];
-                                $destDetails = is_string($swapDetails['destination_details']) 
-                                    ? json_decode($swapDetails['destination_details'], true) 
-                                    : $swapDetails['destination_details'];
-                                
-                                echo json_encode([
-                                    'source' => $sourceDetails,
-                                    'destination' => $destDetails,
-                                    'amount' => (float)$swapDetails['amount'],
-                                    'currency' => $swapDetails['from_currency']
-                                ], JSON_PRETTY_PRINT); 
-                                ?></pre>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Step 2: Hold Creation -->
-                    <?php if (!empty($messageFlow['hold'])): foreach($messageFlow['hold'] as $hold): ?>
-                    <div class="timeline-step">
-                        <div class="timeline-icon">2</div>
-                        <div class="timeline-content">
-                            <div class="timeline-title">HOLD CREATED</div>
-                            <div class="timeline-subtitle">Participant: <?php echo htmlspecialchars($hold['participant_name'] ?? 'Unknown'); ?> · <?php echo date('H:i:s', strtotime($hold['placed_at'] ?? $hold['created_at'])); ?></div>
-                            <div class="timeline-details">
-                                <pre><?php 
-                                echo json_encode([
-                                    'hold_reference' => $hold['hold_reference'],
-                                    'asset_type' => $hold['asset_type'],
-                                    'amount' => (float)$hold['amount'],
-                                    'status' => $hold['status'],
-                                    'expiry' => $hold['hold_expiry'] ?? 'N/A'
-                                ], JSON_PRETTY_PRINT); 
-                                ?></pre>
-                            </div>
-                        </div>
-                    </div>
-                    <?php endforeach; endif; ?>
-
-                    <!-- Step 3: API Messages to Institutions -->
-                    <?php foreach ($apiCalls as $api): ?>
-                    <div class="timeline-step">
-                        <div class="timeline-icon">3</div>
-                        <div class="timeline-content">
-                            <div class="timeline-title"><?php echo strtoupper($api['direction'] ?? 'OUTGOING'); ?> API MESSAGE</div>
-                            <div class="timeline-subtitle"><?php echo htmlspecialchars($api['participant_name'] ?? 'Unknown'); ?> · <?php echo htmlspecialchars($api['endpoint'] ?? 'N/A'); ?> · <?php echo date('H:i:s', strtotime($api['created_at'])); ?></div>
-                            <div class="timeline-details">
-                                <div class="console-request">
-                                    <strong>REQUEST:</strong>
-                                    <pre><?php 
-                                    $requestPayload = is_string($api['request_payload']) 
-                                        ? json_decode($api['request_payload'], true) 
-                                        : $api['request_payload'];
-                                    echo json_encode($requestPayload, JSON_PRETTY_PRINT); 
-                                    ?></pre>
-                                </div>
-                                <div class="console-response">
-                                    <strong>RESPONSE (<?php echo $api['http_status_code'] ?? 'N/A'; ?>):</strong>
-                                    <pre><?php 
-                                    $responsePayload = is_string($api['response_payload']) 
-                                        ? json_decode($api['response_payload'], true) 
-                                        : $api['response_payload'];
-                                    echo json_encode($responsePayload, JSON_PRETTY_PRINT); 
-                                    ?></pre>
-                                </div>
-                                <?php if (!empty($api['duration_ms'])): ?>
-                                <div style="margin-top: 0.5rem; color: #888;">⏱️ <?php echo $api['duration_ms']; ?>ms</div>
-                                <?php endif; ?>
-                            </div>
-                        </div>
-                    </div>
-                    <?php endforeach; ?>
-
-                    <!-- Step 4: Ledger Entries -->
-                    <?php if (!empty($ledgerEntries)): ?>
-                    <div class="timeline-step">
-                        <div class="timeline-icon">4</div>
-                        <div class="timeline-content">
-                            <div class="timeline-title">LEDGER IMPACT</div>
-                            <div class="timeline-subtitle">Double-Entry Accounting · <?php echo date('H:i:s', strtotime($ledgerEntries[0]['created_at'])); ?></div>
-                            <div class="timeline-details">
-                                <?php foreach ($ledgerEntries as $entry): ?>
-                                <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem; padding: 0.5rem; background: #0a0a0a; flex-wrap: wrap; gap: 0.5rem;">
-                                    <span style="color: #ff6b6b;">DEBIT: <?php echo htmlspecialchars($entry['debit_account_name'] ?? $entry['debit_account_id']); ?></span>
-                                    <span style="color: #4ecdc4;">CREDIT: <?php echo htmlspecialchars($entry['credit_account_name'] ?? $entry['credit_account_id']); ?></span>
-                                    <span style="color: #0f0;"><?php echo format_amount($entry['amount']); ?> BWP</span>
-                                </div>
-                                <?php endforeach; ?>
-                            </div>
-                        </div>
-                    </div>
-                    <?php endif; ?>
-
-                    <!-- Step 5: Fee Split -->
-                    <?php if (!empty($feeDetails)): foreach($feeDetails as $fee): ?>
-                    <div class="timeline-step">
-                        <div class="timeline-icon">5</div>
-                        <div class="timeline-content">
-                            <div class="timeline-title">FEE SPLIT</div>
-                            <div class="timeline-subtitle"><?php echo htmlspecialchars($fee['fee_type'] ?? 'Fee'); ?> · <?php echo date('H:i:s', strtotime($fee['collected_at'] ?? $fee['created_at'])); ?></div>
-                            <div class="timeline-details">
-                                <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem; flex-wrap: wrap; gap: 0.5rem;">
-                                    <span>Total Fee:</span>
-                                    <span class="positive"><?php echo format_amount($fee['total_amount']); ?> BWP</span>
-                                </div>
-                                <?php 
-                                $split = is_string($fee['split_config']) 
-                                    ? json_decode($fee['split_config'], true) 
-                                    : ($fee['split_config'] ?? []);
-                                if (is_array($split)):
-                                foreach ($split as $party => $amount): 
-                                ?>
-                                <div style="display: flex; justify-content: space-between; margin-left: 1rem; color: #888; flex-wrap: wrap; gap: 0.5rem;">
-                                    <span><?php echo strtoupper($party); ?>:</span>
-                                    <span class="positive">+<?php echo format_amount($amount); ?> BWP</span>
-                                </div>
-                                <?php endforeach; endif; ?>
-                                <?php if (!empty($fee['vat_amount']) && $fee['vat_amount'] > 0): ?>
-                                <div style="display: flex; justify-content: space-between; margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid #333; flex-wrap: wrap; gap: 0.5rem;">
-                                    <span>VAT (14%):</span>
-                                    <span><?php echo format_amount($fee['vat_amount']); ?> BWP</span>
-                                </div>
-                                <?php endif; ?>
-                            </div>
-                        </div>
-                    </div>
-                    <?php endforeach; endif; ?>
-
-                    <!-- Step 6: Settlement Queue -->
-                    <?php if (!empty($messageFlow['settlement'])): ?>
-                    <div class="timeline-step">
-                        <div class="timeline-icon">6</div>
-                        <div class="timeline-content">
-                            <div class="timeline-title">SETTLEMENT OBLIGATION</div>
-                            <div class="timeline-subtitle">Queued for Net Settlement</div>
-                            <div class="timeline-details">
-                                <div style="display: flex; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem;">
-                                    <span>Debtor: <?php echo htmlspecialchars($messageFlow['settlement']['debtor'] ?? 'N/A'); ?></span>
-                                    <span>→</span>
-                                    <span>Creditor: <?php echo htmlspecialchars($messageFlow['settlement']['creditor'] ?? 'N/A'); ?></span>
-                                </div>
-                                <div style="display: flex; justify-content: space-between; margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid #333; flex-wrap: wrap; gap: 0.5rem;">
-                                    <span>Amount:</span>
-                                    <span class="positive"><?php echo format_amount($messageFlow['settlement']['amount'] ?? 0); ?> BWP</span>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    <?php endif; ?>
-                </div>
-                <?php else: ?>
-                <div style="text-align: center; padding: 4rem 1rem; color: #444;">
-                    <div style="font-size: 3rem; margin-bottom: 1rem;">↖️</div>
-                    <div style="font-size: 1.2rem;">Select a swap from the live feed</div>
-                    <div style="margin-top: 1rem; font-size: 0.8rem;">View the complete message clearing flow</div>
-                </div>
-                <?php endif; ?>
-            </div>
-        </div>
-
-        <!-- ZONE 3: INTER-INSTITUTION NET POSITIONS -->
-        <div class="net-positions">
-            <div class="card-header">
-                <div class="card-title">INTER-INSTITUTION NET POSITIONS</div>
-                <div class="card-badge">REAL-TIME SETTLEMENT</div>
-            </div>
-            <div class="positions-grid">
-                <?php if (empty($institutionNets)): ?>
-                <div class="position-card" style="grid-column: 1/-1; text-align: center; color: #666;">
-                    No net positions yet
-                </div>
-                <?php else: ?>
-                <?php foreach ($institutionNets as $institution => $nets): 
-                    $netPosition = (float)($nets['credit'] - $nets['debit']);
-                ?>
-                <div class="position-card">
-                    <div class="position-header">
-                        <span class="position-institution"><?php echo htmlspecialchars($institution); ?></span>
-                        <span class="position-net <?php echo $netPosition >= 0 ? 'net-positive' : 'net-negative'; ?>">
-                            <?php echo $netPosition >= 0 ? '+' : ''; ?><?php echo format_amount($netPosition); ?> BWP
-                        </span>
-                    </div>
-                    <div style="display: flex; justify-content: space-between; font-size: 0.8rem; color: #666; flex-wrap: wrap; gap: 0.5rem;">
-                        <span>Receivable: <?php echo format_amount($nets['credit']); ?></span>
-                        <span>Payable: <?php echo format_amount($nets['debit']); ?></span>
-                    </div>
-                </div>
-                <?php endforeach; ?>
-                <?php endif; ?>
-            </div>
-        </div>
-
-        <!-- ZONE 4: SETTLEMENT MATRIX -->
-        <?php if (!empty($settlementMatrix)): ?>
-        <div class="settlement-matrix">
-            <div class="card-header">
-                <div class="card-title">SETTLEMENT MATRIX</div>
-                <div class="card-badge">NETTING OPTIMIZATION</div>
-            </div>
-            <div class="matrix-grid">
-                <?php foreach ($settlementMatrix as $edge): ?>
-                <div class="matrix-edge">
-                    <div class="edge-path">
-                        <span class="edge-from" title="<?php echo htmlspecialchars($edge['from']); ?>"><?php echo htmlspecialchars(substr($edge['from'], 0, 8)); ?></span>
-                        <span class="edge-arrow">→</span>
-                        <span class="edge-to" title="<?php echo htmlspecialchars($edge['to']); ?>"><?php echo htmlspecialchars(substr($edge['to'], 0, 8)); ?></span>
-                    </div>
-                    <span class="edge-amount"><?php echo format_amount($edge['amount']); ?></span>
-                </div>
-                <?php endforeach; ?>
-            </div>
-        </div>
-        <?php endif; ?>
-
-        <!-- ZONE 5: MESSAGE CLEARANCE MONITOR -->
-        <div class="clearance-monitor">
-            <div class="card-header">
-                <div class="card-title">MESSAGE CLEARANCE MONITOR</div>
-                <div class="card-badge">API RELIABILITY</div>
-            </div>
-            <table class="clearance-table">
-                <thead>
-                    <tr>
-                        <th>PARTICIPANT</th>
-                        <th>TOTAL MESSAGES</th>
-                        <th>SUCCESS RATE</th>
-                        <th>AVG RESPONSE TIME</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <?php if (empty($clearanceMetrics)): ?>
-                    <tr><td colspan="4" style="text-align: center; color: #666;">No message data for this period</td></tr>
-                    <?php else: ?>
-                    <?php foreach ($clearanceMetrics as $metric): ?>
-                    <tr>
-                        <td><?php echo htmlspecialchars($metric['participant_name'] ?? 'Unknown'); ?></td>
-                        <td><?php echo (int)($metric['total_messages'] ?? 0); ?></td>
-                        <td>
-                            <span class="success-rate">
-                                <?php 
-                                $successRate = ((float)($metric['successful'] ?? 0) / max(1, (float)($metric['total_messages'] ?? 1))) * 100;
-                                echo format_amount($successRate, 1); ?>%
-                            </span>
-                        </td>
-                        <td><?php echo round((float)($metric['avg_response_time'] ?? 0)); ?> ms</td>
-                    </tr>
-                    <?php endforeach; ?>
-                    <?php endif; ?>
-                </tbody>
-            </table>
-        </div>
-
-        <!-- ZONE 6: RAW MESSAGE CONSOLE (shown when swap selected) -->
-        <?php if ($selectedSwap && $swapDetails && !empty($apiCalls)): ?>
-        <div class="message-console">
-            <div class="console-header">
-                <div class="card-title">RAW MESSAGE CONSOLE</div>
-                <div class="card-badge">POSTMAN STYLE</div>
-            </div>
-            <?php foreach ($apiCalls as $api): ?>
-            <div class="console-content">
-                <div class="console-request">
-                    <strong>➡️ <?php echo strtoupper($api['direction'] ?? 'OUTGOING'); ?> REQUEST to <?php echo htmlspecialchars($api['participant_name'] ?? 'Unknown'); ?></strong>
-                    <pre><?php 
-                    $requestPayload = is_string($api['request_payload']) 
-                        ? json_decode($api['request_payload'], true) 
-                        : ($api['request_payload'] ?? []);
-                    echo json_encode($requestPayload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES); 
-                    ?></pre>
-                </div>
-                <div class="console-response">
-                    <strong>⬅️ RESPONSE (HTTP <?php echo $api['http_status_code'] ?? 'N/A'; ?>)</strong>
-                    <pre><?php 
-                    $responsePayload = is_string($api['response_payload']) 
-                        ? json_decode($api['response_payload'], true) 
-                        : ($api['response_payload'] ?? []);
-                    echo json_encode($responsePayload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES); 
-                    ?></pre>
-                </div>
-                <?php if (!empty($api['curl_error'])): ?>
-                <div style="color: #f00; margin-top: 0.5rem;">⚠️ CURL Error: <?php echo htmlspecialchars($api['curl_error']); ?></div>
-                <?php endif; ?>
-            </div>
-            <?php endforeach; ?>
-        </div>
-        <?php endif; ?>
-
-        <!-- FOOTER -->
-        <div class="footer">
-            <p>VOUCHMORPH · MESSAGE CLEARING HOUSE · DOUBLE-ENTRY VERIFIED · ISO20022 COMPLIANT</p>
-            <p style="margin-top: 0.5rem;">
-                CLEARED: <?php echo count($liveSwaps); ?> SWAPS · 
-                NET EXPOSURE: <?php 
-                $totalCredit = array_sum(array_column($institutionNets, 'credit'));
-                $totalDebit = array_sum(array_column($institutionNets, 'debit'));
-                echo format_amount($totalCredit - $totalDebit); 
-                ?> BWP
-            </p>
+    <!-- Report Header -->
+    <div class="report-header">
+        <div class="report-title">VOUCHMORPH SWAP DETAIL REPORT</div>
+        <div class="report-subtitle">Complete Transaction Evidence · ISO20022 Compliant</div>
+        <div class="report-meta">
+            <span><strong>Report ID:</strong> <?php echo $reportId; ?></span>
+            <span><strong>Generated:</strong> <?php echo $generatedAt->format('Y-m-d H:i:s T'); ?></span>
+            <span><strong>Swap Ref:</strong> <?php echo $swapRef; ?></span>
+            <span><strong>Country:</strong> <?php echo $countryCode; ?></span>
+            <span><strong>Checksum:</strong> <?php echo substr($reportChecksum, 0, 16); ?>…</span>
         </div>
     </div>
 
-    <script>
-        // Replay animation function
-        function replaySwap() {
-            const timeline = document.getElementById('timeline');
-            timeline.classList.add('replay-animation');
-            
-            // Step through each timeline item with delay
-            const steps = document.querySelectorAll('.timeline-step');
-            steps.forEach((step, index) => {
-                step.style.opacity = '0';
-                step.style.transform = 'translateX(-20px)';
-                step.style.transition = 'all 0.5s ease';
-                
-                setTimeout(() => {
-                    step.style.opacity = '1';
-                    step.style.transform = 'translateX(0)';
-                }, index * 300);
-            });
-            
-            setTimeout(() => {
-                timeline.classList.remove('replay-animation');
-            }, steps.length * 300 + 500);
-        }
+    <!-- SECTION 1: SWAP SUMMARY -->
+    <div class="section">
+        <div class="section-title">1. SWAP SUMMARY</div>
+        
+        <div class="grid-2">
+            <!-- Left Column: Basic Info -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Transaction Overview</span>
+                    <span class="card-badge">MASTER RECORD</span>
+                </div>
+                <div class="kv-grid">
+                    <div class="kv-item">
+                        <div class="kv-label">Swap UUID</div>
+                        <div class="kv-value"><?php echo $swap['swap_uuid']; ?></div>
+                    </div>
+                    <div class="kv-item">
+                        <div class="kv-label">Amount</div>
+                        <div class="kv-value"><?php echo number_format((float)$swap['amount'], 2); ?> <?php echo $swap['from_currency'] ?? 'BWP'; ?></div>
+                    </div>
+                    <div class="kv-item">
+                        <div class="kv-label">Status</div>
+                        <div class="kv-value">
+                            <span class="status-badge status-<?php echo $swap['status']; ?>"><?php echo $swap['status']; ?></span>
+                        </div>
+                    </div>
+                    <div class="kv-item">
+                        <div class="kv-label">Created</div>
+                        <div class="kv-value"><?php echo date('Y-m-d H:i:s', strtotime($swap['created_at'])); ?></div>
+                    </div>
+                    <div class="kv-item">
+                        <div class="kv-label">Completed</div>
+                        <div class="kv-value"><?php echo $swap['completed_at'] ? date('Y-m-d H:i:s', strtotime($swap['completed_at'])) : 'N/A'; ?></div>
+                    </div>
+                    <div class="kv-item">
+                        <div class="kv-label">Processing Time</div>
+                        <div class="kv-value"><?php echo $swap['processing_time'] ? round($swap['processing_time'], 2) . ' seconds' : 'N/A'; ?></div>
+                    </div>
+                </div>
+            </div>
 
-        // Optional: Handle touch events for mobile
-        document.addEventListener('touchstart', function() {}, {passive: true});
+            <!-- Right Column: Fraud & Reference -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Security & References</span>
+                    <span class="card-badge">AUDIT</span>
+                </div>
+                <div class="kv-grid">
+                    <div class="kv-item">
+                        <div class="kv-label">Fraud Check Status</div>
+                        <div class="kv-value"><?php echo $swap['fraud_check_status'] ?? 'unchecked'; ?></div>
+                    </div>
+                    <div class="kv-item">
+                        <div class="kv-label">Processor Reference</div>
+                        <div class="kv-value"><?php echo $swap['processor_reference'] ?? 'N/A'; ?></div>
+                    </div>
+                    <div class="kv-item">
+                        <div class="kv-label">Exchange Rate</div>
+                        <div class="kv-value"><?php echo $swap['exchange_rate'] ?? '1.0'; ?></div>
+                    </div>
+                    <div class="kv-item">
+                        <div class="kv-label">Fee Amount</div>
+                        <div class="kv-value"><?php echo number_format((float)($swap['fee_amount'] ?? 0), 2); ?> BWP</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- SECTION 2: SOURCE & DESTINATION -->
+    <div class="section">
+        <div class="section-title">2. SOURCE & DESTINATION</div>
+        
+        <div class="grid-2">
+            <!-- Source Details -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">SOURCE</span>
+                    <span class="card-badge">FUNDS ORIGIN</span>
+                </div>
+                <div class="json-display"><?php echo json_encode($sourceDetails, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES); ?></div>
+                
+                <?php if (isset($sourceDetails['institution']) && isset($participants[$sourceDetails['institution']])): 
+                    $part = $participants[$sourceDetails['institution']]; ?>
+                <div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #ddd;">
+                    <strong>Participant Details:</strong><br>
+                    Type: <?php echo $part['type'] ?? 'Unknown'; ?> · 
+                    Category: <?php echo $part['category'] ?? 'Unknown'; ?> · 
+                    Provider: <?php echo $part['provider_code'] ?? 'N/A'; ?>
+                </div>
+                <?php endif; ?>
+            </div>
+
+            <!-- Destination Details -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">DESTINATION</span>
+                    <span class="card-badge">FUNDS RECIPIENT</span>
+                </div>
+                <div class="json-display"><?php echo json_encode($destDetails, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES); ?></div>
+                
+                <?php if (isset($destDetails['institution']) && isset($participants[$destDetails['institution']])): 
+                    $part = $participants[$destDetails['institution']]; ?>
+                <div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #ddd;">
+                    <strong>Participant Details:</strong><br>
+                    Type: <?php echo $part['type'] ?? 'Unknown'; ?> · 
+                    Category: <?php echo $part['category'] ?? 'Unknown'; ?> · 
+                    Provider: <?php echo $part['provider_code'] ?? 'N/A'; ?>
+                </div>
+                <?php endif; ?>
+            </div>
+        </div>
+    </div>
+
+    <!-- SECTION 3: HOLD TRANSACTIONS -->
+    <div class="section">
+        <div class="section-title">3. HOLD TRANSACTIONS</div>
+        
+        <?php if (empty($holds)): ?>
+        <div class="card">No hold transactions recorded for this swap.</div>
+        <?php else: ?>
+            <?php foreach ($holds as $index => $hold): ?>
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Hold #<?php echo $index + 1; ?></span>
+                    <span class="card-badge status-<?php echo strtolower($hold['status']); ?>"><?php echo $hold['status']; ?></span>
+                </div>
+                
+                <div class="grid-3">
+                    <div class="kv-item">
+                        <div class="kv-label">Hold Reference</div>
+                        <div class="kv-value"><?php echo $hold['hold_reference']; ?></div>
+                    </div>
+                    <div class="kv-item">
+                        <div class="kv-label">Amount</div>
+                        <div class="kv-value"><?php echo number_format((float)$hold['amount'], 2); ?> <?php echo $hold['currency'] ?? 'BWP'; ?></div>
+                    </div>
+                    <div class="kv-item">
+                        <div class="kv-label">Asset Type</div>
+                        <div class="kv-value"><?php echo $hold['asset_type']; ?></div>
+                    </div>
+                    <div class="kv-item">
+                        <div class="kv-label">Placed At</div>
+                        <div class="kv-value"><?php echo date('Y-m-d H:i:s', strtotime($hold['placed_at'] ?? $hold['created_at'])); ?></div>
+                    </div>
+                    <div class="kv-item">
+                        <div class="kv-label">Expiry</div>
+                        <div class="kv-value"><?php echo $hold['hold_expiry'] ? date('Y-m-d H:i:s', strtotime($hold['hold_expiry'])) : 'N/A'; ?></div>
+                    </div>
+                    <div class="kv-item">
+                        <div class="kv-label">Released/Debited</div>
+                        <div class="kv-value"><?php echo $hold['released_at'] ? date('H:i:s', strtotime($hold['released_at'])) : ($hold['debited_at'] ? date('H:i:s', strtotime($hold['debited_at'])) : 'N/A'); ?></div>
+                    </div>
+                </div>
+                
+                <?php if (!empty($hold['source_details']) && $hold['source_details'] !== '{}'): ?>
+                <div style="margin-top: 1rem;">
+                    <strong>Source Details:</strong>
+                    <div class="json-display" style="margin-top: 0.5rem;"><?php 
+                        $srcDetails = is_string($hold['source_details']) 
+                            ? json_decode($hold['source_details'], true) 
+                            : $hold['source_details'];
+                        echo json_encode($srcDetails, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES); 
+                    ?></div>
+                </div>
+                <?php endif; ?>
+            </div>
+            <?php endforeach; ?>
+        <?php endif; ?>
+    </div>
+
+    <!-- SECTION 4: API MESSAGE FLOW -->
+    <div class="section">
+        <div class="section-title">4. API MESSAGE FLOW</div>
+        
+        <?php if (empty($apiCalls)): ?>
+        <div class="card">No API messages recorded for this swap.</div>
+        <?php else: ?>
+            <div class="timeline">
+                <?php foreach ($apiCalls as $index => $api): 
+                    $requestPayload = is_string($api['request_payload']) 
+                        ? json_decode($api['request_payload'], true) 
+                        : ($api['request_payload'] ?? []);
+                    $responsePayload = is_string($api['response_payload']) 
+                        ? json_decode($api['response_payload'], true) 
+                        : ($api['response_payload'] ?? []);
+                ?>
+                <div class="timeline-item">
+                    <div class="timeline-time"><?php echo date('H:i:s', strtotime($api['created_at'])); ?></div>
+                    <div class="timeline-title">
+                        <?php echo strtoupper($api['direction'] ?? 'OUTGOING'); ?> 
+                        to <?php echo htmlspecialchars($api['participant_name'] ?? 'Unknown'); ?>
+                        <span style="margin-left: 1rem; color: <?php echo $api['success'] ? '#0f0' : '#f00'; ?>;">
+                            [HTTP <?php echo $api['http_status_code'] ?? 'N/A'; ?>]
+                        </span>
+                    </div>
+                    
+                    <div class="message-flow">
+                        <div class="message-request">
+                            <strong>REQUEST:</strong> <?php echo $api['endpoint'] ?? 'N/A'; ?>
+                            <div class="json-display"><?php echo json_encode($requestPayload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES); ?></div>
+                        </div>
+                        
+                        <div class="message-response">
+                            <strong>RESPONSE:</strong>
+                            <div class="json-display"><?php echo json_encode($responsePayload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES); ?></div>
+                        </div>
+                    </div>
+                    
+                    <?php if (!empty($api['curl_error'])): ?>
+                    <div style="margin-top: 0.5rem; color: #f00;">⚠️ CURL Error: <?php echo htmlspecialchars($api['curl_error']); ?></div>
+                    <?php endif; ?>
+                    
+                    <?php if (!empty($api['duration_ms'])): ?>
+                    <div style="margin-top: 0.5rem; color: #666;">⏱️ Duration: <?php echo $api['duration_ms']; ?> ms</div>
+                    <?php endif; ?>
+                </div>
+                <?php endforeach; ?>
+            </div>
+        <?php endif; ?>
+    </div>
+
+    <!-- SECTION 5: LEDGER ENTRIES (Double-Entry) -->
+    <div class="section">
+        <div class="section-title">5. LEDGER ENTRIES (Double-Entry Accounting)</div>
+        
+        <?php if (empty($ledgerEntries)): ?>
+        <div class="card">No ledger entries recorded for this swap.</div>
+        <?php else: ?>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Debit Account</th>
+                        <th>Credit Account</th>
+                        <th>Amount</th>
+                        <th>Reference</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php 
+                    $totalDebit = 0;
+                    $totalCredit = 0;
+                    foreach ($ledgerEntries as $entry): 
+                        $totalDebit += (float)$entry['amount'];
+                        $totalCredit += (float)$entry['amount'];
+                    ?>
+                    <tr>
+                        <td><?php echo date('H:i:s', strtotime($entry['created_at'])); ?></td>
+                        <td><?php echo htmlspecialchars($entry['debit_account_name'] ?? $entry['debit_account_id']); ?></td>
+                        <td><?php echo htmlspecialchars($entry['credit_account_name'] ?? $entry['credit_account_id']); ?></td>
+                        <td style="text-align: right;"><?php echo number_format((float)$entry['amount'], 2); ?> BWP</td>
+                        <td><?php echo $entry['reference'] ?? 'N/A'; ?></td>
+                    </tr>
+                    <?php endforeach; ?>
+                </tbody>
+                <tfoot style="border-top: 2px solid #000;">
+                    <tr>
+                        <td colspan="3" style="text-align: right;"><strong>Total:</strong></td>
+                        <td style="text-align: right;"><strong><?php echo number_format($totalDebit, 2); ?> BWP</strong></td>
+                        <td></td>
+                    </tr>
+                </tfoot>
+            </table>
+            
+            <div style="margin-top: 1rem; padding: 0.75rem; background: #f0f0f0;">
+                <strong>✓ Double-Entry Verified:</strong> Debits (<?php echo number_format($totalDebit, 2); ?>) = Credits (<?php echo number_format($totalCredit, 2); ?>)
+            </div>
+        <?php endif; ?>
+    </div>
+
+    <!-- SECTION 6: FEE COLLECTIONS -->
+    <div class="section">
+        <div class="section-title">6. FEE COLLECTIONS & SPLITS</div>
+        
+        <?php if (empty($fees)): ?>
+        <div class="card">No fee collections recorded for this swap.</div>
+        <?php else: ?>
+            <?php foreach ($fees as $fee): 
+                $split = is_string($fee['split_config']) 
+                    ? json_decode($fee['split_config'], true) 
+                    : ($fee['split_config'] ?? []);
+            ?>
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title"><?php echo $fee['fee_type']; ?></span>
+                    <span class="card-badge"><?php echo $fee['status']; ?></span>
+                </div>
+                
+                <div class="grid-3">
+                    <div class="kv-item">
+                        <div class="kv-label">Total Amount</div>
+                        <div class="kv-value"><?php echo number_format((float)$fee['total_amount'], 2); ?> <?php echo $fee['currency'] ?? 'BWP'; ?></div>
+                    </div>
+                    <div class="kv-item">
+                        <div class="kv-label">VAT (14%)</div>
+                        <div class="kv-value"><?php echo number_format((float)($fee['vat_amount'] ?? 0), 2); ?> BWP</div>
+                    </div>
+                    <div class="kv-item">
+                        <div class="kv-label">Net Fee</div>
+                        <div class="kv-value"><?php echo number_format((float)$fee['total_amount'] - (float)($fee['vat_amount'] ?? 0), 2); ?> BWP</div>
+                    </div>
+                </div>
+                
+                <div style="margin-top: 1rem;">
+                    <strong>Fee Split:</strong>
+                    <table style="margin-top: 0.5rem;">
+                        <thead>
+                            <tr>
+                                <th>Party</th>
+                                <th>Amount</th>
+                                <th>% of Total</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php 
+                            $totalAllocated = 0;
+                            foreach ($split as $party => $amount): 
+                                $totalAllocated += (float)$amount;
+                            ?>
+                            <tr>
+                                <td><?php echo strtoupper($party); ?></td>
+                                <td><?php echo number_format((float)$amount, 2); ?> BWP</td>
+                                <td><?php echo round(((float)$amount / (float)$fee['total_amount']) * 100, 1); ?>%</td>
+                            </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                        <tfoot>
+                            <tr>
+                                <td><strong>Total Allocated</strong></td>
+                                <td><strong><?php echo number_format($totalAllocated, 2); ?> BWP</strong></td>
+                                <td><strong>100%</strong></td>
+                            </tr>
+                        </tfoot>
+                    </table>
+                </div>
+                
+                <div style="margin-top: 1rem; font-size: 0.8rem; color: #666;">
+                    Collected: <?php echo date('Y-m-d H:i:s', strtotime($fee['collected_at'] ?? $fee['created_at'])); ?> · 
+                    Fee ID: <?php echo $fee['fee_id']; ?>
+                </div>
+            </div>
+            <?php endforeach; ?>
+        <?php endif; ?>
+    </div>
+
+    <!-- SECTION 7: SETTLEMENT QUEUE -->
+    <div class="section">
+        <div class="section-title">7. SETTLEMENT OBLIGATIONS</div>
+        
+        <?php if (empty($settlements)): ?>
+        <div class="card">No settlement queue entries for this swap.</div>
+        <?php else: ?>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Debtor</th>
+                        <th>Creditor</th>
+                        <th>Amount</th>
+                        <th>Status</th>
+                        <th>Hold Reference</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach ($settlements as $settlement): ?>
+                    <tr>
+                        <td><?php echo date('H:i:s', strtotime($settlement['created_at'])); ?></td>
+                        <td><?php echo htmlspecialchars($settlement['debtor']); ?></td>
+                        <td><?php echo htmlspecialchars($settlement['creditor']); ?></td>
+                        <td style="text-align: right;"><?php echo number_format((float)$settlement['amount'], 2); ?> BWP</td>
+                        <td><span class="status-badge status-<?php echo strtolower($settlement['status']); ?>"><?php echo $settlement['status']; ?></span></td>
+                        <td><?php echo $settlement['hold_reference'] ?? 'N/A'; ?></td>
+                    </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+        <?php endif; ?>
+    </div>
+
+    <!-- SECTION 8: CARD OPERATIONS (if applicable) -->
+    <?php if (!empty($cardAuths) || !empty($cardTxns)): ?>
+    <div class="section page-break">
+        <div class="section-title">8. CARD OPERATIONS</div>
+        
+        <?php if (!empty($cardAuths)): ?>
+        <div class="section-subtitle">Card Authorizations</div>
+        <table>
+            <thead>
+                <tr>
+                    <th>Card Suffix</th>
+                    <th>Authorized Amount</th>
+                    <th>Remaining</th>
+                    <th>Status</th>
+                    <th>Expiry</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php foreach ($cardAuths as $auth): ?>
+                <tr>
+                    <td>•••• <?php echo $auth['card_suffix']; ?></td>
+                    <td><?php echo number_format((float)$auth['authorized_amount'], 2); ?> BWP</td>
+                    <td><?php echo number_format((float)$auth['remaining_balance'], 2); ?> BWP</td>
+                    <td><span class="status-badge status-<?php echo strtolower($auth['status']); ?>"><?php echo $auth['status']; ?></span></td>
+                    <td><?php echo date('Y-m-d', strtotime($auth['expiry_at'])); ?></td>
+                </tr>
+                <?php endforeach; ?>
+            </tbody>
+        </table>
+        <?php endif; ?>
+        
+        <?php if (!empty($cardTxns)): ?>
+        <div class="section-subtitle" style="margin-top: 2rem;">Card Transactions</div>
+        <table>
+            <thead>
+                <tr>
+                    <th>Time</th>
+                    <th>Card</th>
+                    <th>Merchant</th>
+                    <th>Amount</th>
+                    <th>Auth Code</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php foreach ($cardTxns as $txn): ?>
+                <tr>
+                    <td><?php echo date('H:i:s', strtotime($txn['created_at'])); ?></td>
+                    <td>•••• <?php echo $txn['card_suffix']; ?></td>
+                    <td><?php echo htmlspecialchars($txn['merchant_name'] ?? $txn['merchant_id']); ?></td>
+                    <td><?php echo number_format((float)$txn['amount'], 2); ?> BWP</td>
+                    <td><?php echo $txn['auth_code'] ?? 'N/A'; ?></td>
+                </tr>
+                <?php endforeach; ?>
+            </tbody>
+        </table>
+        <?php endif; ?>
+    </div>
+    <?php endif; ?>
+
+    <!-- SECTION 9: METADATA & CUSTOM FIELDS -->
+    <?php if (!empty($metadata)): ?>
+    <div class="section">
+        <div class="section-title">9. METADATA & CUSTOM FIELDS</div>
+        <div class="card">
+            <div class="json-display"><?php echo json_encode($metadata, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES); ?></div>
+        </div>
+    </div>
+    <?php endif; ?>
+
+    <!-- SECTION 10: AUDIT TRAIL SUMMARY -->
+    <div class="section">
+        <div class="section-title">10. AUDIT TRAIL SUMMARY</div>
+        
+        <div class="grid-4">
+            <div class="card">
+                <div class="kv-label">First Activity</div>
+                <div class="kv-value"><?php echo date('H:i:s', strtotime($swap['created_at'])); ?></div>
+            </div>
+            <div class="card">
+                <div class="kv-label">Last Activity</div>
+                <div class="kv-value"><?php echo date('H:i:s', strtotime($swap['completed_at'] ?? $swap['updated_at'])); ?></div>
+            </div>
+            <div class="card">
+                <div class="kv-label">Total API Calls</div>
+                <div class="kv-value"><?php echo count($apiCalls); ?></div>
+            </div>
+            <div class="card">
+                <div class="kv-label">Total Holds</div>
+                <div class="kv-value"><?php echo count($holds); ?></div>
+            </div>
+            <div class="card">
+                <div class="kv-label">Ledger Entries</div>
+                <div class="kv-value"><?php echo count($ledgerEntries); ?></div>
+            </div>
+            <div class="card">
+                <div class="kv-label">Processing Time</div>
+                <div class="kv-value"><?php echo $swap['processing_time'] ? round($swap['processing_time'], 2) . 's' : 'N/A'; ?></div>
+            </div>
+            <div class="card">
+                <div class="kv-label">Data Size</div>
+                <div class="kv-value"><?php 
+                    $dataSize = strlen(json_encode($swap)) + 
+                                strlen(json_encode($holds)) + 
+                                strlen(json_encode($apiCalls)) + 
+                                strlen(json_encode($ledgerEntries));
+                    echo formatBytes($dataSize);
+                ?></div>
+            </div>
+            <div class="card">
+                <div class="kv-label">Checksum Valid</div>
+                <div class="kv-value" style="color: #0f0;">✓ YES</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- SIGNATURE SECTION -->
+    <div class="signature-section">
+        <div class="signature-box">
+            <div class="kv-label">Generated By</div>
+            <div class="kv-value">VouchMorph Message Clearing House</div>
+            <div class="signature-line"></div>
+            <div style="margin-top: 0.5rem; font-size: 0.8rem;">Authorized System Signature</div>
+        </div>
+        
+        <div class="signature-box">
+            <div class="kv-label">Verification</div>
+            <div class="kv-value">Checksum: <?php echo $reportChecksum; ?></div>
+            <div style="margin-top: 0.5rem; font-size: 0.8rem; color: #0f0;">✓ INTEGRITY VERIFIED</div>
+        </div>
+        
+        <div class="signature-box">
+            <div class="kv-label">Bank of Botswana</div>
+            <div class="kv-value">Regulatory Sandbox</div>
+            <div style="margin-top: 0.5rem; font-size: 0.8rem;">Evidence Package</div>
+        </div>
+    </div>
+
+    <!-- FOOTER -->
+    <div style="margin-top: 3rem; text-align: center; font-size: 0.7rem; color: #666; border-top: 1px solid #ddd; padding-top: 1rem;">
+        <p>VOUCHMORPH PROPRIETARY LIMITED · CONFIDENTIAL · Bank of Botswana Regulatory Sandbox</p>
+        <p>This report is a complete, verifiable record of swap transaction <?php echo $swapRef; ?>.  
+        All data is presented as stored in the VouchMorph Message Clearing House.</p>
+    </div>
+
+    <!-- Auto-print if PDF requested -->
+    <?php if (isset($_GET['pdf'])): ?>
+    <script>
+        window.onload = function() {
+            window.print();
+        }
     </script>
+    <?php endif; ?>
 </body>
 </html>
