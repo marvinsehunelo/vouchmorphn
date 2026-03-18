@@ -27,8 +27,13 @@ function format_amount($amount, $decimals = 2) {
     return number_format((float)$amount, $decimals);
 }
 
-function sanitize_filename($filename) {
-    return preg_replace('/[^a-zA-Z0-9_-]/', '', $filename);
+function safe_json_decode($json, $default = []) {
+    if (is_array($json)) return $json;
+    if (is_string($json) && !empty($json)) {
+        $decoded = json_decode($json, true);
+        return $decoded ?: $default;
+    }
+    return $default;
 }
 
 // ============================================================================
@@ -38,57 +43,162 @@ function sanitize_filename($filename) {
 // Download single swap details
 if (isset($_GET['download_swap']) && !empty($_GET['swap'])) {
     $downloadSwap = $_GET['swap'];
+    $format = $_GET['format'] ?? 'csv';
     
-    // Get swap details with all related data
+    // Get swap details
     $swapQuery = $db->prepare("
         SELECT 
-            s.*,
-            s.source_details,
-            s.destination_details,
-            COUNT(DISTINCT h.hold_id) as hold_count,
-            COUNT(DISTINCT a.log_id) as api_count,
-            SUM(f.total_amount) as total_fees
-        FROM swap_requests s
-        LEFT JOIN hold_transactions h ON s.swap_uuid = h.swap_reference
-        LEFT JOIN api_message_logs a ON s.swap_uuid = a.message_id
-        LEFT JOIN swap_fee_collections f ON s.swap_uuid = f.swap_reference
-        WHERE s.swap_uuid = ?
-        GROUP BY s.swap_id
+            swap_id,
+            swap_uuid,
+            from_currency,
+            to_currency,
+            amount,
+            source_details,
+            destination_details,
+            status,
+            created_at,
+            metadata
+        FROM swap_requests 
+        WHERE swap_uuid = ?
     ");
     $swapQuery->execute([$downloadSwap]);
     $swap = $swapQuery->fetch(PDO::FETCH_ASSOC);
     
     if ($swap) {
-        // Get all related data
-        $holdQuery = $db->prepare("SELECT * FROM hold_transactions WHERE swap_reference = ? ORDER BY created_at ASC");
+        // Get hold transactions
+        $holdQuery = $db->prepare("
+            SELECT 
+                hold_id,
+                hold_reference,
+                swap_reference,
+                participant_id,
+                participant_name,
+                asset_type,
+                amount,
+                currency,
+                status,
+                hold_expiry,
+                source_details,
+                destination_institution,
+                destination_participant_id,
+                metadata,
+                placed_at,
+                released_at,
+                debited_at,
+                created_at,
+                updated_at,
+                source_institution
+            FROM hold_transactions 
+            WHERE swap_reference = ?
+            ORDER BY created_at ASC
+        ");
         $holdQuery->execute([$downloadSwap]);
         $holds = $holdQuery->fetchAll(PDO::FETCH_ASSOC);
         
-        $apiQuery = $db->prepare("SELECT * FROM api_message_logs WHERE message_id = ? ORDER BY created_at ASC");
+        // Get API messages
+        $apiQuery = $db->prepare("
+            SELECT 
+                log_id,
+                message_id,
+                message_type,
+                direction,
+                participant_id,
+                participant_name,
+                endpoint,
+                request_payload,
+                response_payload,
+                http_status_code,
+                curl_error,
+                success,
+                duration_ms,
+                retry_count,
+                created_at,
+                processed_at
+            FROM api_message_logs 
+            WHERE message_id = ?
+            ORDER BY created_at ASC
+        ");
         $apiQuery->execute([$downloadSwap]);
         $apis = $apiQuery->fetchAll(PDO::FETCH_ASSOC);
         
-        $feeQuery = $db->prepare("SELECT * FROM swap_fee_collections WHERE swap_reference = ? ORDER BY created_at ASC");
+        // Get fee collections
+        $feeQuery = $db->prepare("
+            SELECT 
+                fee_id,
+                swap_reference,
+                fee_type,
+                total_amount,
+                currency,
+                source_institution,
+                destination_institution,
+                split_config,
+                vat_amount,
+                status,
+                collected_at,
+                settled_at,
+                created_at,
+                updated_at
+            FROM swap_fee_collections 
+            WHERE swap_reference = ?
+            ORDER BY created_at ASC
+        ");
         $feeQuery->execute([$downloadSwap]);
         $fees = $feeQuery->fetchAll(PDO::FETCH_ASSOC);
         
-        $ledgerQuery = $db->prepare("SELECT * FROM ledger_entries WHERE reference = ? ORDER BY created_at ASC");
+        // Get ledger entries
+        $ledgerQuery = $db->prepare("
+            SELECT 
+                entry_id,
+                transaction_id,
+                debit_account_id,
+                credit_account_id,
+                amount,
+                currency_code,
+                reference,
+                split_type,
+                created_at,
+                updated_at
+            FROM ledger_entries 
+            WHERE reference = ?
+            ORDER BY created_at ASC
+        ");
         $ledgerQuery->execute([$downloadSwap]);
         $ledgers = $ledgerQuery->fetchAll(PDO::FETCH_ASSOC);
         
+        // Get settlements
+        $sourceInst = null;
+        $destInst = null;
+        
+        // Try to get institutions from holds first
+        if (!empty($holds)) {
+            $sourceInst = $holds[0]['source_institution'] ?? null;
+            $destInst = $holds[0]['destination_institution'] ?? null;
+        }
+        
+        // If not found, try from swap details
+        if (!$sourceInst || !$destInst) {
+            $sourceDetails = safe_json_decode($swap['source_details']);
+            $destDetails = safe_json_decode($swap['destination_details']);
+            $sourceInst = $sourceDetails['institution'] ?? null;
+            $destInst = $destDetails['institution'] ?? null;
+        }
+        
         $settlementQuery = $db->prepare("
-            SELECT * FROM settlement_queue 
-            WHERE debtor IN (SELECT source_institution FROM hold_transactions WHERE swap_reference = ?)
-               OR creditor IN (SELECT source_institution FROM hold_transactions WHERE swap_reference = ?)
+            SELECT 
+                id,
+                debtor,
+                creditor,
+                amount,
+                created_at,
+                updated_at
+            FROM settlement_queue 
+            WHERE debtor = ? OR creditor = ? OR debtor = ? OR creditor = ?
+            ORDER BY created_at DESC
         ");
-        $settlementQuery->execute([$downloadSwap, $downloadSwap]);
+        $settlementQuery->execute([$sourceInst, $sourceInst, $destInst, $destInst]);
         $settlements = $settlementQuery->fetchAll(PDO::FETCH_ASSOC);
         
-        // Generate filename
         $filename = 'swap_' . substr($downloadSwap, 0, 8) . '_' . date('Ymd_His');
-        
-        // Determine format
-        $format = $_GET['format'] ?? 'csv';
         
         if ($format === 'csv') {
             header('Content-Type: text/csv');
@@ -107,21 +217,17 @@ if (isset($_GET['download_swap']) && !empty($_GET['swap'])) {
             
             // Source Details
             fputcsv($output, ['SOURCE DETAILS']);
-            $source = is_string($swap['source_details']) ? json_decode($swap['source_details'], true) : $swap['source_details'];
-            if (is_array($source)) {
-                foreach ($source as $key => $value) {
-                    fputcsv($output, [$key, is_array($value) ? json_encode($value) : $value]);
-                }
+            $source = safe_json_decode($swap['source_details']);
+            foreach ($source as $key => $value) {
+                fputcsv($output, [$key, is_array($value) ? json_encode($value) : $value]);
             }
             fputcsv($output, []);
             
             // Destination Details
             fputcsv($output, ['DESTINATION DETAILS']);
-            $dest = is_string($swap['destination_details']) ? json_decode($swap['destination_details'], true) : $swap['destination_details'];
-            if (is_array($dest)) {
-                foreach ($dest as $key => $value) {
-                    fputcsv($output, [$key, is_array($value) ? json_encode($value) : $value]);
-                }
+            $dest = safe_json_decode($swap['destination_details']);
+            foreach ($dest as $key => $value) {
+                fputcsv($output, [$key, is_array($value) ? json_encode($value) : $value]);
             }
             fputcsv($output, []);
             
@@ -131,8 +237,8 @@ if (isset($_GET['download_swap']) && !empty($_GET['swap'])) {
                 fputcsv($output, array_keys($holds[0]));
                 foreach ($holds as $hold) {
                     $row = [];
-                    foreach ($holds[0] as $key => $value) {
-                        $row[] = $hold[$key] ?? '';
+                    foreach (array_keys($holds[0]) as $col) {
+                        $row[] = $hold[$col] ?? '';
                     }
                     fputcsv($output, $row);
                 }
@@ -162,13 +268,14 @@ if (isset($_GET['download_swap']) && !empty($_GET['swap'])) {
             if (!empty($fees)) {
                 fputcsv($output, ['Type', 'Total', 'Currency', 'VAT', 'Status', 'Split']);
                 foreach ($fees as $fee) {
+                    $split = safe_json_decode($fee['split_config']);
                     fputcsv($output, [
                         $fee['fee_type'],
                         $fee['total_amount'],
                         $fee['currency'] ?? 'BWP',
                         $fee['vat_amount'] ?? 0,
                         $fee['status'],
-                        is_string($fee['split_config']) ? $fee['split_config'] : json_encode($fee['split_config'])
+                        json_encode($split)
                     ]);
                 }
             }
@@ -176,38 +283,14 @@ if (isset($_GET['download_swap']) && !empty($_GET['swap'])) {
             fclose($output);
             exit;
         }
-        
-        if ($format === 'json') {
-            header('Content-Type: application/json');
-            header('Content-Disposition: attachment; filename="' . $filename . '.json"');
-            
-            $report = [
-                'metadata' => [
-                    'generated_at' => date('c'),
-                    'swap_uuid' => $swap['swap_uuid'],
-                    'report_type' => 'COMPLETE_SWAP_DETAIL'
-                ],
-                'swap' => $swap,
-                'source_details' => $source,
-                'destination_details' => $dest,
-                'holds' => $holds,
-                'api_messages' => $apis,
-                'fees' => $fees,
-                'ledger_entries' => $ledgers,
-                'settlements' => $settlements
-            ];
-            
-            echo json_encode($report, JSON_PRETTY_PRINT);
-            exit;
-        }
     }
 }
 
 // Download full system report
 if (isset($_GET['download_report'])) {
-    $reportType = $_GET['download_report']; // csv or json
+    $reportType = $_GET['download_report'];
     
-    // Get comprehensive system data
+    // Get all swaps
     $swapsQuery = $db->query("
         SELECT 
             s.swap_uuid,
@@ -218,21 +301,15 @@ if (isset($_GET['download_report'])) {
             s.created_at,
             s.source_details->>'institution' as source_inst,
             s.destination_details->>'institution' as dest_inst,
-            s.source_details->>'asset_type' as source_type,
-            s.destination_details->>'asset_type' as dest_type,
-            COUNT(DISTINCT h.hold_id) as holds,
-            COUNT(DISTINCT a.log_id) as api_calls,
-            COALESCE(SUM(f.total_amount), 0) as total_fees
+            (SELECT COUNT(*) FROM hold_transactions h WHERE h.swap_reference = s.swap_uuid) as holds,
+            (SELECT COUNT(*) FROM api_message_logs a WHERE a.message_id = s.swap_uuid) as api_calls,
+            (SELECT COALESCE(SUM(f.total_amount), 0) FROM swap_fee_collections f WHERE f.swap_reference = s.swap_uuid) as total_fees
         FROM swap_requests s
-        LEFT JOIN hold_transactions h ON s.swap_uuid = h.swap_reference
-        LEFT JOIN api_message_logs a ON s.swap_uuid = a.message_id
-        LEFT JOIN swap_fee_collections f ON s.swap_uuid = f.swap_reference
-        GROUP BY s.swap_uuid
         ORDER BY s.created_at DESC
     ");
     $allSwaps = $swapsQuery->fetchAll(PDO::FETCH_ASSOC);
     
-    // Participants data
+    // Get participants
     $participantsQuery = $db->query("
         SELECT 
             p.name,
@@ -240,18 +317,14 @@ if (isset($_GET['download_report'])) {
             p.category,
             p.status,
             p.provider_code,
-            COUNT(DISTINCT h.hold_id) as holds,
-            COUNT(DISTINCT a.log_id) as messages,
-            COALESCE(SUM(h.amount), 0) as total_hold_value
+            (SELECT COUNT(*) FROM hold_transactions h WHERE h.source_institution = p.name OR h.destination_institution = p.name) as holds,
+            (SELECT COUNT(*) FROM api_message_logs a WHERE a.participant_name = p.name) as messages
         FROM participants p
-        LEFT JOIN hold_transactions h ON p.name = h.source_institution OR p.name = h.destination_institution
-        LEFT JOIN api_message_logs a ON p.name = a.participant_name
         WHERE p.status = 'ACTIVE'
-        GROUP BY p.participant_id
     ");
     $participants = $participantsQuery->fetchAll(PDO::FETCH_ASSOC);
     
-    // Settlement data
+    // Get settlements
     $settlementQuery = $db->query("
         SELECT 
             debtor,
@@ -264,7 +337,7 @@ if (isset($_GET['download_report'])) {
     ");
     $settlements = $settlementQuery->fetchAll(PDO::FETCH_ASSOC);
     
-    // Fee summary
+    // Get fee summary
     $feeSummaryQuery = $db->query("
         SELECT 
             fee_type,
@@ -306,7 +379,7 @@ if (isset($_GET['download_report'])) {
         
         // All Swaps
         fputcsv($output, ['ALL SWAPS (' . count($allSwaps) . ' transactions)']);
-        fputcsv($output, ['Swap UUID', 'Amount', 'Currency', 'From', 'To', 'From Type', 'To Type', 'Status', 'Date', 'Holds', 'API Calls', 'Fees']);
+        fputcsv($output, ['Swap UUID', 'Amount', 'Currency', 'From', 'To', 'Status', 'Date', 'Holds', 'API Calls', 'Fees']);
         foreach ($allSwaps as $swap) {
             fputcsv($output, [
                 $swap['swap_uuid'],
@@ -314,8 +387,6 @@ if (isset($_GET['download_report'])) {
                 $swap['from_currency'],
                 $swap['source_inst'] ?? 'N/A',
                 $swap['dest_inst'] ?? 'N/A',
-                $swap['source_type'] ?? 'N/A',
-                $swap['dest_type'] ?? 'N/A',
                 $swap['status'],
                 $swap['created_at'],
                 $swap['holds'] ?? 0,
@@ -327,7 +398,7 @@ if (isset($_GET['download_report'])) {
         
         // Participants
         fputcsv($output, ['PARTICIPANTS (' . count($participants) . ' active)']);
-        fputcsv($output, ['Name', 'Type', 'Category', 'Provider Code', 'Status', 'Holds', 'Messages', 'Hold Value']);
+        fputcsv($output, ['Name', 'Type', 'Category', 'Provider Code', 'Status', 'Holds', 'Messages']);
         foreach ($participants as $p) {
             fputcsv($output, [
                 $p['name'] ?? 'N/A',
@@ -336,8 +407,7 @@ if (isset($_GET['download_report'])) {
                 $p['provider_code'] ?? 'N/A',
                 $p['status'] ?? 'N/A',
                 $p['holds'] ?? 0,
-                $p['messages'] ?? 0,
-                $p['total_hold_value'] ?? 0
+                $p['messages'] ?? 0
             ]);
         }
         fputcsv($output, []);
@@ -353,50 +423,8 @@ if (isset($_GET['download_report'])) {
                 $s['count'] ?? 0
             ]);
         }
-        fputcsv($output, []);
-        
-        // Fee Summary
-        fputcsv($output, ['FEE SUMMARY']);
-        fputcsv($output, ['Fee Type', 'Count', 'Total', 'VAT']);
-        foreach ($feeSummary as $fee) {
-            fputcsv($output, [
-                $fee['fee_type'] ?? 'N/A',
-                $fee['count'] ?? 0,
-                $fee['total'] ?? 0,
-                $fee['total_vat'] ?? 0
-            ]);
-        }
         
         fclose($output);
-        exit;
-    }
-    
-    if ($reportType === 'json') {
-        header('Content-Type: application/json');
-        header('Content-Disposition: attachment; filename="' . $filename . '.json"');
-        
-        $report = [
-            'metadata' => [
-                'generated_at' => date('c'),
-                'report_type' => 'COMPLETE_SYSTEM_REPORT',
-                'version' => '2.0'
-            ],
-            'summary' => [
-                'total_swaps' => count($allSwaps),
-                'active_participants' => count($participants),
-                'total_settlements' => count($settlements),
-                'success_rate' => $successRate,
-                'completed' => $success['completed'] ?? 0,
-                'failed' => $success['failed'] ?? 0,
-                'pending' => $success['pending'] ?? 0
-            ],
-            'swaps' => $allSwaps,
-            'participants' => $participants,
-            'settlements' => $settlements,
-            'fees' => $feeSummary
-        ];
-        
-        echo json_encode($report, JSON_PRETTY_PRINT);
         exit;
     }
 }
@@ -430,13 +458,16 @@ $tps = $tpsData && $tpsData['duration_seconds'] > 0
     ? round($tpsData['tx_count'] / $tpsData['duration_seconds'], 2) 
     : 0;
 
-$liquidityQuery = $db->query("SELECT SUM(balance) as total_liquidity FROM ledger_accounts WHERE account_type IN ('escrow', 'settlement')");
+// Liquidity from ledger_accounts
+$liquidityQuery = $db->query("SELECT COALESCE(SUM(balance), 0) as total_liquidity FROM ledger_accounts WHERE account_type IN ('escrow', 'settlement')");
 $liquidity = $liquidityQuery->fetchColumn() ?: 0;
 
+// Active institutions
 $instQuery = $db->query("SELECT COUNT(*) FROM participants WHERE status = 'ACTIVE'");
 $activeInstitutions = $instQuery->fetchColumn();
 
-$pendingQuery = $db->query("SELECT COUNT(*) FROM settlement_queue WHERE status = 'PENDING'");
+// Pending messages - using settlement_queue
+$pendingQuery = $db->query("SELECT COUNT(*) FROM settlement_queue");
 $pendingMessages = $pendingQuery->fetchColumn() ?: 0;
 
 // 2. Live Swap Stream
@@ -449,10 +480,8 @@ $liveSwapsQuery = $db->query("
         sr.source_details->>'institution' as source_institution,
         sr.source_details->>'asset_type' as source_type,
         sr.destination_details->>'institution' as dest_institution,
-        sr.destination_details->>'asset_type' as dest_type,
-        COALESCE(ht.status, 'NO_HOLD') as hold_status
+        sr.destination_details->>'asset_type' as dest_type
     FROM swap_requests sr
-    LEFT JOIN hold_transactions ht ON sr.swap_uuid = ht.swap_reference
     ORDER BY sr.created_at DESC
     LIMIT 20
 ");
@@ -466,52 +495,87 @@ $feeDetails = [];
 $apiCalls = [];
 
 if ($selectedSwap) {
-    $swapDetailQuery = $db->prepare("SELECT * FROM swap_requests WHERE swap_uuid = ?");
+    $swapDetailQuery = $db->prepare("
+        SELECT 
+            swap_id,
+            swap_uuid,
+            from_currency,
+            to_currency,
+            amount,
+            source_details,
+            destination_details,
+            status,
+            created_at,
+            metadata
+        FROM swap_requests 
+        WHERE swap_uuid = ?
+    ");
     $swapDetailQuery->execute([$selectedSwap]);
     $swapDetails = $swapDetailQuery->fetch(PDO::FETCH_ASSOC);
     
     if ($swapDetails) {
-        $holdQuery = $db->prepare("SELECT * FROM hold_transactions WHERE swap_reference = ?");
+        // Get hold transactions
+        $holdQuery = $db->prepare("
+            SELECT * FROM hold_transactions 
+            WHERE swap_reference = ?
+            ORDER BY created_at ASC
+        ");
         $holdQuery->execute([$selectedSwap]);
         $messageFlow['hold'] = $holdQuery->fetchAll(PDO::FETCH_ASSOC);
         
-        $apiQuery = $db->prepare("SELECT * FROM api_message_logs WHERE message_id = ? ORDER BY created_at ASC");
+        // Get API calls
+        $apiQuery = $db->prepare("
+            SELECT * FROM api_message_logs 
+            WHERE message_id = ?
+            ORDER BY created_at ASC
+        ");
         $apiQuery->execute([$selectedSwap]);
         $apiCalls = $apiQuery->fetchAll(PDO::FETCH_ASSOC);
         
+        // Get ledger entries
         $ledgerQuery = $db->prepare("
-            SELECT le.*, 
-                   la_debit.account_name as debit_account_name,
-                   la_credit.account_name as credit_account_name
+            SELECT le.*
             FROM ledger_entries le
-            LEFT JOIN ledger_accounts la_debit ON le.debit_account_id = la_debit.account_id
-            LEFT JOIN ledger_accounts la_credit ON le.credit_account_id = la_credit.account_id
             WHERE le.reference = ?
+            ORDER BY le.created_at ASC
         ");
         $ledgerQuery->execute([$selectedSwap]);
         $ledgerEntries = $ledgerQuery->fetchAll(PDO::FETCH_ASSOC);
         
-        $feeQuery = $db->prepare("SELECT * FROM swap_fee_collections WHERE swap_reference = ?");
+        // Get fee collections
+        $feeQuery = $db->prepare("
+            SELECT * FROM swap_fee_collections 
+            WHERE swap_reference = ?
+            ORDER BY created_at ASC
+        ");
         $feeQuery->execute([$selectedSwap]);
         $feeDetails = $feeQuery->fetchAll(PDO::FETCH_ASSOC);
         
-        $sourceInst = is_array($swapDetails['source_details']) 
-            ? ($swapDetails['source_details']['institution'] ?? '') 
-            : (json_decode($swapDetails['source_details'], true)['institution'] ?? '');
+        // Try to get settlement queue entries
+        $sourceDetails = safe_json_decode($swapDetails['source_details']);
+        $destDetails = safe_json_decode($swapDetails['destination_details']);
+        $sourceInst = $sourceDetails['institution'] ?? null;
+        $destInst = $destDetails['institution'] ?? null;
         
-        $destInst = is_array($swapDetails['destination_details']) 
-            ? ($swapDetails['destination_details']['institution'] ?? '') 
-            : (json_decode($swapDetails['destination_details'], true)['institution'] ?? '');
-        
-        $settlementQuery = $db->prepare("SELECT * FROM settlement_queue WHERE debtor = ? OR creditor = ? ORDER BY created_at DESC LIMIT 1");
-        $settlementQuery->execute([$sourceInst, $destInst]);
-        $messageFlow['settlement'] = $settlementQuery->fetch(PDO::FETCH_ASSOC);
+        if ($sourceInst || $destInst) {
+            $settlementQuery = $db->prepare("
+                SELECT * FROM settlement_queue 
+                WHERE debtor = ? OR creditor = ? OR debtor = ? OR creditor = ?
+                ORDER BY created_at DESC
+                LIMIT 5
+            ");
+            $settlementQuery->execute([$sourceInst, $sourceInst, $destInst, $destInst]);
+            $messageFlow['settlement'] = $settlementQuery->fetchAll(PDO::FETCH_ASSOC);
+        }
     }
 }
 
 // 4. Net Positions
 $netPositionsQuery = $db->query("
-    SELECT debtor, creditor, SUM(amount) as net_amount
+    SELECT 
+        debtor,
+        creditor,
+        SUM(amount) as net_amount
     FROM settlement_queue
     GROUP BY debtor, creditor
     ORDER BY net_amount DESC
@@ -532,17 +596,18 @@ foreach ($netPositions as $pos) {
 }
 
 // 5. Clearance Metrics
-$clearanceQuery = $db->query("
+$clearanceQuery = $db->prepare("
     SELECT 
         participant_name,
         COUNT(*) as total_messages,
         SUM(CASE WHEN success THEN 1 ELSE 0 END) as successful,
         AVG(duration_ms) as avg_response_time
     FROM api_message_logs
-    WHERE created_at BETWEEN '{$dateRange['start']}' AND '{$dateRange['end']}'
+    WHERE created_at BETWEEN ? AND ?
     GROUP BY participant_name
     ORDER BY total_messages DESC
 ");
+$clearanceQuery->execute([$dateRange['start'], $dateRange['end']]);
 $clearanceMetrics = $clearanceQuery->fetchAll(PDO::FETCH_ASSOC);
 
 // 6. Settlement Matrix
@@ -551,7 +616,11 @@ $settlementMatrix = [];
 foreach ($institutions as $debtor) {
     foreach ($institutions as $creditor) {
         if ($debtor !== $creditor) {
-            $query = $db->prepare("SELECT SUM(amount) as amount FROM settlement_queue WHERE debtor = ? AND creditor = ?");
+            $query = $db->prepare("
+                SELECT COALESCE(SUM(amount), 0) as amount
+                FROM settlement_queue
+                WHERE debtor = ? AND creditor = ?
+            ");
             $query->execute([$debtor, $creditor]);
             $amount = $query->fetchColumn();
             if ($amount > 0) {
@@ -679,6 +748,7 @@ $successRate = $successStats['total'] > 0
             text-transform: uppercase;
             transition: all 0.2s;
             display: inline-block;
+            border-radius: 4px;
         }
 
         .btn-green {
@@ -761,6 +831,7 @@ $successRate = $successStats['total'] > 0
             text-decoration: none;
             font-size: 0.8rem;
             text-transform: uppercase;
+            border-radius: 4px;
         }
 
         .timeframe-btn.active {
@@ -782,6 +853,7 @@ $successRate = $successStats['total'] > 0
             border: 2px solid #222;
             padding: 1.5rem;
             position: relative;
+            border-radius: 8px;
         }
 
         .status-card::before {
@@ -792,6 +864,7 @@ $successRate = $successStats['total'] > 0
             right: 0;
             height: 2px;
             background: linear-gradient(90deg, #0f0, transparent);
+            border-radius: 8px 8px 0 0;
         }
 
         .status-label {
@@ -828,6 +901,7 @@ $successRate = $successStats['total'] > 0
             border: 2px solid #222;
             height: 600px;
             overflow-y: auto;
+            border-radius: 8px;
         }
 
         .feed-header {
@@ -902,6 +976,7 @@ $successRate = $successStats['total'] > 0
             border: 1px solid;
             font-size: 0.6rem;
             text-transform: uppercase;
+            border-radius: 3px;
         }
 
         .status-completed { border-color: #0f0; color: #0f0; }
@@ -930,6 +1005,7 @@ $successRate = $successStats['total'] > 0
             border: 2px solid #222;
             padding: 1.5rem;
             overflow-x: auto;
+            border-radius: 8px;
         }
 
         .visualizer-header {
@@ -956,6 +1032,7 @@ $successRate = $successStats['total'] > 0
             font-size: 0.8rem;
             text-transform: uppercase;
             cursor: pointer;
+            border-radius: 4px;
         }
 
         .replay-btn:hover {
@@ -1009,6 +1086,7 @@ $successRate = $successStats['total'] > 0
             border: 2px solid #222;
             padding: 1.5rem;
             overflow-x: auto;
+            border-radius: 8px;
         }
 
         .timeline-title {
@@ -1030,6 +1108,7 @@ $successRate = $successStats['total'] > 0
             font-family: 'Courier New', monospace;
             font-size: 0.8rem;
             overflow-x: auto;
+            border-radius: 4px;
         }
 
         .timeline-details pre {
@@ -1048,6 +1127,7 @@ $successRate = $successStats['total'] > 0
             border: 2px solid #222;
             padding: 1.5rem;
             margin-bottom: 2rem;
+            border-radius: 8px;
         }
 
         .card-header {
@@ -1076,6 +1156,7 @@ $successRate = $successStats['total'] > 0
             color: #888;
             font-size: 0.7rem;
             text-transform: uppercase;
+            border-radius: 20px;
         }
 
         .positions-grid {
@@ -1088,6 +1169,7 @@ $successRate = $successStats['total'] > 0
             background: #000;
             border: 2px solid #222;
             padding: 1.5rem;
+            border-radius: 8px;
         }
 
         .position-header {
@@ -1118,6 +1200,7 @@ $successRate = $successStats['total'] > 0
             padding: 1.5rem;
             margin-bottom: 2rem;
             overflow-x: auto;
+            border-radius: 8px;
         }
 
         .clearance-table {
@@ -1157,6 +1240,7 @@ $successRate = $successStats['total'] > 0
             border: 2px solid #222;
             padding: 1.5rem;
             margin-bottom: 2rem;
+            border-radius: 8px;
         }
 
         .matrix-grid {
@@ -1174,6 +1258,7 @@ $successRate = $successStats['total'] > 0
             align-items: center;
             flex-wrap: wrap;
             gap: 0.5rem;
+            border-radius: 8px;
         }
 
         .edge-path {
@@ -1245,7 +1330,6 @@ $successRate = $successStats['total'] > 0
                 <div class="download-title">📊 REGULATORY EVIDENCE PACKAGES</div>
                 <div class="download-buttons">
                     <a href="?download_report=csv" class="btn btn-green">📥 DOWNLOAD FULL CSV</a>
-                    <a href="?download_report=json" class="btn btn-green">📥 DOWNLOAD JSON</a>
                 </div>
             </div>
             
@@ -1347,12 +1431,8 @@ $successRate = $successStats['total'] > 0
                             <div class="timeline-subtitle">POST /swap/execute · <?php echo date('H:i:s', strtotime($swapDetails['created_at'])); ?></div>
                             <div class="timeline-details">
                                 <pre><?php 
-                                $sourceDetails = is_string($swapDetails['source_details']) 
-                                    ? json_decode($swapDetails['source_details'], true) 
-                                    : $swapDetails['source_details'];
-                                $destDetails = is_string($swapDetails['destination_details']) 
-                                    ? json_decode($swapDetails['destination_details'], true) 
-                                    : $swapDetails['destination_details'];
+                                $sourceDetails = safe_json_decode($swapDetails['source_details']);
+                                $destDetails = safe_json_decode($swapDetails['destination_details']);
                                 
                                 echo json_encode([
                                     'source' => $sourceDetails,
@@ -1398,14 +1478,14 @@ $successRate = $successStats['total'] > 0
                                 <div class="console-request">
                                     <strong>REQUEST:</strong>
                                     <pre><?php 
-                                    $req = is_string($api['request_payload']) ? json_decode($api['request_payload'], true) : $api['request_payload'];
+                                    $req = safe_json_decode($api['request_payload']);
                                     echo json_encode($req, JSON_PRETTY_PRINT); 
                                     ?></pre>
                                 </div>
                                 <div class="console-response">
                                     <strong>RESPONSE (<?php echo $api['http_status_code'] ?? 'N/A'; ?>):</strong>
                                     <pre><?php 
-                                    $res = is_string($api['response_payload']) ? json_decode($api['response_payload'], true) : $api['response_payload'];
+                                    $res = safe_json_decode($api['response_payload']);
                                     echo json_encode($res, JSON_PRETTY_PRINT); 
                                     ?></pre>
                                 </div>
@@ -1426,9 +1506,9 @@ $successRate = $successStats['total'] > 0
                             <div class="timeline-subtitle">Double-Entry Accounting</div>
                             <div class="timeline-details">
                                 <?php foreach ($ledgerEntries as $entry): ?>
-                                <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem; padding: 0.5rem; background: #0a0a0a;">
-                                    <span style="color: #ff6b6b;">DEBIT: <?php echo htmlspecialchars($entry['debit_account_name'] ?? $entry['debit_account_id']); ?></span>
-                                    <span style="color: #4ecdc4;">CREDIT: <?php echo htmlspecialchars($entry['credit_account_name'] ?? $entry['credit_account_id']); ?></span>
+                                <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem; padding: 0.5rem; background: #0a0a0a; border-radius: 4px;">
+                                    <span style="color: #ff6b6b;">DEBIT: <?php echo htmlspecialchars($entry['debit_account_id']); ?></span>
+                                    <span style="color: #4ecdc4;">CREDIT: <?php echo htmlspecialchars($entry['credit_account_id']); ?></span>
                                     <span style="color: #0f0;"><?php echo format_amount($entry['amount']); ?> BWP</span>
                                 </div>
                                 <?php endforeach; ?>
@@ -1450,7 +1530,7 @@ $successRate = $successStats['total'] > 0
                                     <span class="positive"><?php echo format_amount($fee['total_amount']); ?> BWP</span>
                                 </div>
                                 <?php 
-                                $split = is_string($fee['split_config']) ? json_decode($fee['split_config'], true) : ($fee['split_config'] ?? []);
+                                $split = safe_json_decode($fee['split_config']);
                                 if (is_array($split)):
                                 foreach ($split as $party => $amount): 
                                 ?>
@@ -1471,7 +1551,7 @@ $successRate = $successStats['total'] > 0
                     <?php endforeach; endif; ?>
 
                     <!-- Step 6: Settlement -->
-                    <?php if (!empty($messageFlow['settlement'])): ?>
+                    <?php if (!empty($messageFlow['settlement'])): foreach($messageFlow['settlement'] as $settlement): ?>
                     <div class="timeline-step">
                         <div class="timeline-icon">6</div>
                         <div class="timeline-content">
@@ -1479,18 +1559,18 @@ $successRate = $successStats['total'] > 0
                             <div class="timeline-subtitle">Queued for Net Settlement</div>
                             <div class="timeline-details">
                                 <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
-                                    <span>Debtor: <?php echo htmlspecialchars($messageFlow['settlement']['debtor'] ?? 'N/A'); ?></span>
+                                    <span>Debtor: <?php echo htmlspecialchars($settlement['debtor'] ?? 'N/A'); ?></span>
                                     <span>→</span>
-                                    <span>Creditor: <?php echo htmlspecialchars($messageFlow['settlement']['creditor'] ?? 'N/A'); ?></span>
+                                    <span>Creditor: <?php echo htmlspecialchars($settlement['creditor'] ?? 'N/A'); ?></span>
                                 </div>
                                 <div style="display: flex; justify-content: space-between; padding-top: 0.5rem; border-top: 1px solid #333;">
                                     <span>Amount:</span>
-                                    <span class="positive"><?php echo format_amount($messageFlow['settlement']['amount'] ?? 0); ?> BWP</span>
+                                    <span class="positive"><?php echo format_amount($settlement['amount'] ?? 0); ?> BWP</span>
                                 </div>
                             </div>
                         </div>
                     </div>
-                    <?php endif; ?>
+                    <?php endforeach; endif; ?>
                 </div>
                 <?php else: ?>
                 <div style="text-align: center; padding: 4rem; color: #444;">
