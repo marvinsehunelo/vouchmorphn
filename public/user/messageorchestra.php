@@ -46,18 +46,18 @@ function generateChecksum($data) {
 }
 
 // ============================================================================
-// FETCH COMPLETE SWAP DETAILS
+// FETCH COMPLETE SWAP DETAILS - FIXED: removed completed_at column
 // ============================================================================
 
 if (!$swapRef) {
     die("No swap reference provided");
 }
 
-// 1. Master Swap Record
+// 1. Master Swap Record - FIXED: using updated_at instead of completed_at
 $swapQuery = $db->prepare("
     SELECT 
         sr.*,
-        EXTRACT(EPOCH FROM (sr.completed_at - sr.created_at)) as processing_time
+        EXTRACT(EPOCH FROM (sr.updated_at - sr.created_at)) as processing_time
     FROM swap_requests sr
     WHERE sr.swap_uuid = ?
 ");
@@ -146,7 +146,7 @@ $cardAuths = $cardAuthQuery->fetchAll(PDO::FETCH_ASSOC);
 $cardTxnQuery = $db->prepare("
     SELECT ct.*, mc.card_suffix, mc.cardholder_name
     FROM card_transactions ct
-    JOIN message_cards mc ON ct.card_id = mc.card_id
+    LEFT JOIN message_cards mc ON ct.card_id = mc.card_id
     WHERE ct.hold_reference IN (
         SELECT hold_reference FROM hold_transactions WHERE swap_reference = ?
     )
@@ -216,7 +216,7 @@ if ($format === 'json') {
         'participants' => $participants,
         'audit_trail' => [
             'first_activity' => $swap['created_at'],
-            'last_activity' => $swap['completed_at'] ?? $swap['updated_at'],
+            'last_activity' => $swap['updated_at'],
             'total_api_calls' => count($apiCalls),
             'total_holds' => count($holds),
             'total_ledger_entries' => count($ledgerEntries),
@@ -248,7 +248,7 @@ if ($format === 'csv') {
     fputcsv($output, ['Amount', $swap['amount'] . ' ' . ($swap['from_currency'] ?? 'BWP')]);
     fputcsv($output, ['Status', $swap['status']]);
     fputcsv($output, ['Created', $swap['created_at']]);
-    fputcsv($output, ['Completed', $swap['completed_at'] ?? 'N/A']);
+    fputcsv($output, ['Updated', $swap['updated_at'] ?? 'N/A']);
     fputcsv($output, ['Processing Time', ($swap['processing_time'] ?? 'N/A') . ' seconds']);
     fputcsv($output, []);
     
@@ -719,8 +719,8 @@ if ($format === 'pdf') {
                         <div class="kv-value"><?php echo date('Y-m-d H:i:s', strtotime($swap['created_at'])); ?></div>
                     </div>
                     <div class="kv-item">
-                        <div class="kv-label">Completed</div>
-                        <div class="kv-value"><?php echo $swap['completed_at'] ? date('Y-m-d H:i:s', strtotime($swap['completed_at'])) : 'N/A'; ?></div>
+                        <div class="kv-label">Last Updated</div>
+                        <div class="kv-value"><?php echo $swap['updated_at'] ? date('Y-m-d H:i:s', strtotime($swap['updated_at'])) : 'N/A'; ?></div>
                     </div>
                     <div class="kv-item">
                         <div class="kv-label">Processing Time</div>
@@ -1148,7 +1148,7 @@ if ($format === 'pdf') {
             </div>
             <div class="card">
                 <div class="kv-label">Last Activity</div>
-                <div class="kv-value"><?php echo date('H:i:s', strtotime($swap['completed_at'] ?? $swap['updated_at'])); ?></div>
+                <div class="kv-value"><?php echo date('H:i:s', strtotime($swap['updated_at'])); ?></div>
             </div>
             <div class="card">
                 <div class="kv-label">Total API Calls</div>
