@@ -14,6 +14,7 @@ ob_start();
 $countryCode = $_GET['country'] ?? $_SESSION['country'] ?? 'BW';
 $swapRef = $_GET['swap'] ?? '';
 $format = $_GET['format'] ?? 'html'; // html, pdf, json, csv
+$downloadAll = $_GET['download_all'] ?? false;
 
 if (!defined('APP_ROOT')) {
     define('APP_ROOT', rtrim(realpath(__DIR__ . '/../../'), '/') ?: '/var/www/html');
@@ -39,15 +40,168 @@ function generateChecksum($data) {
     return hash('sha256', json_encode($data));
 }
 
+// SAFE HTML SPECIAL CHARS - handles NULL values
+function safe_html($str) {
+    if ($str === null || $str === '') {
+        return '—'; // Em dash for empty values
+    }
+    return htmlspecialchars((string)$str);
+}
+
+// SAFE ECHO - handles NULL values
+function safe_echo($str) {
+    if ($str === null || $str === '') {
+        echo '—';
+        return;
+    }
+    echo htmlspecialchars((string)$str);
+}
+
+// ============================================================================
+// DOWNLOAD ALL SWAPS REPORT
+// ============================================================================
+if ($downloadAll) {
+    // Get all swaps with their related data
+    $allSwapsQuery = $db->query("
+        SELECT 
+            s.swap_uuid,
+            s.from_currency,
+            s.to_currency,
+            s.amount,
+            s.status,
+            s.created_at,
+            s.source_details->>'institution' as source_inst,
+            s.destination_details->>'institution' as dest_inst,
+            COUNT(DISTINCT h.hold_id) as hold_count,
+            COUNT(DISTINCT a.log_id) as api_count,
+            SUM(f.total_amount) as total_fees
+        FROM swap_requests s
+        LEFT JOIN hold_transactions h ON s.swap_uuid = h.swap_reference
+        LEFT JOIN api_message_logs a ON s.swap_uuid = a.message_id
+        LEFT JOIN swap_fee_collections f ON s.swap_uuid = f.swap_reference
+        GROUP BY s.swap_uuid, s.from_currency, s.to_currency, s.amount, s.status, s.created_at, s.source_details, s.destination_details
+        ORDER BY s.created_at DESC
+    ");
+    $allSwaps = $allSwapsQuery->fetchAll(PDO::FETCH_ASSOC);
+    
+    // Generate CSV
+    header('Content-Type: text/csv');
+    header('Content-Disposition: attachment; filename="vouchmorph_all_swaps_' . date('Ymd_His') . '.csv"');
+    
+    $output = fopen('php://output', 'w');
+    
+    // Header
+    fputcsv($output, ['VOUCHMORPH COMPLETE SWAP REPORT']);
+    fputcsv($output, ['Generated:', date('Y-m-d H:i:s T')]);
+    fputcsv($output, ['Total Swaps:', count($allSwaps)]);
+    fputcsv($output, []);
+    
+    // Column headers
+    fputcsv($output, [
+        'Swap UUID',
+        'From Currency',
+        'To Currency',
+        'Amount',
+        'Status',
+        'Created',
+        'Source Institution',
+        'Destination Institution',
+        'Hold Count',
+        'API Calls',
+        'Total Fees'
+    ]);
+    
+    // Data rows
+    foreach ($allSwaps as $swap) {
+        fputcsv($output, [
+            $swap['swap_uuid'],
+            $swap['from_currency'],
+            $swap['to_currency'],
+            $swap['amount'],
+            $swap['status'],
+            $swap['created_at'],
+            $swap['source_inst'],
+            $swap['dest_inst'],
+            $swap['hold_count'] ?? 0,
+            $swap['api_count'] ?? 0,
+            $swap['total_fees'] ?? 0
+        ]);
+    }
+    
+    fclose($output);
+    exit;
+}
+
 // ============================================================================
 // FETCH COMPLETE SWAP DETAILS - MATCHING YOUR EXACT SCHEMA
 // ============================================================================
 
 if (!$swapRef) {
-    die("No swap reference provided");
+    // Show list of recent swaps instead of dying
+    $recentQuery = $db->query("
+        SELECT 
+            swap_uuid,
+            from_currency,
+            to_currency,
+            amount,
+            status,
+            created_at,
+            source_details->>'institution' as source_inst,
+            destination_details->>'institution' as dest_inst
+        FROM swap_requests 
+        ORDER BY created_at DESC 
+        LIMIT 50
+    ");
+    $recentSwaps = $recentQuery->fetchAll(PDO::FETCH_ASSOC);
+    
+    // Display selection page
+    ?>
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Select Swap Report</title>
+        <style>
+            body { font-family: Arial; padding: 20px; background: #f5f5f5; }
+            .container { max-width: 1200px; margin: 0 auto; background: white; padding: 20px; border-radius: 5px; }
+            table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+            th { background: #000; color: white; padding: 10px; text-align: left; }
+            td { padding: 10px; border-bottom: 1px solid #ddd; }
+            tr:hover { background: #f0f0f0; }
+            a { color: #0066cc; text-decoration: none; }
+            .download-all { margin: 20px 0; padding: 10px 20px; background: #000; color: white; border: none; cursor: pointer; font-size: 16px; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>VOUCHMORPH SWAP REPORTS</h1>
+            <a href="?download_all=1" class="download-all">📥 DOWNLOAD FULL REPORT (CSV)</a>
+            <p>Select a swap to view detailed report:</p>
+            <table>
+                <tr>
+                    <th>Swap UUID</th>
+                    <th>Amount</th>
+                    <th>From → To</th>
+                    <th>Status</th>
+                    <th>Date</th>
+                </tr>
+                <?php foreach ($recentSwaps as $swap): ?>
+                <tr>
+                    <td><a href="?swap=<?php echo urlencode($swap['swap_uuid']); ?>"><?php echo substr($swap['swap_uuid'], 0, 16); ?>…</a></td>
+                    <td><?php echo $swap['amount']; ?> <?php echo $swap['from_currency']; ?></td>
+                    <td><?php echo safe_html($swap['source_inst']); ?> → <?php echo safe_html($swap['dest_inst']); ?></td>
+                    <td><?php echo $swap['status']; ?></td>
+                    <td><?php echo date('Y-m-d H:i', strtotime($swap['created_at'])); ?></td>
+                </tr>
+                <?php endforeach; ?>
+            </table>
+        </div>
+    </body>
+    </html>
+    <?php
+    exit;
 }
 
-// 1. Master Swap Record - Using your actual columns
+// 1. Master Swap Record
 $swapQuery = $db->prepare("
     SELECT 
         swap_id,
@@ -81,7 +235,7 @@ $metadata = is_string($swap['metadata'])
     ? json_decode($swap['metadata'], true) 
     : ($swap['metadata'] ?? []);
 
-// 2. Hold Transactions - Using your actual columns
+// 2. Hold Transactions
 $holdQuery = $db->prepare("
     SELECT 
         hold_id,
@@ -111,7 +265,7 @@ $holdQuery = $db->prepare("
 $holdQuery->execute([$swapRef]);
 $holds = $holdQuery->fetchAll(PDO::FETCH_ASSOC);
 
-// 3. API Message Logs - Using your actual columns
+// 3. API Message Logs
 $apiQuery = $db->prepare("
     SELECT 
         log_id,
@@ -137,7 +291,7 @@ $apiQuery = $db->prepare("
 $apiQuery->execute([$swapRef]);
 $apiCalls = $apiQuery->fetchAll(PDO::FETCH_ASSOC);
 
-// 4. Ledger Entries - Using your actual columns
+// 4. Ledger Entries
 $ledgerQuery = $db->prepare("
     SELECT 
         le.entry_id,
@@ -161,7 +315,7 @@ $ledgerQuery = $db->prepare("
 $ledgerQuery->execute([$swapRef]);
 $ledgerEntries = $ledgerQuery->fetchAll(PDO::FETCH_ASSOC);
 
-// 5. Fee Collections - Using your actual columns
+// 5. Fee Collections
 $feeQuery = $db->prepare("
     SELECT 
         fee_id,
@@ -185,7 +339,7 @@ $feeQuery = $db->prepare("
 $feeQuery->execute([$swapRef]);
 $fees = $feeQuery->fetchAll(PDO::FETCH_ASSOC);
 
-// 6. Settlement Queue - Using your actual columns
+// 6. Settlement Queue
 $settlementQuery = $db->prepare("
     SELECT 
         id,
@@ -210,7 +364,7 @@ $settlementQuery = $db->prepare("
 $settlementQuery->execute([$swapRef, $swapRef, $swapRef, $swapRef]);
 $settlements = $settlementQuery->fetchAll(PDO::FETCH_ASSOC);
 
-// 7. Card Authorizations - Using your actual columns
+// 7. Card Authorizations
 $cardAuthQuery = $db->prepare("
     SELECT 
         authorization_id,
@@ -243,7 +397,7 @@ $cardAuthQuery = $db->prepare("
 $cardAuthQuery->execute([$swapRef]);
 $cardAuths = $cardAuthQuery->fetchAll(PDO::FETCH_ASSOC);
 
-// 8. Card Transactions - Using your actual columns
+// 8. Card Transactions
 $cardTxnQuery = $db->prepare("
     SELECT 
         ct.transaction_id,
@@ -279,7 +433,7 @@ $cardTxnQuery = $db->prepare("
 $cardTxnQuery->execute([$swapRef]);
 $cardTxns = $cardTxnQuery->fetchAll(PDO::FETCH_ASSOC);
 
-// 9. Message Cards - Using your actual columns
+// 9. Message Cards
 $cardQuery = $db->prepare("
     SELECT 
         card_id,
@@ -324,55 +478,7 @@ $cardQuery = $db->prepare("
 $cardQuery->execute([$swapRef]);
 $cards = $cardQuery->fetchAll(PDO::FETCH_ASSOC);
 
-// 10. Participants - Using your actual columns
-$participants = [];
-$instList = [];
-
-// Collect all institution names from various places
-foreach ($holds as $hold) {
-    if (!empty($hold['source_institution'])) $instList[] = $hold['source_institution'];
-    if (!empty($hold['destination_institution'])) $instList[] = $hold['destination_institution'];
-    if (!empty($hold['participant_name'])) $instList[] = $hold['participant_name'];
-}
-
-foreach ($apiCalls as $api) {
-    if (!empty($api['participant_name'])) $instList[] = $api['participant_name'];
-}
-
-$instList = array_unique(array_filter($instList));
-
-foreach ($instList as $inst) {
-    $partQuery = $db->prepare("
-        SELECT 
-            participant_id,
-            name,
-            type,
-            category,
-            provider_code,
-            auth_type,
-            base_url,
-            system_user_id,
-            legal_entity_identifier,
-            license_number,
-            settlement_account,
-            settlement_type,
-            status,
-            capabilities,
-            resource_endpoints,
-            phone_format,
-            security_config,
-            message_profile,
-            routing_info,
-            metadata
-        FROM participants 
-        WHERE name = ? OR provider_code = ?
-        LIMIT 1
-    ");
-    $partQuery->execute([$inst, $inst]);
-    $participants[$inst] = $partQuery->fetch(PDO::FETCH_ASSOC);
-}
-
-// 11. Generate Report Metadata
+// 10. Generate Report Metadata
 $reportId = 'RPT-' . date('Ymd') . '-' . strtoupper(substr($swapRef, 0, 8));
 $generatedAt = new DateTime('now', new DateTimeZone('Africa/Gaborone'));
 $reportChecksum = generateChecksum([
@@ -412,15 +518,7 @@ if ($format === 'json') {
         'settlement_queue' => $settlements,
         'card_authorizations' => $cardAuths,
         'card_transactions' => $cardTxns,
-        'message_cards' => $cards,
-        'participants' => $participants,
-        'audit_trail' => [
-            'first_activity' => $swap['created_at'],
-            'last_activity' => $swap['created_at'], // Using created_at since no updated_at in swap_requests
-            'total_api_calls' => count($apiCalls),
-            'total_holds' => count($holds),
-            'total_ledger_entries' => count($ledgerEntries)
-        ]
+        'message_cards' => $cards
     ];
     
     echo json_encode($report, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
@@ -449,22 +547,6 @@ if ($format === 'csv') {
     fputcsv($output, ['Created', $swap['created_at']]);
     fputcsv($output, []);
     
-    // Source Details
-    fputcsv($output, ['SOURCE DETAILS']);
-    foreach ($sourceDetails as $key => $value) {
-        if (is_array($value)) $value = json_encode($value);
-        fputcsv($output, [$key, $value]);
-    }
-    fputcsv($output, []);
-    
-    // Destination Details
-    fputcsv($output, ['DESTINATION DETAILS']);
-    foreach ($destDetails as $key => $value) {
-        if (is_array($value)) $value = json_encode($value);
-        fputcsv($output, [$key, $value]);
-    }
-    fputcsv($output, []);
-    
     fclose($output);
     exit;
 }
@@ -475,7 +557,7 @@ if ($format === 'pdf') {
 }
 
 // ============================================================================
-// HTML REPORT - MATCHING YOUR EXACT SCHEMA
+// HTML REPORT - WITH NULL-SAFE FUNCTIONS
 // ============================================================================
 ?>
 <!DOCTYPE html>
@@ -699,14 +781,15 @@ if ($format === 'pdf') {
         <button onclick="window.print()" class="print-btn">🖨️ PRINT REPORT</button>
         <a href="?swap=<?php echo urlencode($swapRef); ?>&format=json&country=<?php echo urlencode($countryCode); ?>" class="download-btn">📥 DOWNLOAD JSON</a>
         <a href="?swap=<?php echo urlencode($swapRef); ?>&format=csv&country=<?php echo urlencode($countryCode); ?>" class="download-btn">📥 DOWNLOAD CSV</a>
+        <a href="?download_all=1" class="download-btn">📥 DOWNLOAD ALL SWAPS</a>
     </div>
 
     <div class="report-header">
         <div class="report-title">VOUCHMORPH SWAP DETAIL REPORT</div>
         <div class="report-meta">
-            <span><strong>Report ID:</strong> <?php echo $reportId; ?></span>
+            <span><strong>Report ID:</strong> <?php echo safe_html($reportId); ?></span>
             <span><strong>Generated:</strong> <?php echo $generatedAt->format('Y-m-d H:i:s T'); ?></span>
-            <span><strong>Swap Ref:</strong> <?php echo $swapRef; ?></span>
+            <span><strong>Swap Ref:</strong> <?php echo safe_html($swapRef); ?></span>
             <span><strong>Checksum:</strong> <?php echo substr($reportChecksum, 0, 16); ?>…</span>
         </div>
     </div>
@@ -718,21 +801,21 @@ if ($format === 'pdf') {
             <div class="card">
                 <div class="card-header">
                     <span class="card-title">Transaction Overview</span>
-                    <span class="card-badge">SWAP_ID: <?php echo $swap['swap_id']; ?></span>
+                    <span class="card-badge">SWAP_ID: <?php echo safe_html($swap['swap_id']); ?></span>
                 </div>
                 <div class="kv-grid">
                     <div class="kv-item">
                         <div class="kv-label">Swap UUID</div>
-                        <div class="kv-value"><?php echo $swap['swap_uuid']; ?></div>
+                        <div class="kv-value"><?php echo safe_html($swap['swap_uuid']); ?></div>
                     </div>
                     <div class="kv-item">
                         <div class="kv-label">Amount</div>
-                        <div class="kv-value"><?php echo number_format((float)$swap['amount'], 2); ?> <?php echo $swap['from_currency'] ?? 'BWP'; ?></div>
+                        <div class="kv-value"><?php echo number_format((float)$swap['amount'], 2); ?> <?php echo safe_html($swap['from_currency'] ?? 'BWP'); ?></div>
                     </div>
                     <div class="kv-item">
                         <div class="kv-label">Status</div>
                         <div class="kv-value">
-                            <span class="status-badge status-<?php echo $swap['status']; ?>"><?php echo $swap['status']; ?></span>
+                            <span class="status-badge status-<?php echo $swap['status']; ?>"><?php echo safe_html($swap['status']); ?></span>
                         </div>
                     </div>
                     <div class="kv-item">
@@ -748,11 +831,11 @@ if ($format === 'pdf') {
                 <div class="kv-grid">
                     <div class="kv-item">
                         <div class="kv-label">From Currency</div>
-                        <div class="kv-value"><?php echo $swap['from_currency']; ?></div>
+                        <div class="kv-value"><?php echo safe_html($swap['from_currency']); ?></div>
                     </div>
                     <div class="kv-item">
                         <div class="kv-label">To Currency</div>
-                        <div class="kv-value"><?php echo $swap['to_currency']; ?></div>
+                        <div class="kv-value"><?php echo safe_html($swap['to_currency']); ?></div>
                     </div>
                 </div>
             </div>
@@ -800,14 +883,14 @@ if ($format === 'pdf') {
                 <tbody>
                     <?php foreach ($holds as $hold): ?>
                     <tr>
-                        <td><?php echo $hold['hold_reference']; ?></td>
-                        <td><?php echo $hold['asset_type']; ?></td>
-                        <td><?php echo number_format((float)$hold['amount'], 2); ?> <?php echo $hold['currency']; ?></td>
-                        <td><span class="status-badge status-<?php echo strtolower($hold['status']); ?>"><?php echo $hold['status']; ?></span></td>
-                        <td><?php echo $hold['source_institution'] ?? 'N/A'; ?></td>
-                        <td><?php echo $hold['destination_institution'] ?? 'N/A'; ?></td>
-                        <td><?php echo date('H:i:s', strtotime($hold['placed_at'] ?? $hold['created_at'])); ?></td>
-                        <td><?php echo $hold['hold_expiry'] ? date('Y-m-d H:i', strtotime($hold['hold_expiry'])) : 'N/A'; ?></td>
+                        <td><?php echo safe_html($hold['hold_reference']); ?></td>
+                        <td><?php echo safe_html($hold['asset_type']); ?></td>
+                        <td><?php echo number_format((float)$hold['amount'], 2); ?> <?php echo safe_html($hold['currency']); ?></td>
+                        <td><span class="status-badge status-<?php echo strtolower($hold['status'] ?? ''); ?>"><?php echo safe_html($hold['status']); ?></span></td>
+                        <td><?php echo safe_html($hold['source_institution'] ?? $hold['participant_name']); ?></td>
+                        <td><?php echo safe_html($hold['destination_institution']); ?></td>
+                        <td><?php echo $hold['placed_at'] ? date('H:i:s', strtotime($hold['placed_at'])) : date('H:i:s', strtotime($hold['created_at'])); ?></td>
+                        <td><?php echo $hold['hold_expiry'] ? date('Y-m-d H:i', strtotime($hold['hold_expiry'])) : '—'; ?></td>
                     </tr>
                     <?php endforeach; ?>
                 </tbody>
@@ -824,13 +907,13 @@ if ($format === 'pdf') {
             <?php foreach ($apiCalls as $api): ?>
             <div class="card">
                 <div class="card-header">
-                    <span class="card-title"><?php echo strtoupper($api['direction'] ?? 'OUTGOING'); ?> to <?php echo htmlspecialchars($api['participant_name'] ?? 'Unknown'); ?></span>
-                    <span class="card-badge">HTTP <?php echo $api['http_status_code'] ?? 'N/A'; ?></span>
+                    <span class="card-title"><?php echo strtoupper($api['direction'] ?? 'OUTGOING'); ?> to <?php echo safe_html($api['participant_name'] ?? 'Unknown'); ?></span>
+                    <span class="card-badge">HTTP <?php echo safe_html($api['http_status_code'] ?? 'N/A'); ?></span>
                 </div>
-                <div><strong>Endpoint:</strong> <?php echo $api['endpoint']; ?></div>
-                <div><strong>Message Type:</strong> <?php echo $api['message_type']; ?></div>
+                <div><strong>Endpoint:</strong> <?php echo safe_html($api['endpoint']); ?></div>
+                <div><strong>Message Type:</strong> <?php echo safe_html($api['message_type']); ?></div>
                 <?php if (!empty($api['duration_ms'])): ?>
-                <div><strong>Duration:</strong> <?php echo $api['duration_ms']; ?> ms</div>
+                <div><strong>Duration:</strong> <?php echo (int)$api['duration_ms']; ?> ms</div>
                 <?php endif; ?>
                 
                 <?php if (!empty($api['request_payload'])): ?>
@@ -854,7 +937,7 @@ if ($format === 'pdf') {
                 <?php endif; ?>
                 
                 <?php if (!empty($api['curl_error'])): ?>
-                <div style="color: #f00; margin-top: 0.5rem;">⚠️ Error: <?php echo $api['curl_error']; ?></div>
+                <div style="color: #f00; margin-top: 0.5rem;">⚠️ Error: <?php echo safe_html($api['curl_error']); ?></div>
                 <?php endif; ?>
             </div>
             <?php endforeach; ?>
@@ -881,10 +964,10 @@ if ($format === 'pdf') {
                     <?php foreach ($ledgerEntries as $entry): ?>
                     <tr>
                         <td><?php echo date('H:i:s', strtotime($entry['created_at'])); ?></td>
-                        <td><?php echo htmlspecialchars($entry['debit_account_name'] ?? $entry['debit_account_id']); ?></td>
-                        <td><?php echo htmlspecialchars($entry['credit_account_name'] ?? $entry['credit_account_id']); ?></td>
-                        <td><?php echo number_format((float)$entry['amount'], 2); ?> <?php echo $entry['currency_code']; ?></td>
-                        <td><?php echo $entry['split_type'] ?? 'N/A'; ?></td>
+                        <td><?php echo safe_html($entry['debit_account_name'] ?? $entry['debit_account_id']); ?></td>
+                        <td><?php echo safe_html($entry['credit_account_name'] ?? $entry['credit_account_id']); ?></td>
+                        <td><?php echo number_format((float)$entry['amount'], 2); ?> <?php echo safe_html($entry['currency_code']); ?></td>
+                        <td><?php echo safe_html($entry['split_type']); ?></td>
                     </tr>
                     <?php endforeach; ?>
                 </tbody>
@@ -903,11 +986,11 @@ if ($format === 'pdf') {
             ?>
             <div class="card">
                 <div class="card-header">
-                    <span class="card-title"><?php echo $fee['fee_type']; ?></span>
-                    <span class="card-badge"><?php echo $fee['status']; ?></span>
+                    <span class="card-title"><?php echo safe_html($fee['fee_type']); ?></span>
+                    <span class="card-badge"><?php echo safe_html($fee['status']); ?></span>
                 </div>
                 <div class="grid-3">
-                    <div><strong>Total:</strong> <?php echo number_format((float)$fee['total_amount'], 2); ?> <?php echo $fee['currency']; ?></div>
+                    <div><strong>Total:</strong> <?php echo number_format((float)$fee['total_amount'], 2); ?> <?php echo safe_html($fee['currency']); ?></div>
                     <div><strong>VAT:</strong> <?php echo number_format((float)($fee['vat_amount'] ?? 0), 2); ?> BWP</div>
                     <div><strong>Net:</strong> <?php echo number_format((float)$fee['total_amount'] - (float)($fee['vat_amount'] ?? 0), 2); ?> BWP</div>
                 </div>
@@ -920,7 +1003,7 @@ if ($format === 'pdf') {
                         </thead>
                         <tbody>
                             <?php foreach ($split as $party => $amt): ?>
-                            <tr><td><?php echo $party; ?></td><td><?php echo number_format((float)$amt, 2); ?> BWP</td></tr>
+                            <tr><td><?php echo safe_html($party); ?></td><td><?php echo number_format((float)$amt, 2); ?> BWP</td></tr>
                             <?php endforeach; ?>
                         </tbody>
                     </table>
@@ -951,11 +1034,11 @@ if ($format === 'pdf') {
             <tbody>
                 <?php foreach ($cardAuths as $auth): ?>
                 <tr>
-                    <td>•••• <?php echo $auth['card_suffix']; ?></td>
+                    <td>•••• <?php echo safe_html($auth['card_suffix']); ?></td>
                     <td><?php echo number_format((float)$auth['authorized_amount'], 2); ?> BWP</td>
                     <td><?php echo number_format((float)$auth['remaining_balance'], 2); ?> BWP</td>
-                    <td><span class="status-badge status-<?php echo strtolower($auth['status']); ?>"><?php echo $auth['status']; ?></span></td>
-                    <td><?php echo date('Y-m-d', strtotime($auth['expiry_at'])); ?></td>
+                    <td><span class="status-badge status-<?php echo strtolower($auth['status'] ?? ''); ?>"><?php echo safe_html($auth['status']); ?></span></td>
+                    <td><?php echo $auth['expiry_at'] ? date('Y-m-d', strtotime($auth['expiry_at'])) : '—'; ?></td>
                 </tr>
                 <?php endforeach; ?>
             </tbody>
@@ -979,11 +1062,11 @@ if ($format === 'pdf') {
                 <?php foreach ($cardTxns as $txn): ?>
                 <tr>
                     <td><?php echo date('H:i:s', strtotime($txn['created_at'])); ?></td>
-                    <td>•••• <?php echo $txn['card_suffix'] ?? 'N/A'; ?></td>
-                    <td><?php echo $txn['transaction_type']; ?></td>
-                    <td><?php echo number_format((float)$txn['amount'], 2); ?> <?php echo $txn['currency']; ?></td>
-                    <td><?php echo htmlspecialchars($txn['merchant_name'] ?? $txn['merchant_id']); ?></td>
-                    <td><?php echo $txn['auth_code'] ?? 'N/A'; ?></td>
+                    <td>•••• <?php echo safe_html($txn['card_suffix'] ?? 'N/A'); ?></td>
+                    <td><?php echo safe_html($txn['transaction_type']); ?></td>
+                    <td><?php echo number_format((float)$txn['amount'], 2); ?> <?php echo safe_html($txn['currency']); ?></td>
+                    <td><?php echo safe_html($txn['merchant_name'] ?? $txn['merchant_id']); ?></td>
+                    <td><?php echo safe_html($txn['auth_code']); ?></td>
                 </tr>
                 <?php endforeach; ?>
             </tbody>
@@ -1010,8 +1093,8 @@ if ($format === 'pdf') {
                 <tbody>
                     <?php foreach ($settlements as $s): ?>
                     <tr>
-                        <td><?php echo htmlspecialchars($s['debtor']); ?></td>
-                        <td><?php echo htmlspecialchars($s['creditor']); ?></td>
+                        <td><?php echo safe_html($s['debtor']); ?></td>
+                        <td><?php echo safe_html($s['creditor']); ?></td>
                         <td><?php echo number_format((float)$s['amount'], 2); ?> BWP</td>
                         <td><?php echo date('Y-m-d H:i', strtotime($s['created_at'])); ?></td>
                     </tr>
