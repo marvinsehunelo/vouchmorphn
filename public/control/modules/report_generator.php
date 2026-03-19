@@ -372,4 +372,75 @@ function renderComplianceReport($report) {
     }
     
     if (!empty($report['recommendations'])) {
-        $html .= '<h3>📋 Recommendations</h3><ul
+        $html .= '<h3>📋 Recommendations</h3><ul>';
+        foreach ($report['recommendations'] as $rec) {
+            $html .= '<li>' . htmlspecialchars($rec) . '</li>';
+        }
+        $html .= '</ul>';
+    }
+    
+    $html .= '</div>';
+    return $html;
+}
+
+function generateAuditReport($db, $from, $to) {
+    $stmt = $db->prepare("
+        SELECT * FROM audit_logs 
+        WHERE DATE(performed_at) BETWEEN ? AND ?
+        ORDER BY performed_at DESC
+    ");
+    $stmt->execute([$from, $to]);
+    return [
+        'from_date' => $from,
+        'to_date' => $to,
+        'entries' => $stmt->fetchAll(PDO::FETCH_ASSOC)
+    ];
+}
+
+function renderAuditReport($report) {
+    $html = '<div class="section">';
+    $html .= '<div class="section-title">🔍 Audit Trail: ' . $report['from_date'] . ' to ' . $report['to_date'] . '</div>';
+    $html .= '<table>';
+    $html .= '<tr><th>Time</th><th>Entity</th><th>Action</th><th>User</th></tr>';
+    foreach ($report['entries'] as $entry) {
+        $html .= '<tr>';
+        $html .= '<td>' . date('Y-m-d H:i:s', strtotime($entry['performed_at'])) . '</td>';
+        $html .= '<td>' . $entry['entity_type'] . ' #' . $entry['entity_id'] . '</td>';
+        $html .= '<td>' . $entry['action'] . '</td>';
+        $html .= '<td>' . $entry['performed_by_type'] . '</td>';
+        $html .= '</tr>';
+    }
+    $html .= '</table>';
+    $html .= '</div>';
+    return $html;
+}
+
+function generateSettlementReport($db, $date) {
+    $netPositions = $db->query("
+        SELECT debtor, creditor, SUM(amount) as net
+        FROM settlement_queue
+        GROUP BY debtor, creditor
+    ")->fetchAll(PDO::FETCH_ASSOC);
+    
+    return [
+        'date' => $date,
+        'net_positions' => $netPositions
+    ];
+}
+
+function renderSettlementReport($report) {
+    $html = '<div class="section">';
+    $html .= '<div class="section-title">⚖️ Settlement Report: ' . $report['date'] . '</div>';
+    $html .= '<table>';
+    $html .= '<tr><th>Debtor</th><th>Creditor</th><th>Net Amount</th></tr>';
+    foreach ($report['net_positions'] as $pos) {
+        $html .= '<tr>';
+        $html .= '<td>' . $pos['debtor'] . '</td>';
+        $html .= '<td>' . $pos['creditor'] . '</td>';
+        $html .= '<td>P' . number_format($pos['net']) . '</td>';
+        $html .= '</tr>';
+    }
+    $html .= '</table>';
+    $html .= '</div>';
+    return $html;
+}
