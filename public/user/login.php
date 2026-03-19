@@ -19,8 +19,10 @@ error_reporting(E_ALL);
 require_once __DIR__ . '/../../src/APP_LAYER/utils/session_manager.php';
 require_once __DIR__ . '/../../src/DATA_PERSISTENCE_LAYER/config/DBConnection.php';
 
-use APP_LAYER\Utils\SessionManager;
-use DATA_PERSISTENCE_LAYER\Config\DBConnection;
+use APP_LAYER\utils\SessionManager;  // Fixed namespace (lowercase utils)
+use DATA_PERSISTENCE_LAYER\config\DBConnection;
+use PDO;  // Added missing PDO import
+use Throwable;  // Added for error handling
 
 SessionManager::start();
 
@@ -33,7 +35,12 @@ if (SessionManager::isLoggedIn()) {
 // --------------------------------------------------
 // 2️⃣ Load Country & Config
 // --------------------------------------------------
-$config = require_once __DIR__ . '/../../src/CORE_CONFIG/load_country.php';
+$config = require __DIR__ . '/../../src/CORE_CONFIG/load_country.php';  // Removed _once
+
+// Define SYSTEM_COUNTRY if not already defined
+if (!defined('SYSTEM_COUNTRY')) {
+    define('SYSTEM_COUNTRY', $config['country'] ?? 'BW');
+}
 $systemCountry = SYSTEM_COUNTRY; // e.g., 'BW' or 'NG'
 
 $dbConfig = $config['db']['swap'] ?? null;
@@ -59,15 +66,15 @@ try {
 // --------------------------------------------------
 $error = '';
 $phone = '';
+$formattedPhone = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $phoneInput = trim($_POST['phone'] ?? '');
     
     // 1. Logic: If user typed "71..." and country is BW, make it "+26771..."
-    // This bridges the gap between what they see (+267) and what they type.
     if ($phoneInput !== '') {
         if ($systemCountry === 'BW' && !str_starts_with($phoneInput, '+267')) {
-            $formattedPhone = '+267' . ltrim($phoneInput, '0'); // Add prefix, remove leading 0 if any
+            $formattedPhone = '+267' . ltrim($phoneInput, '0');
         } elseif ($systemCountry === 'NG' && !str_starts_with($phoneInput, '+234')) {
             $formattedPhone = '+234' . ltrim($phoneInput, '0');
         } else {
@@ -81,7 +88,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $error = "Phone number is required.";
     } else {
         try {
-            // 2. We use $formattedPhone (the one with +267) for the database search
+            // 2. Use $formattedPhone for database search
             $stmt = $db->prepare(
                 "SELECT user_id, phone, username, created_at, verified
                  FROM users
@@ -102,7 +109,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 SessionManager::setUser([
                     'user_id'    => $user['user_id'],
                     'username'   => $user['username'] ?? '',
-                    'phone'      => $user['phone'], // This will be the full +267... number
+                    'phone'      => $user['phone'],
                     'role'       => 'USER',
                     'country'    => $systemCountry,
                     'created_at' => $user['created_at']
@@ -522,12 +529,12 @@ document.addEventListener('DOMContentLoaded', function() {
         // Add country-specific validation
         const country = '<?= $systemCountry ?>';
         if (country === 'BW') {
-            // Botswana: 11 digits (267 + 8 digits)
+            // Botswana: 8 digits
             if (this.value.length > 8) {
                 this.value = this.value.substring(0, 8);
             }
         } else if (country === 'NG') {
-            // Nigeria: 10 digits (234 + 10 digits)
+            // Nigeria: 10 digits
             if (this.value.length > 10) {
                 this.value = this.value.substring(0, 10);
             }
@@ -588,7 +595,7 @@ document.addEventListener('DOMContentLoaded', function() {
         // Create new error message
         const errorDiv = document.createElement('div');
         errorDiv.className = 'error-message';
-        errorDiv.innerHTML = `⚠ ${message}`;
+        errorDiv.innerHTML = '⚠ ' + message;
         
         // Insert after header
         const header = document.querySelector('.login-header');
@@ -598,25 +605,8 @@ document.addEventListener('DOMContentLoaded', function() {
         errorDiv.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
 
-    // Auto-format on blur
-    phoneInput.addEventListener('blur', function() {
-        const value = this.value.trim();
-        if (value && /^\d+$/.test(value)) {
-            // Format display without changing actual value
-            const country = '<?= $systemCountry ?>';
-            if (country === 'BW' && value.length === 8) {
-                this.value = value; // Keep as is for Botswana
-            } else if (country === 'NG' && value.length === 10) {
-                this.value = value; // Keep as is for Nigeria
-            }
-        }
-    });
-
     // Focus phone input on page load
     phoneInput.focus();
-    
-    // Auto-select existing value
-    phoneInput.select();
 });
 
 // ===== KEYBOARD SHORTCUTS =====
