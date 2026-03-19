@@ -19,10 +19,10 @@ error_reporting(E_ALL);
 require_once __DIR__ . '/../../src/APP_LAYER/utils/session_manager.php';
 require_once __DIR__ . '/../../src/DATA_PERSISTENCE_LAYER/config/DBConnection.php';
 
-use APP_LAYER\utils\SessionManager;  // Fixed namespace (lowercase utils)
+use APP_LAYER\utils\SessionManager;
 use DATA_PERSISTENCE_LAYER\config\DBConnection;
-use PDO;  // Added missing PDO import
-use Throwable;  // Added for error handling
+// REMOVED: use PDO; (line 24)
+// REMOVED: use Throwable; (line 25)
 
 SessionManager::start();
 
@@ -35,7 +35,7 @@ if (SessionManager::isLoggedIn()) {
 // --------------------------------------------------
 // 2️⃣ Load Country & Config
 // --------------------------------------------------
-$config = require __DIR__ . '/../../src/CORE_CONFIG/load_country.php';  // Removed _once
+$config = require __DIR__ . '/../../src/CORE_CONFIG/load_country.php';
 
 // Define SYSTEM_COUNTRY if not already defined
 if (!defined('SYSTEM_COUNTRY')) {
