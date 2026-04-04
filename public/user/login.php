@@ -28,7 +28,7 @@ SessionManager::start();
 
 // Redirect if already logged in
 if (SessionManager::isLoggedIn()) {
-    header('Location: virtual_atmswap_dashboard.php');
+    header('Location: user_dashboard.php');
     exit();
 }
 
