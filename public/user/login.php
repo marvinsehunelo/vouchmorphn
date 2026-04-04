@@ -13,18 +13,11 @@ use DATA_PERSISTENCE_LAYER\config\DBConnection;
 
 SessionManager::start();
 
-echo "STEP 1<br>";
-echo "STEP 2<br>";
-echo "STEP 3<br>";
-echo "STEP 5<br>";
-echo "STEP 6<br>";
-
-if (session_status() !== PHP_SESSION_ACTIVE) {
-    die('Session failed to start');
+// Redirect if already logged in
+if (SessionManager::isLoggedIn()) {
+    header('Location: user_dashboard.php');
+    exit();
 }
-
-echo "STEP 7<br>";
-exit;
 
 // --------------------------------------------------
 // 2️⃣ Load Country & Config
