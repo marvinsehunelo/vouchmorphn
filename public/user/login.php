@@ -5,7 +5,7 @@ ini_set('display_startup_errors', 1);
 
 echo "STEP 1<br>";
 
-require_once __DIR__ . '/../../src/APP_LAYER/utils/session_manager.php';
+require_once __DIR__ . '/../../src/APP_LAYER/utils/SessionManager.php';
 echo "STEP 2<br>";
 
 require_once __DIR__ . '/../../src/DATA_PERSISTENCE_LAYER/config/DBConnection.php';
