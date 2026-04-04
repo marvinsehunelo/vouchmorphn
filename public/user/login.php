@@ -11,9 +11,6 @@ echo "STEP 2<br>";
 require_once __DIR__ . '/../../src/DATA_PERSISTENCE_LAYER/config/DBConnection.php';
 echo "STEP 3<br>";
 
-require_once __DIR__ . '/../../src/APP_LAYER/includes/SwapServiceClient.php';
-echo "STEP 4<br>";
-
 $config = require __DIR__ . '/../../src/CORE_CONFIG/load_country.php';
 echo "STEP 5<br>";
 
