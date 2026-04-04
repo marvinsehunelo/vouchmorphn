@@ -1,6 +1,35 @@
 <?php
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
+ini_set('display_startup_errors', 1);
 
+echo "STEP 1<br>";
 
+require_once __DIR__ . '/../../src/APP_LAYER/utils/session_manager.php';
+echo "STEP 2<br>";
+
+require_once __DIR__ . '/../../src/DATA_PERSISTENCE_LAYER/config/DBConnection.php';
+echo "STEP 3<br>";
+
+require_once __DIR__ . '/../../src/APP_LAYER/includes/SwapServiceClient.php';
+echo "STEP 4<br>";
+
+$config = require __DIR__ . '/../../src/CORE_CONFIG/load_country.php';
+echo "STEP 5<br>";
+
+use APP_LAYER\utils\SessionManager;
+use DATA_PERSISTENCE_LAYER\config\DBConnection;
+use APP_LAYER\includes\SwapServiceClient;
+
+SessionManager::start();
+echo "STEP 6<br>";
+
+if (session_status() !== PHP_SESSION_ACTIVE) {
+    die('Session failed to start');
+}
+
+echo "STEP 7<br>";
+exit;
 // Redirect if already logged in
 if (SessionManager::isLoggedIn()) {
     header('Location: user_dashboard.php');
