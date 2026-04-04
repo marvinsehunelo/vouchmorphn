@@ -1,30 +1,5 @@
 <?php
-/**
- * User Login – VouchMorph Interoperability Platform
- * Dynamic country-driven version (no hardcoded BW/NG logic)
- */
 
-ob_start();
-
-// --------------------------------------------------
-// 0️⃣ Error handling
-// --------------------------------------------------
-ini_set('display_errors', 0);
-ini_set('log_errors', 1);
-error_reporting(E_ALL);
-
-// --------------------------------------------------
-// 1️⃣ Session & Dependencies
-// --------------------------------------------------
-require_once __DIR__ . '/../../src/APP_LAYER/utils/session_manager.php';
-require_once __DIR__ . '/../../src/DATA_PERSISTENCE_LAYER/config/DBConnection.php';
-require_once __DIR__ . '/../../src/APP_LAYER/includes/SwapServiceClient.php';
-
-use APP_LAYER\utils\SessionManager;
-use DATA_PERSISTENCE_LAYER\config\DBConnection;
-use APP_LAYER\includes\SwapServiceClient;
-
-SessionManager::start();
 
 // Redirect if already logged in
 if (SessionManager::isLoggedIn()) {
