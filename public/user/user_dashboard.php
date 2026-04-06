@@ -14,8 +14,8 @@ if (!SessionManager::isLoggedIn()) {
 }
 
 $user = SessionManager::getUser();
-$userPhone = $user['phone'];
-$userId = $user['user_id'];
+$userPhone = $user['phone'] ?? '';
+$userId = $user['user_id'] ?? null;
 $systemCountry = $user['country'] ?? 'BW';
 
 $config = require __DIR__ . '/../../src/CORE_CONFIG/load_country.php';
@@ -25,24 +25,120 @@ try {
     $db = DBConnection::getInstance($dbConfig);
     $db->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
 } catch (\Throwable $e) {
-    error_log($e->getMessage());
+    error_log("USER DASHBOARD DB ERROR: " . $e->getMessage());
     die("System error");
+}
+
+/* =========================
+   HELPERS
+========================= */
+function safeJsonDecode($value): array
+{
+    if (is_array($value)) {
+        return $value;
+    }
+
+    if ($value === null || $value === '') {
+        return [];
+    }
+
+    $decoded = json_decode($value, true);
+    return is_array($decoded) ? $decoded : [];
+}
+
+function normalizeDestinationInstitution(string $destinationType): string
+{
+    return match (strtolower($destinationType)) {
+        'cashout' => 'CASHOUT',
+        'wallet'  => 'WALLET',
+        'bank'    => 'BANK',
+        'card'    => 'CARD',
+        default   => strtoupper($destinationType),
+    };
+}
+
+function institutionAuthUrl(array $participant): ?string
+{
+    $resourceEndpoints = safeJsonDecode($participant['resource_endpoints'] ?? null);
+    $baseUrl = rtrim((string)($participant['base_url'] ?? ''), '/');
+
+    if (!empty($resourceEndpoints['initiate_auth'])) {
+        $path = $resourceEndpoints['initiate_auth'];
+        if (str_starts_with($path, 'http://') || str_starts_with($path, 'https://')) {
+            return $path;
+        }
+        if ($baseUrl !== '') {
+            return $baseUrl . '/' . ltrim($path, '/');
+        }
+    }
+
+    if ($baseUrl !== '') {
+        return $baseUrl . '/initiate-auth';
+    }
+
+    return null;
 }
 
 /* =========================
    LOAD DATA
 ========================= */
-$stmt = $db->prepare("SELECT name, provider_code, icon_url FROM participants WHERE status='ACTIVE' ORDER BY name");
+
+/*
+ participants table has:
+ participant_id, name, type, category, provider_code, auth_type, base_url, ... status, resource_endpoints, metadata
+*/
+$stmt = $db->prepare("
+    SELECT participant_id, name, type, category, provider_code, auth_type, base_url, resource_endpoints
+    FROM participants
+    WHERE status = 'ACTIVE'
+    ORDER BY name
+");
 $stmt->execute();
 $institutions = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
+/*
+ swap_requests table has:
+ swap_id, swap_uuid, from_currency, to_currency, amount, source_details, destination_details, status, created_at, metadata
+
+ So recent user transactions are reconstructed by filtering swap_requests using metadata->user_id
+ and falling back to phone inside source_details / destination_details JSON.
+*/
 $stmt = $db->prepare("
-    SELECT * FROM swap_requests 
-    WHERE user_id = :uid 
-    ORDER BY created_at DESC LIMIT 10
+    SELECT swap_id, swap_uuid, from_currency, to_currency, amount, source_details, destination_details, status, created_at, metadata
+    FROM swap_requests
+    ORDER BY created_at DESC
+    LIMIT 50
 ");
-$stmt->execute([':uid' => $userId]);
-$recentTransactions = $stmt->fetchAll(PDO::FETCH_ASSOC);
+$stmt->execute();
+$allRecentSwaps = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+$recentTransactions = [];
+
+foreach ($allRecentSwaps as $row) {
+    $metadata = safeJsonDecode($row['metadata'] ?? null);
+    $sourceDetails = safeJsonDecode($row['source_details'] ?? null);
+    $destinationDetails = safeJsonDecode($row['destination_details'] ?? null);
+
+    $matchesUser =
+        ((string)($metadata['user_id'] ?? '') === (string)$userId) ||
+        ((string)($metadata['user_phone'] ?? '') === (string)$userPhone) ||
+        ((string)($sourceDetails['phone'] ?? '') === (string)$userPhone) ||
+        ((string)($sourceDetails['source_reference'] ?? '') === (string)$userPhone) ||
+        ((string)($destinationDetails['phone'] ?? '') === (string)$userPhone) ||
+        ((string)($destinationDetails['destination_value'] ?? '') === (string)$userPhone);
+
+    if ($matchesUser) {
+        $row['source_type'] = $sourceDetails['source_type'] ?? ($sourceDetails['asset_type'] ?? 'SOURCE');
+        $row['source_institution'] = $sourceDetails['institution'] ?? ($sourceDetails['source_institution'] ?? '');
+        $row['destination_type'] = $destinationDetails['destination_type'] ?? 'DESTINATION';
+        $row['destination_value'] = $destinationDetails['destination_value'] ?? ($destinationDetails['phone'] ?? '');
+        $recentTransactions[] = $row;
+    }
+
+    if (count($recentTransactions) >= 10) {
+        break;
+    }
+}
 
 /* =========================
    HANDLE SWAP
@@ -50,99 +146,157 @@ $recentTransactions = $stmt->fetchAll(PDO::FETCH_ASSOC);
 $error = null;
 $success = null;
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && $_POST['action'] === 'swap') {
-
-    $sourceType = $_POST['source_type'];
-    $institution = $_POST['source_institution'];
-    $amount = (float)$_POST['amount'];
-    $destinationType = $_POST['destination_type'];
-    $destinationValue = trim($_POST['destination_value']);
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'swap') {
+    $sourceType = strtoupper(trim($_POST['source_type'] ?? ''));
+    $institution = trim($_POST['source_institution'] ?? '');
+    $amount = (float)($_POST['amount'] ?? 0);
+    $destinationType = strtolower(trim($_POST['destination_type'] ?? ''));
+    $destinationValue = trim($_POST['destination_value'] ?? '');
 
     $sourceReference = null;
 
     if ($sourceType === 'WALLET') {
         $sourceReference = $userPhone;
     } elseif ($sourceType === 'ACCOUNT') {
-        $sourceReference = $_POST['account_number'];
+        $sourceReference = trim($_POST['account_number'] ?? '');
     } elseif ($sourceType === 'CARD') {
-        $sourceReference = $_POST['card_number'];
+        $sourceReference = trim($_POST['card_number'] ?? '');
     } elseif ($sourceType === 'VOUCHER') {
-        $sourceReference = $_POST['voucher_number'];
+        $sourceReference = trim($_POST['voucher_number'] ?? '');
     }
 
-    $swapRef = 'SWP-' . strtoupper(bin2hex(random_bytes(6)));
-
-    $stmt = $db->prepare("
-        INSERT INTO swap_requests 
-        (swap_uuid, user_id, source_type, source_institution, source_reference,
-         amount, destination_type, destination_value, status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending_auth', NOW())
-    ");
-
-    $stmt->execute([
-        $swapRef,
-        $userId,
-        $sourceType,
-        $institution,
-        $sourceReference,
-        $amount,
-        $destinationType,
-        $destinationValue
-    ]);
-
-    // Get institution endpoint
-    $stmt = $db->prepare("SELECT api_endpoint, provider_code FROM participants WHERE name=? OR provider_code=?");
-    $stmt->execute([$institution, $institution]);
-    $inst = $stmt->fetch(PDO::FETCH_ASSOC);
-
-    if (!$inst || !$inst['api_endpoint']) {
-        $error = "Institution authentication endpoint not configured. Please contact support.";
+    if ($institution === '' || $amount <= 0 || $destinationValue === '') {
+        $error = "Please complete all required fields.";
+    } elseif ($sourceReference === null || $sourceReference === '') {
+        $error = "Source reference is required.";
     } else {
+        $swapRef = 'SWP-' . strtoupper(bin2hex(random_bytes(6)));
 
-        $payload = [
-            'swap_ref' => $swapRef,
-            'amount' => $amount,
+        $sourceDetails = [
+            'source_type' => $sourceType,
+            'institution' => $institution,
             'source_reference' => $sourceReference,
-            'destination' => $destinationValue,
-            'callback_url' => 'https://' . $_SERVER['HTTP_HOST'] . '/swap_callback.php'
+            'phone' => $sourceType === 'WALLET' ? $userPhone : null
         ];
 
-        $ch = curl_init($inst['api_endpoint'] . '/initiate-auth');
-        curl_setopt_array($ch, [
-            CURLOPT_POST => true,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
-            CURLOPT_POSTFIELDS => json_encode($payload),
-            CURLOPT_TIMEOUT => 10,
-            CURLOPT_SSL_VERIFYPEER => false
-        ]);
+        $destinationDetails = [
+            'destination_type' => $destinationType,
+            'destination_value' => $destinationValue,
+            'destination_institution' => normalizeDestinationInstitution($destinationType)
+        ];
 
-        $response = curl_exec($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $curlError = curl_error($ch);
-        curl_close($ch);
+        $metadata = [
+            'user_id' => $userId,
+            'user_phone' => $userPhone,
+            'channel' => 'user_dashboard',
+            'system_country' => $systemCountry
+        ];
 
-        if ($curlError) {
-            $error = "Connection error: " . $curlError;
-        } elseif ($httpCode !== 200) {
-            $error = "Authentication service error (HTTP $httpCode)";
-        } else {
-            $auth = json_decode($response, true);
+        try {
+            /*
+             swap_requests supports:
+             swap_uuid, from_currency, to_currency, amount, source_details, destination_details, status, created_at, metadata
+            */
+            $stmt = $db->prepare("
+                INSERT INTO swap_requests (
+                    swap_uuid,
+                    from_currency,
+                    to_currency,
+                    amount,
+                    source_details,
+                    destination_details,
+                    status,
+                    created_at,
+                    metadata
+                ) VALUES (
+                    :swap_uuid,
+                    :from_currency,
+                    :to_currency,
+                    :amount,
+                    :source_details,
+                    :destination_details,
+                    :status,
+                    NOW(),
+                    :metadata
+                )
+            ");
 
-            if (!$auth) {
-                $error = "Invalid response from institution";
+            $stmt->execute([
+                ':swap_uuid' => $swapRef,
+                ':from_currency' => 'BWP',
+                ':to_currency' => 'BWP',
+                ':amount' => $amount,
+                ':source_details' => json_encode($sourceDetails, JSON_UNESCAPED_UNICODE),
+                ':destination_details' => json_encode($destinationDetails, JSON_UNESCAPED_UNICODE),
+                ':status' => 'pending_auth',
+                ':metadata' => json_encode($metadata, JSON_UNESCAPED_UNICODE)
+            ]);
+
+            /*
+             participants supports:
+             name, provider_code, auth_type, base_url, resource_endpoints
+            */
+            $stmt = $db->prepare("
+                SELECT participant_id, name, provider_code, auth_type, base_url, resource_endpoints
+                FROM participants
+                WHERE name = :institution OR provider_code = :institution
+                LIMIT 1
+            ");
+            $stmt->execute([':institution' => $institution]);
+            $inst = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            $authUrl = $inst ? institutionAuthUrl($inst) : null;
+
+            if (!$inst || !$authUrl) {
+                $success = "Swap request created successfully. Institution authentication endpoint is not yet configured.";
             } else {
-                if (isset($auth['auth_type']) && $auth['auth_type'] === 'redirect' && isset($auth['auth_url'])) {
-                    header("Location: " . $auth['auth_url']);
-                    exit();
-                } elseif (isset($auth['auth_type']) && $auth['auth_type'] === 'push') {
-                    $success = "📱 Push notification sent to your phone. Please approve the transaction.";
-                } elseif (isset($auth['message'])) {
-                    $success = $auth['message'];
+                $payload = [
+                    'swap_ref' => $swapRef,
+                    'amount' => $amount,
+                    'source_reference' => $sourceReference,
+                    'destination' => $destinationValue,
+                    'source_type' => $sourceType,
+                    'destination_type' => $destinationType,
+                    'callback_url' => 'https://' . $_SERVER['HTTP_HOST'] . '/swap_callback.php'
+                ];
+
+                $ch = curl_init($authUrl);
+                curl_setopt_array($ch, [
+                    CURLOPT_POST => true,
+                    CURLOPT_RETURNTRANSFER => true,
+                    CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
+                    CURLOPT_POSTFIELDS => json_encode($payload),
+                    CURLOPT_TIMEOUT => 10,
+                    CURLOPT_SSL_VERIFYPEER => false
+                ]);
+
+                $response = curl_exec($ch);
+                $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+                $curlError = curl_error($ch);
+                curl_close($ch);
+
+                if ($curlError) {
+                    $error = "Connection error: " . $curlError;
+                } elseif ($httpCode < 200 || $httpCode >= 300) {
+                    $error = "Authentication service error (HTTP {$httpCode})";
                 } else {
-                    $success = "🔐 Authentication initiated. Follow instructions from your provider.";
+                    $auth = json_decode($response, true);
+
+                    if (!is_array($auth)) {
+                        $success = "Swap request created. Waiting for institution response.";
+                    } elseif (($auth['auth_type'] ?? '') === 'redirect' && !empty($auth['auth_url'])) {
+                        header("Location: " . $auth['auth_url']);
+                        exit();
+                    } elseif (($auth['auth_type'] ?? '') === 'push') {
+                        $success = "Push notification sent to your phone. Please approve the transaction.";
+                    } else {
+                        $success = $auth['message'] ?? "Authentication initiated. Follow instructions from your provider.";
+                    }
                 }
             }
+        } catch (\Throwable $e) {
+            error_log("USER DASHBOARD SWAP ERROR: " . $e->getMessage());
+            $error = "Unable to create swap request.";
         }
     }
 }
