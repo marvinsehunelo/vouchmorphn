@@ -86,9 +86,9 @@ function getLocalPhonePart(string $fullPhone, string $dialCode): string
     return ltrim($fullPhone, '0');
 }
 
-// --------------------------------------------------
+// -------------------------------------------------
 // 5️⃣ Handle Login POST
-// --------------------------------------------------
+// -------------------------------------------------
 $error = '';
 $phone = '';
 $formattedPhone = '';
