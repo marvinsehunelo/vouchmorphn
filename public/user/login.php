@@ -134,7 +134,7 @@ if (!$user || (int)$user['verified'] !== 1) {
     ]);
 
     error_log("PIN LOGIN SUCCESS: {$formattedPhone}");
-    header('Location: virtual_atmswap_dashboard.php');
+    header('Location: user_dashboard.php');
     exit();
 }
             } catch (\Throwable $e) {
@@ -173,7 +173,7 @@ if (!$user || (int)$user['verified'] !== 1) {
                     ]);
 
                     error_log("PHONE LOGIN SUCCESS: {$formattedPhone}");
-                    header('Location: virtual_atmswap_dashboard.php');
+                    header('Location: user_dashboard.php');
                     exit();
                 }
             } catch (\Throwable $e) {
