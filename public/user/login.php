@@ -108,43 +108,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             try {
                 $stmt = $db->prepare(
-                    "SELECT user_id, phone, username, pin_hash, verified,
-                            pin_enabled, recovery_email, backup_codes_enabled, created_at
-                     FROM users
-                     WHERE phone = :phone
-                     LIMIT 1"
-                );
-                $stmt->execute([':phone' => $formattedPhone]);
-                $user = $stmt->fetch(\PDO::FETCH_ASSOC);
+    "SELECT user_id, phone, username, password_hash, verified, created_at
+     FROM users
+     WHERE phone = :phone
+     LIMIT 1"
+);
+$stmt->execute([':phone' => $formattedPhone]);
+$user = $stmt->fetch(\PDO::FETCH_ASSOC);
 
-                if (
-                    !$user ||
-                    (int)$user['verified'] !== 1 ||
-                    (int)$user['pin_enabled'] !== 1
-                ) {
-                    $error = "Invalid login credentials.";
-                } elseif (empty($user['pin_hash']) || !password_verify($pin, $user['pin_hash'])) {
-                    $error = "Invalid PIN.";
-                    error_log("PIN LOGIN FAILED: {$formattedPhone}");
-                } else {
-                    session_regenerate_id(true);
+if (!$user || (int)$user['verified'] !== 1) {
+    $error = "Invalid login credentials.";
+} elseif (!password_verify($pin, $user['password_hash'])) {
+    $error = "Invalid PIN.";
+    error_log("PIN LOGIN FAILED: {$formattedPhone}");
+} else {
+    session_regenerate_id(true);
 
-                    SessionManager::setUser([
-                        'user_id'              => $user['user_id'],
-                        'username'             => $user['username'] ?? '',
-                        'phone'                => $user['phone'],
-                        'role'                 => 'USER',
-                        'country'              => $systemCountry,
-                        'created_at'           => $user['created_at'] ?? null,
-                        'pin_enabled'          => true,
-                        'recovery_email'       => $user['recovery_email'] ?? null,
-                        'backup_codes_enabled' => (int)($user['backup_codes_enabled'] ?? 0) === 1
-                    ]);
+    SessionManager::setUser([
+        'user_id'    => $user['user_id'],
+        'username'   => $user['username'] ?? '',
+        'phone'      => $user['phone'],
+        'role'       => 'USER',
+        'country'    => $systemCountry,
+        'created_at' => $user['created_at'] ?? null
+    ]);
 
-                    error_log("PIN LOGIN SUCCESS: {$formattedPhone}");
-                    header('Location: virtual_atmswap_dashboard.php');
-                    exit();
-                }
+    error_log("PIN LOGIN SUCCESS: {$formattedPhone}");
+    header('Location: virtual_atmswap_dashboard.php');
+    exit();
+}
             } catch (\Throwable $e) {
                 error_log("USER LOGIN QUERY ERROR [{$systemCountry}]: " . $e->getMessage());
                 $error = "System error. Please try again.";
