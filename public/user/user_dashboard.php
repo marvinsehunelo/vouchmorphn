@@ -1,6 +1,6 @@
 <?php
 ob_start();
-require_once __DIR__ . '/../../src/APP_LAYER/utils/session_manager.php';
+require_once __DIR__ . '/../../src/APP_LAYER/utils/SessionManager.php';
 require_once __DIR__ . '/../../src/DATA_PERSISTENCE_LAYER/config/DBConnection.php';
 
 use APP_LAYER\utils\SessionManager;
