@@ -833,21 +833,24 @@ class SwapService
                 break;
 
             case 'WALLET':
-            case 'E-WALLET':
-                $phone = $source['ewallet']['phone'] ?? 
-                         $source['phone'] ?? 
-                         $source['ewallet_phone'] ?? 
-                         $source['wallet']['wallet_phone'] ??
-                         null;
-                
-                if (!$phone) {
-                    throw new RuntimeException("Phone number required for WALLET/E-WALLET verification");
-                }
-                
-                $verificationPayload = array_merge($verificationPayload, [
-                    'phone' => $this->formatPhoneForInstitution($phone, $participant)
-                ]);
-                break;
+case 'E-WALLET':
+    $phone = $source['ewallet']['ewallet_phone'] ??
+             $source['ewallet']['phone'] ??
+             $source['wallet']['wallet_phone'] ??
+             $source['wallet']['phone'] ??
+             $source['ewallet_phone'] ??
+             $source['wallet_phone'] ??
+             $source['phone'] ??
+             null;
+
+    if (!$phone) {
+        throw new RuntimeException("Phone number required for WALLET/E-WALLET verification");
+    }
+
+    $verificationPayload = array_merge($verificationPayload, [
+        'phone' => $this->formatPhoneForInstitution($phone, $participant)
+    ]);
+    break;
 
             case 'CARD':
                 $card = $source['card'] ?? [];
