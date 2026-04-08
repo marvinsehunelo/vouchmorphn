@@ -4051,4 +4051,14 @@ ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON TABLES 
 --
 
 \unrestrict SccTa15O45fckNRaxo94ucSdEfZappgsObF2iPAJFIhANgUnTkdUWawXpFE3Yhx
+CREATE TABLE ussd_sessions (
+    id BIGSERIAL PRIMARY KEY,
+    session_id VARCHAR(100) NOT NULL,
+    session_key VARCHAR(100) NOT NULL,
+    session_value TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 
+CREATE UNIQUE INDEX uniq_session_key
+ON ussd_sessions (session_id, session_key);
