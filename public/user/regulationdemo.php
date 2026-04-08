@@ -106,6 +106,37 @@ function debug_log($message) {
     error_log("[DEBUG] " . $message);
 }
 
+// ============================================================================
+// PHONE NUMBER FORMATTING FUNCTION
+// ============================================================================
+
+function formatPhoneNumberForSwap($phoneNumber, $countryCode = 'BW') {
+    // Remove any non-numeric characters
+    $cleanNumber = preg_replace('/[^0-9]/', '', $phoneNumber);
+    
+    // Country code mappings
+    $countryCodes = [
+        'BW' => '267',  // Botswana
+        'KE' => '254',  // Kenya
+        'NG' => '234',  // Nigeria
+    ];
+    
+    $code = $countryCodes[$countryCode] ?? '267';
+    
+    // If number already starts with country code
+    if (substr($cleanNumber, 0, strlen($code)) === $code) {
+        return '+' . $cleanNumber;
+    }
+    
+    // If number starts with 0 (local format), remove the 0
+    if (substr($cleanNumber, 0, 1) === '0') {
+        $cleanNumber = substr($cleanNumber, 1);
+    }
+    
+    // Add country code and plus sign
+    return '+' . $code . $cleanNumber;
+}
+
 error_log("=== regulationdemo.php accessed at " . date('Y-m-d H:i:s') . " ===");
 
 // Fix 6: Load bootstrap with correct path
@@ -505,7 +536,7 @@ if ($db) {
 }
 
 // ============================================================================
-// AJAX SWAP HANDLER - FIXED PAYLOAD STRUCTURE
+// AJAX SWAP HANDLER - WITH PHONE NUMBER FORMATTING
 // ============================================================================
 
 if (!isset($isAjax)) {
@@ -554,7 +585,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_swap']) && $i
         $amount       = (float)($_POST['amount'] ?? 0);
         $debug_log[]  = "4. Form data: swapType=$swapType, deliveryMode=$deliveryMode, toType=$toType";
 
-        // Get source phone/account
+        // Get source phone/account - FORMAT THE PHONE NUMBER
         $phoneNumber = '';
         switch ($fromType) {
             case 'e-wallet':
@@ -569,7 +600,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_swap']) && $i
             default:
                 $phoneNumber = $_POST['account_number'] ?? '';
         }
-        $debug_log[] = "5. Source phone/account: $phoneNumber";
+        
+        // FORMAT THE PHONE NUMBER WITH COUNTRY CODE
+        if (!empty($phoneNumber)) {
+            $phoneNumber = formatPhoneNumberForSwap($phoneNumber, $countryCode);
+        }
+        $debug_log[] = "5. Source phone/account (formatted): $phoneNumber";
+        
+        // Validate phone number format
+        if (!empty($phoneNumber) && !preg_match('/^\+\d{10,15}$/', $phoneNumber)) {
+            throw new \Exception('Invalid phone number format. Expected format: +267XXXXXXXXX');
+        }
 
         // Build source in the format your API expects
         $source = [
@@ -613,6 +654,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_swap']) && $i
             // Business case - multiple destinations
             $destinations = [];
             foreach ($_POST['recipients'] as $recipient) {
+                $recipientPhone = $recipient['phone'] ?? '';
+                // FORMAT THE RECIPIENT PHONE NUMBER
+                if (!empty($recipientPhone)) {
+                    $recipientPhone = formatPhoneNumberForSwap($recipientPhone, $countryCode);
+                }
+                
                 $dest = [
                     'institution' => $recipient['institution'] ?? '',
                     'delivery_mode' => $deliveryMode,
@@ -620,9 +667,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_swap']) && $i
                 ];
                 
                 if ($deliveryMode === 'cashout') {
-                    $dest['beneficiary_phone'] = $recipient['phone'] ?? '';
+                    $dest['beneficiary_phone'] = $recipientPhone;
                 } else {
-                    $dest['beneficiary_account'] = $recipient['phone'] ?? '';
+                    $dest['beneficiary_account'] = $recipientPhone;
                 }
                 
                 $destinations[] = array_filter($dest);
@@ -633,6 +680,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_swap']) && $i
             $destPhone = $deliveryMode === 'cashout'
                 ? $_POST['destination_phone'] ?? ''
                 : $_POST['destination_account'] ?? $_POST['destination_card'] ?? '';
+            
+            // FORMAT THE DESTINATION PHONE NUMBER
+            if (!empty($destPhone)) {
+                $destPhone = formatPhoneNumberForSwap($destPhone, $countryCode);
+            }
+            $debug_log[] = "6. Destination phone (formatted): $destPhone";
             
             $destination = [
                 'institution' => $_POST['to_institution'] ?? '',
@@ -2036,7 +2089,7 @@ ob_start();
                     <div class="card-badge">settlement_queue</div>
                 </div>
                 <div class="table-responsive">
-                    <table>
+                    </table>
                         <thead>
                             <tr>
                                 <th>DEBTOR</th>
@@ -2052,9 +2105,9 @@ ob_start();
                                 <?php foreach ($settlementQueue as $item): ?>
                                 <tr>
                                     <td><?php echo htmlspecialchars($item['debtor_name']); ?></td>
-                                    <td><?php echo htmlspecialchars($item['creditor_name']); ?></td>
+                                    <td><?php echo htmlspecialchars($item['creditor_name']); ?></span></td>
                                     <td class="text-right positive"><?php echo safe_number_format($item['amount']); ?></td>
-                                    <td><?php echo date('H:i', strtotime($item['created_at'])); ?></td>
+                                    <td><?php echo date('H:i', strtotime($item['created_at'])); ?></span></td>
                                 </tr>
                                 <?php endforeach; ?>
                             <?php endif; ?>
@@ -2088,11 +2141,11 @@ ob_start();
                             <?php foreach ($pendingSettlements as $settlement): ?>
                             <tr>
                                 <td><?php echo htmlspecialchars($settlement['from_participant'] ?? '-'); ?></td>
-                                <td><?php echo htmlspecialchars($settlement['to_participant'] ?? '-'); ?></td>
-                                <td class="text-right"><?php echo safe_number_format($settlement['amount']); ?></td>
-                                <td><?php echo htmlspecialchars($settlement['type'] ?? '-'); ?></td>
-                                <td><span class="status status-pending"><?php echo $settlement['status']; ?></span></td>
-                                <td><?php echo date('H:i', strtotime($settlement['created_at'])); ?></td>
+                                <td><?php echo htmlspecialchars($settlement['to_participant'] ?? '-'); ?></span></td>
+                                <td class="text-right"><?php echo safe_number_format($settlement['amount']); ?></span></td>
+                                <td><?php echo htmlspecialchars($settlement['type'] ?? '-'); ?></span></td>
+                                <td><span class="status status-pending"><?php echo $settlement['status']; ?></span></span></td>
+                                <td><?php echo date('H:i', strtotime($settlement['created_at'])); ?></span></td>
                             </tr>
                             <?php endforeach; ?>
                         <?php endif; ?>
@@ -2125,11 +2178,11 @@ ob_start();
                         <?php else: ?>
                             <?php foreach ($weeklySettlements as $week): ?>
                             <tr>
-                                <td><?php echo date('Y-m-d', strtotime($week['week_start'])); ?></td>
-                                <td class="text-right"><?php echo $week['transaction_count']; ?></td>
-                                <td class="text-right positive"><?php echo safe_number_format($week['total_amount']); ?> BWP</td>
-                                <td><?php echo $week['debtor_count']; ?></td>
-                                <td><?php echo $week['creditor_count']; ?></td>
+                                <td><?php echo date('Y-m-d', strtotime($week['week_start'])); ?></span></td>
+                                <td class="text-right"><?php echo $week['transaction_count']; ?></span></td>
+                                <td class="text-right positive"><?php echo safe_number_format($week['total_amount']); ?> BWP</span></td>
+                                <td><?php echo $week['debtor_count']; ?></span></td>
+                                <td><?php echo $week['creditor_count']; ?></span></td>
                             </tr>
                             <?php endforeach; ?>
                         <?php endif; ?>
@@ -2160,11 +2213,11 @@ ob_start();
                         <?php else: ?>
                             <?php foreach ($monthlySettlements as $month): ?>
                             <tr>
-                                <td><?php echo date('Y-m', strtotime($month['month_start'])); ?></td>
-                                <td class="text-right"><?php echo $month['transaction_count']; ?></td>
-                                <td class="text-right positive"><?php echo safe_number_format($month['total_amount']); ?> BWP</td>
-                                <td><?php echo $month['debtor_count']; ?></td>
-                                <td><?php echo $month['creditor_count']; ?></td>
+                                <td><?php echo date('Y-m', strtotime($month['month_start'])); ?></span></td>
+                                <td class="text-right"><?php echo $month['transaction_count']; ?></span></td>
+                                <td class="text-right positive"><?php echo safe_number_format($month['total_amount']); ?> BWP</span></td>
+                                <td><?php echo $month['debtor_count']; ?></span></td>
+                                <td><?php echo $month['creditor_count']; ?></span></td>
                             </tr>
                             <?php endforeach; ?>
                         <?php endif; ?>
@@ -2195,10 +2248,10 @@ ob_start();
                             <?php foreach ($settlementSummary as $summary): ?>
                             <tr>
                                 <td><?php echo htmlspecialchars($summary['debtor']); ?></td>
-                                <td><?php echo htmlspecialchars($summary['creditor']); ?></td>
+                                <td><?php echo htmlspecialchars($summary['creditor']); ?></span></td>
                                 <td class="text-right <?php echo $summary['gross_amount'] >= 0 ? 'positive' : 'negative'; ?>">
                                     <?php echo safe_number_format($summary['gross_amount']); ?>
-                                </td>
+                                 </span></td>
                                 <td><span class="status status-<?php echo $summary['net_position'] === 'PAYABLE' ? 'pending' : 'success'; ?>"><?php echo $summary['net_position']; ?></span></td>
                             </tr>
                             <?php endforeach; ?>
@@ -2232,11 +2285,11 @@ ob_start();
                         <?php else: ?>
                             <?php foreach ($regReports as $report): ?>
                             <tr>
-                                <td><?php echo htmlspecialchars(substr($report['report_id'], 0, 16)); ?>…</td>
+                                <td><?php echo htmlspecialchars(substr($report['report_id'], 0, 16)); ?>…</span></td>
                                 <td><span class="status status-<?php echo strtolower($report['status']); ?>"><?php echo $report['status']; ?></span></td>
-                                <td><?php echo $report['attempts']; ?></td>
+                                <td><?php echo $report['attempts']; ?></span></td>
                                 <td><span class="mono"><?php echo substr($report['integrity_hash'] ?? '', 0, 8); ?>…</span></td>
-                                <td><?php echo date('H:i', strtotime($report['created_at'])); ?></td>
+                                <td><?php echo date('H:i', strtotime($report['created_at'])); ?></span></td>
                             </tr>
                             <?php endforeach; ?>
                         <?php endif; ?>
@@ -2270,10 +2323,10 @@ ob_start();
                             <?php foreach ($recentAudits as $audit): ?>
                             <tr>
                                 <td><?php echo htmlspecialchars($audit['entity_type'] ?? 'N/A'); ?></td>
-                                <td><?php echo htmlspecialchars($audit['action'] ?? 'N/A'); ?></td>
-                                <td><?php echo htmlspecialchars($audit['category'] ?? 'N/A'); ?></td>
-                                <td><span class="status status-<?php echo $audit['severity'] ?? 'info'; ?>"><?php echo $audit['severity'] ?? 'info'; ?></span></td>
-                                <td><?php echo date('H:i:s', strtotime($audit['performed_at'])); ?></td>
+                                <td><?php echo htmlspecialchars($audit['action'] ?? 'N/A'); ?></span></td>
+                                <td><?php echo htmlspecialchars($audit['category'] ?? 'N/A'); ?></span></td>
+                                <td><span class="status status-<?php echo $audit['severity'] ?? 'info'; ?>"><?php echo $audit['severity'] ?? 'info'; ?></span></span></td>
+                                <td><?php echo date('H:i:s', strtotime($audit['performed_at'])); ?></span></td>
                             </tr>
                             <?php endforeach; ?>
                         <?php endif; ?>
