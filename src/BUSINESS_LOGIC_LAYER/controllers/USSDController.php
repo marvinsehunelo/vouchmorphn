@@ -5,7 +5,6 @@ namespace BUSINESS_LOGIC_LAYER\controllers;
 
 use PDO;
 use Throwable;
-use Exception;
 use RuntimeException;
 use BUSINESS_LOGIC_LAYER\services\SwapService;
 use BUSINESS_LOGIC_LAYER\services\UserService;
@@ -24,6 +23,7 @@ class USSDController
     private const USSD_LOG = '/tmp/vouchmorph_ussd.log';
     private const DEFAULT_ROLE_ID = 1;
     private const DEFAULT_CURRENCY = 'BWP';
+    private const QUICK_SWAP_LIMIT = 4;
 
     private const SOURCE_TYPES = [
         '1' => ['type' => 'e-wallet', 'label' => 'E-Wallet'],
@@ -175,8 +175,9 @@ class USSDController
     {
         if ($user) {
             return "CON Welcome to VouchMorph\n"
-                . "1. New Swap\n"
-                . "2. My Swaps\n"
+                . "1. Quick Swap\n"
+                . "2. Custom Swap\n"
+                . "3. My Swaps\n"
                 . "0. Exit";
         }
 
@@ -198,8 +199,9 @@ class USSDController
         }
 
         return match ($mainOption) {
-            '1' => $this->handleNewSwap($input, $user, $sessionId, $phoneNumber),
-            '2' => $this->handleMySwaps($user),
+            '1' => $this->handleQuickSwap($input, $user, $sessionId, $phoneNumber),
+            '2' => $this->handleNewSwap($input, $user, $sessionId, $phoneNumber),
+            '3' => $this->handleMySwaps($user),
             '0' => "END Thank you for using VouchMorph.",
             default => "END Invalid option."
         };
@@ -274,6 +276,113 @@ class USSDController
         }
 
         return "END Invalid registration step.";
+    }
+
+    private function handleQuickSwap(array $input, array $user, string $sessionId, string $phoneNumber): string
+    {
+        $favorites = $this->getQuickSwapFavorites((int)$user['user_id']);
+
+        if (count($input) === 1) {
+            if (empty($favorites)) {
+                return "END No Quick Swaps saved. Use Custom Swap.";
+            }
+
+            $menu = "CON Quick Swap\n";
+            $i = 1;
+
+            foreach ($favorites as $favorite) {
+                $menu .= $i . ". " . $this->formatFavoriteLabel($favorite) . "\n";
+                $i++;
+            }
+
+            $menu .= $i . ". Custom Swap";
+
+            return rtrim($menu);
+        }
+
+        $choice = (int)($input[1] ?? 0);
+        $customOption = count($favorites) + 1;
+
+        if ($choice === $customOption) {
+            return "END Use option 2 for Custom Swap.";
+        }
+
+        $favorite = $favorites[$choice - 1] ?? null;
+        if (!$favorite) {
+            return "END Invalid Quick Swap option.";
+        }
+
+        $this->setSession($sessionId, 'quick_swap_favorite_id', (string)$favorite['id']);
+        $this->setSession($sessionId, 'source_type', (string)$favorite['source_type']);
+        $this->setSession($sessionId, 'source_institution', (string)$favorite['source_institution']);
+        $this->setSession($sessionId, 'source_phone', $this->formatMsisdnForSwap($phoneNumber));
+        $this->setSession($sessionId, 'user_id', (string)$user['user_id']);
+        $this->setSession($sessionId, 'delivery_mode', (string)$favorite['destination_mode']);
+        $this->setSession($sessionId, 'destination_institution', (string)$favorite['destination_institution']);
+
+        if (!empty($favorite['source_identifier'])) {
+            switch ((string)$favorite['source_type']) {
+                case 'account':
+                    $this->setSession($sessionId, 'account_number', (string)$favorite['source_identifier']);
+                    break;
+                case 'voucher':
+                    $this->setSession($sessionId, 'voucher_number', (string)$favorite['source_identifier']);
+                    break;
+            }
+        }
+
+        if (!empty($favorite['beneficiary'])) {
+            if ((string)$favorite['destination_mode'] === 'cashout') {
+                $this->setSession($sessionId, 'beneficiary_phone', (string)$favorite['beneficiary']);
+            } else {
+                $this->setSession($sessionId, 'beneficiary_account', (string)$favorite['beneficiary']);
+            }
+        }
+
+        if (count($input) === 2) {
+            return "CON Enter amount";
+        }
+
+        $amount = (float)($input[2] ?? 0);
+        if ($amount <= 0) {
+            return "END Invalid amount.";
+        }
+        $this->setSession($sessionId, 'amount', (string)$amount);
+
+        if (count($input) === 3) {
+            $summary = $this->buildQuickSwapSummary($favorite, $amount, $phoneNumber);
+            return "CON {$summary}\n1. Confirm\n2. Cancel";
+        }
+
+        $confirm = $input[3] ?? '';
+        if ($confirm !== '1') {
+            $this->clearSession($sessionId);
+            return "END Quick Swap cancelled.";
+        }
+
+        $sourceType = (string)$favorite['source_type'];
+
+        if (in_array($sourceType, ['e-wallet', 'wallet', 'voucher'], true)) {
+            if (count($input) === 4) {
+                $label = strtoupper((string)$favorite['source_institution']);
+                return "CON Enter {$label} PIN";
+            }
+
+            $pin = trim((string)($input[4] ?? ''));
+            if (!preg_match('/^\d{4}$/', $pin)) {
+                return "END PIN must be 4 digits.";
+            }
+
+            if ($sourceType === 'e-wallet') {
+                $this->setSession($sessionId, 'ewallet_pin', $pin);
+            } elseif ($sourceType === 'wallet') {
+                $this->setSession($sessionId, 'wallet_pin', $pin);
+            } elseif ($sourceType === 'voucher') {
+                $this->setSession($sessionId, 'voucher_pin', $pin);
+            }
+        }
+
+        return $this->executeSwapFromSession($sessionId, $sourceType, $amount);
     }
 
     private function handleNewSwap(array $input, array $user, string $sessionId, string $phoneNumber): string
@@ -524,6 +633,11 @@ class USSDController
                 $source['ewallet'] = [
                     'ewallet_phone' => $sourcePhone,
                 ];
+
+                $ewalletPin = $this->getSession($sessionId, 'ewallet_pin');
+                if ($ewalletPin !== null && $ewalletPin !== '') {
+                    $source['ewallet']['ewallet_pin'] = $ewalletPin;
+                }
                 break;
 
             case 'wallet':
@@ -572,11 +686,11 @@ class USSDController
             ],
         ];
 
-        $this->logUSSD('SWAP_PAYLOAD', $payload);
+        $this->logUSSD('SWAP_PAYLOAD', $this->maskSensitiveData($payload));
 
         try {
             $result = $this->swapService->executeSwap($payload);
-            $this->logUSSD('SWAP_RESULT', $result);
+            $this->logUSSD('SWAP_RESULT', $this->maskSensitiveData($result));
             $this->clearSession($sessionId);
 
             $status = strtolower((string)($result['status'] ?? ''));
@@ -584,6 +698,8 @@ class USSDController
             if ($status === 'success') {
                 $ref = $result['swap_reference'] ?? $result['reference'] ?? 'N/A';
                 $holdRef = $result['hold_reference'] ?? null;
+
+                $this->saveQuickSwapFavoriteFromPayload($payload);
 
                 $message = "END Swap successful\nRef: {$ref}\nAmt: {$amount} BWP";
 
@@ -659,6 +775,133 @@ class USSDController
             ]);
             return "END Could not load swaps.";
         }
+    }
+
+    private function getQuickSwapFavorites(int $userId): array
+    {
+        try {
+            $stmt = $this->db->prepare("
+                SELECT
+                    id,
+                    user_id,
+                    source_type,
+                    source_institution,
+                    source_identifier,
+                    destination_mode,
+                    destination_institution,
+                    beneficiary,
+                    usage_count,
+                    last_used_at
+                FROM ussd_favorites
+                WHERE user_id = ?
+                ORDER BY usage_count DESC, last_used_at DESC
+                LIMIT ?
+            ");
+            $stmt->bindValue(1, $userId, PDO::PARAM_INT);
+            $stmt->bindValue(2, self::QUICK_SWAP_LIMIT, PDO::PARAM_INT);
+            $stmt->execute();
+
+            return $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+        } catch (Throwable $e) {
+            $this->logUSSD('GET_FAVORITES_ERROR', [
+                'message' => $e->getMessage(),
+            ]);
+            return [];
+        }
+    }
+
+    private function saveQuickSwapFavoriteFromPayload(array $payload): void
+    {
+        try {
+            $userId = (int)($payload['metadata']['user_id'] ?? 0);
+            if ($userId <= 0) {
+                return;
+            }
+
+            $sourceType = (string)($payload['source']['asset_type'] ?? '');
+            $sourceInstitution = (string)($payload['source']['institution'] ?? '');
+            $destinationMode = (string)($payload['destination']['delivery_mode'] ?? '');
+            $destinationInstitution = (string)($payload['destination']['institution'] ?? '');
+
+            $sourceIdentifier = $this->extractSourceIdentifier($payload['source'] ?? [], $sourceType);
+            $beneficiary = $this->extractBeneficiary($payload['destination'] ?? [], $destinationMode);
+
+            $stmt = $this->db->prepare("
+                INSERT INTO ussd_favorites (
+                    user_id,
+                    source_type,
+                    source_institution,
+                    source_identifier,
+                    destination_mode,
+                    destination_institution,
+                    beneficiary,
+                    usage_count,
+                    created_at,
+                    updated_at,
+                    last_used_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT (user_id, source_type, source_institution, source_identifier, destination_mode, destination_institution, beneficiary)
+                DO UPDATE SET
+                    usage_count = ussd_favorites.usage_count + 1,
+                    updated_at = CURRENT_TIMESTAMP,
+                    last_used_at = CURRENT_TIMESTAMP
+            ");
+            $stmt->execute([
+                $userId,
+                $sourceType,
+                $sourceInstitution,
+                $sourceIdentifier,
+                $destinationMode,
+                $destinationInstitution,
+                $beneficiary,
+            ]);
+        } catch (Throwable $e) {
+            $this->logUSSD('SAVE_FAVORITE_ERROR', [
+                'message' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    private function extractSourceIdentifier(array $source, string $sourceType): string
+    {
+        return match ($sourceType) {
+            'account'  => (string)($source['account']['account_number'] ?? ''),
+            'voucher'  => (string)($source['voucher']['voucher_number'] ?? ''),
+            'wallet'   => (string)($source['wallet']['wallet_phone'] ?? ''),
+            'e-wallet' => (string)($source['ewallet']['ewallet_phone'] ?? ''),
+            default    => '',
+        };
+    }
+
+    private function extractBeneficiary(array $destination, string $deliveryMode): string
+    {
+        return $deliveryMode === 'cashout'
+            ? (string)($destination['beneficiary_phone'] ?? '')
+            : (string)($destination['beneficiary_account'] ?? '');
+    }
+
+    private function formatFavoriteLabel(array $favorite): string
+    {
+        $inst = (string)($favorite['source_institution'] ?? '');
+        $type = (string)($favorite['source_type'] ?? '');
+        return strtoupper($inst) . ' ' . ucfirst($type);
+    }
+
+    private function buildQuickSwapSummary(array $favorite, float $amount, string $phoneNumber): string
+    {
+        $source = strtoupper((string)$favorite['source_institution']) . ' ' . ucfirst((string)$favorite['source_type']);
+        $destinationMode = strtoupper((string)$favorite['destination_mode']);
+        $beneficiary = (string)($favorite['beneficiary'] ?? '');
+
+        if ($beneficiary === '') {
+            $beneficiary = $this->formatMsisdnForSwap($phoneNumber);
+        }
+
+        return $this->truncateForUssd(
+            "Send BWP {$amount} from {$source} to {$destinationMode} {$beneficiary}",
+            120
+        );
     }
 
     private function showInstitutionsMenu(string $walletType, string $title): string
@@ -921,6 +1164,21 @@ class USSDController
         }
 
         return mb_substr($text, 0, $max - 3) . '...';
+    }
+
+    private function maskSensitiveData(array $data): array
+    {
+        $json = json_encode($data);
+        if ($json === false) {
+            return $data;
+        }
+
+        $masked = preg_replace('/"wallet_pin"\s*:\s*"[^"]*"/', '"wallet_pin":"****"', $json);
+        $masked = preg_replace('/"voucher_pin"\s*:\s*"[^"]*"/', '"voucher_pin":"****"', $masked ?? '');
+        $masked = preg_replace('/"ewallet_pin"\s*:\s*"[^"]*"/', '"ewallet_pin":"****"', $masked ?? '');
+
+        $decoded = json_decode($masked ?? $json, true);
+        return is_array($decoded) ? $decoded : $data;
     }
 
     private function logUSSD(string $event, array $data): void
