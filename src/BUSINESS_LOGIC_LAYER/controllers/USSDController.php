@@ -6,6 +6,7 @@ namespace BUSINESS_LOGIC_LAYER\controllers;
 use PDO;
 use Exception;
 use RuntimeException;
+use Throwable;
 use BUSINESS_LOGIC_LAYER\services\SwapService;
 use BUSINESS_LOGIC_LAYER\services\UserService;
 use DATA_PERSISTENCE_LAYER\config\DBConnection;
@@ -122,8 +123,11 @@ class USSDController
             }
 
             return $this->processMenuLevel($input, $level, $user, $phoneNumber, $sessionId);
-        } catch (Exception $e) {
-            $this->logUSSD('ERROR', ['message' => $e->getMessage()]);
+        } catch (Throwable $e) {
+            $this->logUSSD('HANDLE_USSD_ERROR', [
+                'message' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
             return "END System error. Please try again later.";
         }
     }
@@ -208,7 +212,17 @@ class USSDController
                 return "END PINs do not match. Please try again.";
             }
 
-            $user = $this->createUssdUser($phoneNumber, $username, $pin);
+            try {
+                $user = $this->createUssdUser($phoneNumber, $username, $pin);
+            } catch (Throwable $e) {
+                $this->logUSSD('REGISTRATION_ERROR', [
+                    'message' => $e->getMessage(),
+                    'username' => $username,
+                    'phone' => $phoneNumber,
+                ]);
+                $this->clearSession($sessionId);
+                return "END Registration failed.";
+            }
 
             $this->clearSession($sessionId);
             $this->logUSSD('REGISTERED', [
@@ -458,6 +472,7 @@ class USSDController
         $destinationInstitution = (string)$this->getSession($sessionId, 'destination_institution');
         $deliveryMode           = (string)$this->getSession($sessionId, 'delivery_mode');
         $sourcePhone            = (string)$this->getSession($sessionId, 'source_phone');
+        $userId                 = (string)$this->getSession($sessionId, 'user_id');
 
         $source = [
             'institution' => $sourceInstitution,
@@ -510,6 +525,12 @@ class USSDController
             'currency'    => self::DEFAULT_CURRENCY,
             'source'      => $source,
             'destination' => $destination,
+            'metadata'    => [
+                'user_id' => $userId,
+                'source_phone' => $sourcePhone,
+                'beneficiary_phone' => $destination['beneficiary_phone'] ?? null,
+                'channel' => 'USSD',
+            ],
         ];
 
         $this->logUSSD('SWAP_PAYLOAD', $payload);
@@ -541,8 +562,11 @@ class USSDController
 
             $error = $result['message'] ?? 'Swap failed';
             return "END " . $this->truncateForUssd($error, 150);
-        } catch (Exception $e) {
-            $this->logUSSD('SWAP_EXCEPTION', ['message' => $e->getMessage()]);
+        } catch (Throwable $e) {
+            $this->logUSSD('SWAP_EXCEPTION', [
+                'message' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
             $this->clearSession($sessionId);
             return "END Swap failed. Please try again.";
         }
@@ -589,8 +613,11 @@ class USSDController
             }
 
             return $this->truncateForUssd(implode("\n", $lines), 180);
-        } catch (Exception $e) {
-            $this->logUSSD('MY_SWAPS_ERROR', ['message' => $e->getMessage()]);
+        } catch (Throwable $e) {
+            $this->logUSSD('MY_SWAPS_ERROR', [
+                'message' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
             return "END Could not load swaps.";
         }
     }
@@ -695,41 +722,53 @@ class USSDController
             throw new RuntimeException('Username already taken.');
         }
 
-        $email = 'ussd_' . strtolower($username) . '_' . $clean . '@ussd.vouchmorph.local';
+        $email = 'ussd_' . strtolower($username) . '_' . time() . '_' . $clean . '@ussd.vouchmorph.local';
         $passwordHash = password_hash($pin, PASSWORD_BCRYPT);
 
-        $stmt = $this->db->prepare("
-            INSERT INTO users (
-                username,
-                email,
-                phone,
-                password_hash,
-                role_id,
-                verified,
-                kyc_verified,
-                aml_score,
-                mfa_enabled,
-                created_at,
-                updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, false, false, 0.00, false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            RETURNING user_id, username, email, phone, role_id
-        ");
-        $stmt->execute([
-            $username,
-            $email,
-            $msisdn,
-            $passwordHash,
-            self::DEFAULT_ROLE_ID
-        ]);
+        try {
+            $stmt = $this->db->prepare("
+                INSERT INTO users (
+                    username,
+                    email,
+                    phone,
+                    password_hash,
+                    role_id,
+                    verified,
+                    kyc_verified,
+                    aml_score,
+                    mfa_enabled,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, false, false, 0.00, false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                RETURNING user_id, username, email, phone, role_id
+            ");
+            $stmt->execute([
+                $username,
+                $email,
+                $msisdn,
+                $passwordHash,
+                self::DEFAULT_ROLE_ID
+            ]);
 
-        $user = $stmt->fetch(PDO::FETCH_ASSOC);
+            $user = $stmt->fetch(PDO::FETCH_ASSOC);
 
-        if (!$user) {
-            throw new RuntimeException('Failed to create USSD user.');
+            if (!$user) {
+                throw new RuntimeException('Insert succeeded but no user returned.');
+            }
+
+            return $user;
+        } catch (Throwable $e) {
+            $this->logUSSD('CREATE_USER_SQL_ERROR', [
+                'message' => $e->getMessage(),
+                'username' => $username,
+                'email' => $email,
+                'phone' => $msisdn,
+                'role_id' => self::DEFAULT_ROLE_ID,
+                'trace' => $e->getTraceAsString(),
+            ]);
+            throw $e;
         }
-
-        return $user;
     }
 
     private function usernameExists(string $username): bool
@@ -769,8 +808,11 @@ class USSDController
             $value = $stmt->fetchColumn();
 
             return ($value === false || $value === null) ? null : (string)$value;
-        } catch (Exception $e) {
-            $this->logUSSD('VOUCHER_LOOKUP_ERROR', ['message' => $e->getMessage()]);
+        } catch (Throwable $e) {
+            $this->logUSSD('VOUCHER_LOOKUP_ERROR', [
+                'message' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
             return null;
         }
     }
@@ -853,5 +895,6 @@ class USSDController
         ]);
 
         @file_put_contents(self::USSD_LOG, $logEntry . PHP_EOL, FILE_APPEND);
+        error_log('[USSD] ' . $logEntry);
     }
 }
