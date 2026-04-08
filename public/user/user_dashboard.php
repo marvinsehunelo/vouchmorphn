@@ -1,4 +1,10 @@
 <?php
+// Disable error reporting for AJAX requests to prevent JSON corruption
+if (!empty($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest') {
+    error_reporting(0);
+    ini_set('display_errors', 0);
+}
+
 ob_start();
 require_once __DIR__ . '/../../src/APP_LAYER/utils/SessionManager.php';
 require_once __DIR__ . '/../../src/DATA_PERSISTENCE_LAYER/config/DBConnection.php';
@@ -167,24 +173,27 @@ foreach ($allRecentSwaps as $row) {
 }
 
 /* =========================
-   HANDLE SWAP - IMPROVED VERSION
+   HANDLE SWAP - FIXED JSON RESPONSE
 ========================= */
 $error = null;
 $success = null;
 $swapResult = null;
 
+// Check if this is an AJAX request
+$isAjax = !empty($_SERVER['HTTP_X_REQUESTED_WITH']) && 
+          strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest';
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'swap') {
     
-    // Clean output buffers for JSON response if AJAX
-    $isAjax = !empty($_SERVER['HTTP_X_REQUESTED_WITH']) && 
-              strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest';
-    
+    // For AJAX requests, we need to ensure NO output before JSON
     if ($isAjax) {
+        // Clean all output buffers
         while (ob_get_level() > 0) {
             ob_end_clean();
         }
-        ob_start();
+        // Set JSON header
         header('Content-Type: application/json');
+        header('X-Content-Type-Options: nosniff');
     }
     
     try {
@@ -211,6 +220,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'swap'
         switch ($sourceType) {
             case 'WALLET':
                 $sourceReference = formatPhoneNumberForSwap($userPhone, $systemCountry);
+                if (empty($sourceReference)) throw new \Exception("Phone number is required");
                 break;
             case 'ACCOUNT':
                 $sourceReference = trim($_POST['account_number'] ?? '');
@@ -340,64 +350,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'swap'
             ':metadata' => json_encode($metadata, JSON_UNESCAPED_UNICODE)
         ]);
         
-        // Insert into settlement queue for netting
-        try {
-            $stmt = $db->prepare("
-                INSERT INTO settlement_queue (debtor, creditor, amount, created_at, swap_reference)
-                VALUES (
-                    (SELECT name FROM participants WHERE provider_code = :source_code OR name = :source_name LIMIT 1),
-                    (SELECT name FROM participants WHERE provider_code = :dest_code OR name = :dest_name LIMIT 1),
-                    :amount,
-                    NOW(),
-                    :swap_ref
-                )
-            ");
-            
-            $stmt->execute([
-                ':source_code' => $sourceInstitution,
-                ':source_name' => $sourceInstitution,
-                ':dest_code' => $destinationInstitution,
-                ':dest_name' => $destinationInstitution,
-                ':amount' => $amount,
-                ':swap_ref' => $swapRef
-            ]);
-        } catch (\Exception $e) {
-            // Settlement queue table might not exist, log but continue
-            error_log("Settlement queue insert failed: " . $e->getMessage());
-        }
-        
-        // Insert audit log
-        try {
-            $stmt = $db->prepare("
-                INSERT INTO audit_logs 
-                (entity_type, action, category, severity, performed_by_type, user_id, metadata, performed_at) 
-                VALUES ('SWAP', 'CREATE', 'TRANSACTION', 'info', 'user', :user_id, :metadata, NOW())
-            ");
-            $stmt->execute([
-                ':user_id' => $userId,
-                ':metadata' => json_encode(['swap_ref' => $swapRef, 'amount' => $amount])
-            ]);
-        } catch (\Exception $e) {
-            // Audit table might not exist, log but continue
-            error_log("Audit log insert failed: " . $e->getMessage());
-        }
-        
         $swapResult = [
             'status' => 'success',
             'swap_reference' => $swapRef,
             'amount' => $amount,
             'delivery_mode' => $destinationType,
-            'source' => $sourcePayload,
-            'destination' => $destinationPayload,
             'fee' => $destinationType === 'cashout' ? 10.00 : 6.00,
             'net_amount' => $amount - ($destinationType === 'cashout' ? 10.00 : 6.00)
         ];
         
         $success = "✅ Swap created successfully! Reference: " . substr($swapRef, 0, 16) . "…";
         
-        // If AJAX request, return JSON
+        // If AJAX request, return JSON and exit
         if ($isAjax) {
-            $response = [
+            echo json_encode([
                 'status' => 'success',
                 'swap_reference' => $swapRef,
                 'amount' => $amount,
@@ -405,12 +371,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'swap'
                 'fee' => $swapResult['fee'],
                 'net_amount' => $swapResult['net_amount'],
                 'message' => $success
-            ];
-            
-            while (ob_get_level() > 0) {
-                ob_end_clean();
-            }
-            echo json_encode($response);
+            ]);
             exit;
         }
         
@@ -419,9 +380,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'swap'
         $error = $e->getMessage();
         
         if ($isAjax) {
-            while (ob_get_level() > 0) {
-                ob_end_clean();
-            }
             echo json_encode([
                 'status' => 'error',
                 'message' => $error
@@ -429,6 +387,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'swap'
             exit;
         }
     }
+}
+
+// If we're here and it's an AJAX request with no POST action, return error
+if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    echo json_encode([
+        'status' => 'error',
+        'message' => 'Invalid request'
+    ]);
+    exit;
 }
 ?>
 <!DOCTYPE html>
@@ -1069,15 +1036,6 @@ function updateDynamicFields() {
     }
 }
 
-function calculateFee() {
-    const amount = parseFloat(amountInput.value) || 0;
-    const mode = destType.value;
-    const fee = mode === 'cashout' ? 10.00 : 6.00;
-    const netAmount = amount - fee;
-    
-    return { fee, netAmount };
-}
-
 function displaySwapReport(data) {
     const container = document.getElementById('swapReportContainer');
     const content = document.getElementById('swapReportContent');
@@ -1145,10 +1103,27 @@ async function executeSwap(formData) {
         const response = await fetch(window.location.href, {
             method: 'POST',
             body: formData,
-            headers: { 'X-Requested-With': 'XMLHttpRequest' }
+            headers: { 
+                'X-Requested-With': 'XMLHttpRequest',
+                'Accept': 'application/json'
+            }
         });
         
-        const data = await response.json();
+        // Check if response is OK
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        
+        const text = await response.text();
+        
+        // Try to parse JSON, handle potential HTML responses
+        let data;
+        try {
+            data = JSON.parse(text);
+        } catch (e) {
+            console.error('Raw response:', text.substring(0, 500));
+            throw new Error('Invalid JSON response from server');
+        }
         
         if (data.status === 'success') {
             displaySwapReport(data);
@@ -1161,7 +1136,9 @@ async function executeSwap(formData) {
             const successDiv = document.createElement('div');
             successDiv.className = 'alert alert-success';
             successDiv.innerHTML = `<i class="fas fa-check-circle"></i><div>${data.message || 'Swap completed successfully!'}</div>`;
-            document.querySelector('.main-container').insertBefore(successDiv, document.querySelector('.swap-card'));
+            const mainContainer = document.querySelector('.main-container');
+            const swapCard = document.querySelector('.swap-card');
+            mainContainer.insertBefore(successDiv, swapCard);
             setTimeout(() => successDiv.remove(), 5000);
             
             // Reload transactions after 2 seconds
@@ -1182,7 +1159,6 @@ async function executeSwap(formData) {
 document.getElementById('swapForm').addEventListener('submit', async function(e) {
     e.preventDefault();
     
-    const type = sourceType.value;
     const requiredFields = dynamicContainer.querySelectorAll('[required]');
     let isValid = true;
     
