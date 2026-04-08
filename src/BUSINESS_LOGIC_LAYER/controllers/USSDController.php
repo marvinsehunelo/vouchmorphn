@@ -4,9 +4,9 @@ declare(strict_types=1);
 namespace BUSINESS_LOGIC_LAYER\controllers;
 
 use PDO;
+use Throwable;
 use Exception;
 use RuntimeException;
-use Throwable;
 use BUSINESS_LOGIC_LAYER\services\SwapService;
 use BUSINESS_LOGIC_LAYER\services\UserService;
 use DATA_PERSISTENCE_LAYER\config\DBConnection;
@@ -18,6 +18,7 @@ class USSDController
     private UserService $userService;
     private array $config;
     private array $participants = [];
+    private array $participantsByWalletType = [];
     private array $flows = [];
 
     private const USSD_LOG = '/tmp/vouchmorph_ussd.log';
@@ -36,7 +37,9 @@ class USSDController
         $this->config = $config;
 
         $instance = DBConnection::getInstance($config);
-        $this->db = method_exists($instance, 'getConnection') ? $instance->getConnection() : $instance;
+        $this->db = method_exists($instance, 'getConnection')
+            ? $instance->getConnection()
+            : $instance;
 
         $this->loadParticipants();
 
@@ -60,34 +63,70 @@ class USSDController
     private function loadParticipants(): void
     {
         $this->participants = [];
+        $this->participantsByWalletType = [];
 
-        foreach ($this->config['participants'] ?? [] as $name => $p) {
-            $walletType = strtolower((string)($p['wallet_type'] ?? ''));
-
-            $normalizedWalletType = match ($walletType) {
-                'ewallet', 'e-wallet' => 'e-wallet',
-                'wallet' => 'wallet',
-                'voucher' => 'voucher',
-                'card' => 'card',
-                'bank', 'account' => 'account',
-                'atm' => 'atm',
-                'agent' => 'agent',
-                default => null,
-            };
-
-            if ($normalizedWalletType === null) {
+        foreach ($this->config['participants'] ?? [] as $key => $participant) {
+            if (!isset($participant['type'])) {
                 continue;
             }
 
-            $this->participants[$name] = [
-                'code' => $name,
-                'name' => strtoupper($name),
-                'display_name' => $p['display_name'] ?? strtoupper($name),
-                'wallet_type' => $normalizedWalletType,
-                'type' => $p['type'] ?? 'bank',
-                'api_url' => $p['api_url'] ?? null,
+            $participantInfo = [
+                'participant_id'   => $key,
+                'participant_name' => $key,
+                'code'             => $key,
+                'name'             => strtoupper($key),
+                'display_name'     => $participant['display_name'] ?? strtoupper($key),
+                'type'             => $participant['type'] ?? 'UNKNOWN',
+                'category'         => $participant['category'] ?? 'UNKNOWN',
+                'provider_code'    => $participant['provider_code'] ?? '',
+                'status'           => $participant['status'] ?? 'ACTIVE',
+                'capabilities'     => $participant['capabilities'] ?? [],
+                'api_url'          => $participant['api_url'] ?? null,
             ];
+
+            $this->participants[] = $participantInfo;
+
+            $walletTypes = $participant['capabilities']['wallet_types'] ?? ['ACCOUNT'];
+
+            foreach ($walletTypes as $type) {
+                $typeLower = strtolower((string)$type);
+
+                $normalized = match ($typeLower) {
+                    'ewallet', 'e-wallet' => 'e-wallet',
+                    'wallet'              => 'wallet',
+                    'voucher'             => 'voucher',
+                    'card'                => 'card',
+                    'bank', 'account'     => 'account',
+                    'atm'                 => 'atm',
+                    'agent'               => 'agent',
+                    default               => $typeLower,
+                };
+
+                if (!isset($this->participantsByWalletType[$normalized])) {
+                    $this->participantsByWalletType[$normalized] = [];
+                }
+
+                $this->participantsByWalletType[$normalized][] = $participantInfo;
+            }
         }
+
+        if (isset($this->participantsByWalletType['e-wallet']) || isset($this->participantsByWalletType['ewallet'])) {
+            $this->participantsByWalletType['e-wallet'] = array_merge(
+                $this->participantsByWalletType['e-wallet'] ?? [],
+                $this->participantsByWalletType['ewallet'] ?? []
+            );
+        }
+
+        foreach (['account', 'wallet', 'e-wallet', 'card', 'atm', 'agent', 'voucher'] as $type) {
+            if (!isset($this->participantsByWalletType[$type])) {
+                $this->participantsByWalletType[$type] = [];
+            }
+        }
+
+        $this->logUSSD('PARTICIPANTS_LOADED', [
+            'participant_count' => count($this->participants),
+            'wallet_type_counts' => array_map('count', $this->participantsByWalletType),
+        ]);
     }
 
     public function handleUSSDRequest(array $request): string
@@ -627,11 +666,16 @@ class USSDController
         $matching = $this->getParticipantsByWalletType($walletType);
 
         if (empty($matching)) {
+            $this->logUSSD('NO_INSTITUTIONS_FOR_TYPE', [
+                'wallet_type' => $walletType,
+                'available_types' => array_keys($this->participantsByWalletType),
+            ]);
             return "END No institutions available for {$walletType}.";
         }
 
         $menu = "CON {$title}\n";
         $i = 1;
+
         foreach ($matching as $participant) {
             $menu .= $i . ". " . $participant['display_name'] . "\n";
             $i++;
@@ -648,6 +692,7 @@ class USSDController
 
         $menu = "CON {$title}\n";
         $i = 1;
+
         foreach (array_values($this->participants) as $participant) {
             $menu .= $i . ". " . $participant['display_name'] . "\n";
             $i++;
@@ -658,15 +703,7 @@ class USSDController
 
     private function getParticipantsByWalletType(string $walletType): array
     {
-        $matches = [];
-
-        foreach ($this->participants as $participant) {
-            if (($participant['wallet_type'] ?? '') === $walletType) {
-                $matches[] = $participant;
-            }
-        }
-
-        return array_values($matches);
+        return $this->participantsByWalletType[$walletType] ?? [];
     }
 
     private function resolveInstitutionFromChoice(string $walletType, string $choice): ?string
