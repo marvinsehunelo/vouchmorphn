@@ -108,35 +108,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             try {
                 $stmt = $db->prepare(
-    "SELECT user_id, phone, username, password_hash, verified, created_at
-     FROM users
-     WHERE phone = :phone
-     LIMIT 1"
-);
-$stmt->execute([':phone' => $formattedPhone]);
-$user = $stmt->fetch(\PDO::FETCH_ASSOC);
+                    "SELECT user_id, phone, username, password_hash, verified, created_at
+                     FROM users
+                     WHERE phone = :phone
+                     LIMIT 1"
+                );
+                $stmt->execute([':phone' => $formattedPhone]);
+                $user = $stmt->fetch(\PDO::FETCH_ASSOC);
 
-if (!$user || (int)$user['verified'] !== 1) {
-    $error = "Invalid login credentials.";
-} elseif (!password_verify($pin, $user['password_hash'])) {
-    $error = "Invalid PIN.";
-    error_log("PIN LOGIN FAILED: {$formattedPhone}");
-} else {
-    session_regenerate_id(true);
+                if (!$user || (int)$user['verified'] !== 1) {
+                    $error = "Invalid login credentials.";
+                } elseif (!password_verify($pin, $user['password_hash'])) {
+                    $error = "Invalid PIN.";
+                    error_log("PIN LOGIN FAILED: {$formattedPhone}");
+                } else {
+                    session_regenerate_id(true);
 
-    SessionManager::setUser([
-        'user_id'    => $user['user_id'],
-        'username'   => $user['username'] ?? '',
-        'phone'      => $user['phone'],
-        'role'       => 'USER',
-        'country'    => $systemCountry,
-        'created_at' => $user['created_at'] ?? null
-    ]);
+                    SessionManager::setUser([
+                        'user_id'    => $user['user_id'],
+                        'username'   => $user['username'] ?? '',
+                        'phone'      => $user['phone'],
+                        'role'       => 'USER',
+                        'country'    => $systemCountry,
+                        'created_at' => $user['created_at'] ?? null
+                    ]);
 
-    error_log("PIN LOGIN SUCCESS: {$formattedPhone}");
-    header('Location: user_dashboard.php');
-    exit();
-}
+                    error_log("PIN LOGIN SUCCESS: {$formattedPhone}");
+                    header('Location: user_dashboard.php');
+                    exit();
+                }
             } catch (\Throwable $e) {
                 error_log("USER LOGIN QUERY ERROR [{$systemCountry}]: " . $e->getMessage());
                 $error = "System error. Please try again.";
@@ -188,9 +188,10 @@ if (!$user || (int)$user['verified'] !== 1) {
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>VouchMorph | Platform Login</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>VouchMorph™ – Login</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,300;0,400;0,500;0,600;0,700;0,800;1,400&display=swap" rel="stylesheet">
+<link href="https://api.fontshare.com/v2/css?f[]=clash-display@400,500,600,700&f[]=general-sans@400,500,600&f[]=space-grotesk@400,500,600&display=swap" rel="stylesheet">
 <style>
     * {
         margin: 0;
@@ -199,76 +200,148 @@ if (!$user || (int)$user['verified'] !== 1) {
     }
 
     body {
+        background: #050505;
         font-family: 'Inter', sans-serif;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: #FFFFFF;
         min-height: 100vh;
         display: flex;
         align-items: center;
         justify-content: center;
-        padding: 20px;
+        padding: 1.5rem;
+        position: relative;
+        overflow-x: hidden;
     }
 
+    /* GRID BACKGROUND - SAME AS LANDING PAGE */
+    body::before {
+        content: '';
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background-image: 
+            linear-gradient(rgba(0, 240, 255, 0.03) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(0, 240, 255, 0.03) 1px, transparent 1px);
+        background-size: 50px 50px;
+        pointer-events: none;
+        z-index: 0;
+    }
+
+    /* CUSTOM CURSOR - SAME AS LANDING PAGE */
+    .cursor {
+        width: 8px;
+        height: 8px;
+        background: #00F0FF;
+        position: fixed;
+        pointer-events: none;
+        z-index: 9999;
+        mix-blend-mode: difference;
+        transition: transform 0.1s ease;
+    }
+
+    .cursor-follower {
+        width: 40px;
+        height: 40px;
+        border: 1px solid rgba(0, 240, 255, 0.5);
+        position: fixed;
+        pointer-events: none;
+        z-index: 9998;
+        transition: 0.15s ease;
+    }
+
+    @media (max-width: 768px) {
+        .cursor, .cursor-follower { display: none; }
+    }
+
+    /* LOGIN CARD - SHARP EDGES, 0 BORDER-RADIUS */
     .login-container {
-        background: white;
-        border-radius: 24px;
-        box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        position: relative;
+        z-index: 2;
         width: 100%;
-        max-width: 480px;
-        overflow: hidden;
+        max-width: 520px;
+        background: rgba(5, 5, 5, 0.95);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        backdrop-filter: blur(10px);
+        border-radius: 0px;
+        box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
     }
 
+    /* HEADER */
     .login-header {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        padding: 32px;
+        padding: 2rem 2rem 1.5rem;
         text-align: center;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
     }
 
     .login-header h1 {
-        font-size: 28px;
-        margin-bottom: 8px;
+        font-family: 'Clash Display', sans-serif;
+        font-size: 2rem;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+        background: linear-gradient(135deg, #FFFFFF 0%, #00F0FF 40%, #B000FF 100%);
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+        margin-bottom: 0.5rem;
     }
 
     .subtitle {
-        font-size: 14px;
-        opacity: 0.9;
-        margin-bottom: 16px;
+        font-size: 0.875rem;
+        color: #A0A0B0;
+        margin-bottom: 1rem;
     }
 
     .system-badge {
-        background: rgba(255,255,255,0.2);
-        border-radius: 20px;
-        padding: 6px 12px;
-        font-size: 12px;
         display: inline-block;
+        padding: 0.25rem 0.75rem;
+        background: rgba(0, 240, 255, 0.1);
+        border: 1px solid rgba(0, 240, 255, 0.3);
+        font-size: 0.7rem;
+        font-weight: 500;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        border-radius: 0px;
+        color: #00F0FF;
     }
 
+    /* TABS */
     .login-tabs {
         display: flex;
-        border-bottom: 2px solid #e5e7eb;
-        background: #f9fafb;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        background: rgba(10, 10, 20, 0.5);
     }
 
     .tab-btn {
         flex: 1;
-        padding: 16px;
+        padding: 1rem;
         background: none;
         border: none;
-        font-size: 16px;
-        font-weight: 500;
+        font-family: 'General Sans', sans-serif;
+        font-size: 0.875rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
         cursor: pointer;
-        transition: all 0.3s;
-        color: #6b7280;
+        transition: all 0.2s ease;
+        color: #A0A0B0;
+        border-bottom: 2px solid transparent;
     }
 
     .tab-btn.active {
-        color: #667eea;
-        border-bottom: 2px solid #667eea;
-        background: white;
+        color: #00F0FF;
+        border-bottom-color: #00F0FF;
+        background: rgba(0, 240, 255, 0.05);
     }
 
+    .tab-btn:hover:not(.active) {
+        color: #FFFFFF;
+        background: rgba(255, 255, 255, 0.03);
+    }
+
+    /* FORM */
     .login-form {
-        padding: 32px;
+        padding: 2rem;
     }
 
     .tab-pane {
@@ -277,135 +350,189 @@ if (!$user || (int)$user['verified'] !== 1) {
 
     .tab-pane.active {
         display: block;
+        animation: fadeInUp 0.4s ease;
     }
 
     .form-group {
-        margin-bottom: 24px;
+        margin-bottom: 1.5rem;
     }
 
     .form-group label {
         display: block;
-        margin-bottom: 8px;
-        font-weight: 500;
-        color: #374151;
+        margin-bottom: 0.5rem;
+        font-size: 0.75rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: #C0C0D0;
     }
 
     .phone-input-container {
         display: flex;
-        border: 2px solid #e5e7eb;
-        border-radius: 12px;
-        overflow: hidden;
-        transition: all 0.3s;
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        background: rgba(0, 0, 0, 0.5);
+        transition: all 0.2s ease;
+        border-radius: 0px;
     }
 
     .phone-input-container:focus-within {
-        border-color: #667eea;
-        box-shadow: 0 0 0 3px rgba(102,126,234,0.1);
+        border-color: #00F0FF;
+        box-shadow: 0 0 0 1px rgba(0, 240, 255, 0.2);
     }
 
     .phone-prefix {
-        background: #f3f4f6;
-        padding: 12px 16px;
+        padding: 0.875rem 1rem;
+        font-family: 'Space Grotesk', monospace;
         font-weight: 500;
-        color: #374151;
+        color: #00F0FF;
+        background: rgba(0, 240, 255, 0.05);
+        border-right: 1px solid rgba(255, 255, 255, 0.1);
+        letter-spacing: 0.5px;
     }
 
     .form-control {
         flex: 1;
         border: none;
-        padding: 12px 16px;
-        font-size: 16px;
+        padding: 0.875rem 1rem;
+        font-size: 1rem;
+        font-family: 'Inter', sans-serif;
+        background: transparent;
+        color: #FFFFFF;
         outline: none;
     }
 
+    .form-control::placeholder {
+        color: #505060;
+    }
+
     .pin-input {
-        font-size: 24px;
-        letter-spacing: 8px;
+        font-family: 'Space Grotesk', monospace;
+        font-size: 1.25rem;
+        letter-spacing: 0.5rem;
         text-align: center;
     }
 
+    /* BUTTON */
     .login-btn {
         width: 100%;
-        padding: 14px;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
+        padding: 1rem;
+        background: linear-gradient(135deg, #00F0FF 0%, #B000FF 100%);
+        color: #050505;
         border: none;
-        border-radius: 12px;
-        font-size: 16px;
-        font-weight: 600;
+        font-family: 'General Sans', sans-serif;
+        font-weight: 700;
+        font-size: 0.875rem;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
         cursor: pointer;
-        transition: transform 0.2s;
+        transition: all 0.2s ease;
+        margin-top: 0.5rem;
+        border-radius: 0px;
     }
 
     .login-btn:hover {
         transform: translateY(-2px);
+        box-shadow: 0 10px 30px -10px rgba(0, 240, 255, 0.4);
     }
 
+    /* ERROR MESSAGE */
     .error-message {
-        background: #fee2e2;
-        color: #dc2626;
-        padding: 12px;
-        border-radius: 12px;
-        margin-bottom: 24px;
-        font-size: 14px;
+        background: rgba(255, 48, 48, 0.1);
+        border-left: 3px solid #FF3030;
+        padding: 0.875rem;
+        margin-bottom: 1.5rem;
+        font-size: 0.8125rem;
+        color: #FF6060;
     }
 
+    /* SECURITY NOTICE */
     .security-notice {
-        margin-top: 24px;
-        padding-top: 24px;
-        border-top: 1px solid #e5e7eb;
-        font-size: 12px;
-        color: #6b7280;
+        margin-top: 1.5rem;
+        padding-top: 1rem;
+        border-top: 1px solid rgba(255, 255, 255, 0.05);
+        font-size: 0.7rem;
+        color: #606070;
         text-align: center;
     }
 
+    /* FOOTER */
     .login-footer {
-        background: #f9fafb;
-        padding: 16px 32px;
-        text-align: center;
+        padding: 1.25rem 2rem;
+        border-top: 1px solid rgba(255, 255, 255, 0.05);
+        background: rgba(10, 10, 20, 0.3);
     }
 
     .login-links {
         display: flex;
         justify-content: center;
-        gap: 24px;
+        gap: 2rem;
         flex-wrap: wrap;
     }
 
     .login-links a {
-        color: #6b7280;
+        color: #808090;
         text-decoration: none;
-        font-size: 14px;
+        font-size: 0.75rem;
+        font-weight: 500;
+        transition: color 0.2s;
     }
 
     .login-links a:hover {
-        color: #667eea;
+        color: #00F0FF;
     }
 
-    @media (max-width: 640px) {
-        .login-header h1 {
-            font-size: 24px;
+    /* ANIMATIONS */
+    @keyframes fadeInUp {
+        from {
+            opacity: 0;
+            transform: translateY(20px);
         }
+        to {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    }
 
+    /* RESPONSIVE */
+    @media (max-width: 640px) {
+        .login-container {
+            margin: 1rem;
+        }
+        .login-header {
+            padding: 1.5rem 1.5rem 1rem;
+        }
+        .login-header h1 {
+            font-size: 1.5rem;
+        }
         .login-form {
-            padding: 24px;
+            padding: 1.5rem;
+        }
+        .login-footer {
+            padding: 1rem 1.5rem;
+        }
+        .login-links {
+            gap: 1rem;
         }
     }
 </style>
 </head>
 <body>
+
+<div class="cursor"></div>
+<div class="cursor-follower"></div>
+
 <div class="login-container">
     <div class="login-header">
-        <h1>VouchMorph</h1>
+        <h1>VOUCHMORPH<sup style="font-size: 0.7rem;">™</sup></h1>
         <div class="subtitle">Interoperability Platform</div>
         <div class="system-badge">
-            <?= htmlspecialchars(strtoupper($countryName)) ?> • Secure Login
+            <?= htmlspecialchars(strtoupper($countryName)) ?> • SECURE LOGIN
         </div>
     </div>
 
     <div class="login-tabs">
-        <button type="button" class="tab-btn active" data-tab="phone">📱 Phone Login</button>
-        <button type="button" class="tab-btn" data-tab="pin">🔐 PIN Login</button>
+        <button type="button" class="tab-btn active" data-tab="phone">📱 PHONE LOGIN</button>
+        <button type="button" class="tab-btn" data-tab="pin">🔐 PIN LOGIN</button>
     </div>
 
     <div class="login-form">
@@ -417,7 +544,7 @@ if (!$user || (int)$user['verified'] !== 1) {
             <form method="POST" novalidate>
                 <input type="hidden" name="login_method" value="phone">
                 <div class="form-group">
-                    <label>Mobile Number</label>
+                    <label>MOBILE NUMBER</label>
                     <div class="phone-input-container">
                         <span class="phone-prefix"><?= htmlspecialchars($countryDialCode) ?></span>
                         <input
@@ -433,7 +560,7 @@ if (!$user || (int)$user['verified'] !== 1) {
                         >
                     </div>
                 </div>
-                <button type="submit" class="login-btn">Access Platform</button>
+                <button type="submit" class="login-btn">ACCESS PLATFORM →</button>
             </form>
         </div>
 
@@ -441,7 +568,7 @@ if (!$user || (int)$user['verified'] !== 1) {
             <form method="POST" novalidate>
                 <input type="hidden" name="login_method" value="pin">
                 <div class="form-group">
-                    <label>Mobile Number</label>
+                    <label>MOBILE NUMBER</label>
                     <div class="phone-input-container">
                         <span class="phone-prefix"><?= htmlspecialchars($countryDialCode) ?></span>
                         <input
@@ -458,7 +585,7 @@ if (!$user || (int)$user['verified'] !== 1) {
                     </div>
                 </div>
                 <div class="form-group">
-                    <label>PIN Code</label>
+                    <label>PIN CODE</label>
                     <input
                         type="password"
                         name="pin"
@@ -466,45 +593,56 @@ if (!$user || (int)$user['verified'] !== 1) {
                         required
                         maxlength="6"
                         placeholder="••••••"
-                        style="letter-spacing: 8px;"
                         inputmode="numeric"
                         autocomplete="current-password"
                     >
                 </div>
-                <button type="submit" class="login-btn">Login with PIN</button>
+                <button type="submit" class="login-btn">LOGIN WITH PIN →</button>
             </form>
             <div class="security-notice">
-                <strong>💡 Forgot PIN?</strong> Use phone login to recover.
+                <strong>🔐 Forgot PIN?</strong> Use phone login to recover your account.
             </div>
         </div>
     </div>
 
     <div class="login-footer">
         <div class="login-links">
-            <a href="register.php">Register</a>
-            <a href="forgot.php">Recover Account</a>
-            <a href="support.php">Support</a>
+            <a href="register.php">REGISTER</a>
+            <a href="forgot.php">RECOVER ACCOUNT</a>
+            <a href="support.php">SUPPORT</a>
         </div>
     </div>
 </div>
 
 <script>
-document.querySelectorAll('.tab-btn').forEach(button => {
-    button.addEventListener('click', function () {
-        const tab = this.dataset.tab;
-
-        document.querySelectorAll('.tab-pane').forEach(pane => {
-            pane.classList.remove('active');
-        });
-
-        document.querySelectorAll('.tab-btn').forEach(btn => {
-            btn.classList.remove('active');
-        });
-
-        document.getElementById(tab + '-tab').classList.add('active');
-        this.classList.add('active');
+    // Custom cursor
+    const cursor = document.querySelector('.cursor');
+    const follower = document.querySelector('.cursor-follower');
+    
+    document.addEventListener('mousemove', (e) => {
+        cursor.style.left = e.clientX + 'px';
+        cursor.style.top = e.clientY + 'px';
+        follower.style.left = e.clientX - 16 + 'px';
+        follower.style.top = e.clientY - 16 + 'px';
     });
-});
+    
+    // Tab switching
+    document.querySelectorAll('.tab-btn').forEach(button => {
+        button.addEventListener('click', function () {
+            const tab = this.dataset.tab;
+
+            document.querySelectorAll('.tab-pane').forEach(pane => {
+                pane.classList.remove('active');
+            });
+
+            document.querySelectorAll('.tab-btn').forEach(btn => {
+                btn.classList.remove('active');
+            });
+
+            document.getElementById(tab + '-tab').classList.add('active');
+            this.classList.add('active');
+        });
+    });
 </script>
 </body>
 </html>
