@@ -39,87 +39,40 @@ try {
    PHONE NUMBER FORMATTING FUNCTION
 ========================= */
 function formatPhoneNumberForSwap($phoneNumber, $countryCode = 'BW') {
-    // Remove any non-numeric characters
     $cleanNumber = preg_replace('/[^0-9]/', '', $phoneNumber);
-    
-    // Country code mappings
-    $countryCodes = [
-        'BW' => '267',  // Botswana
-        'KE' => '254',  // Kenya
-        'NG' => '234',  // Nigeria
-    ];
-    
+    $countryCodes = ['BW' => '267', 'KE' => '254', 'NG' => '234'];
     $code = $countryCodes[$countryCode] ?? '267';
-    
-    // If number is empty
-    if (empty($cleanNumber)) {
-        return '';
-    }
-    
-    // If number already starts with country code
-    if (substr($cleanNumber, 0, strlen($code)) === $code) {
-        return '+' . $cleanNumber;
-    }
-    
-    // If number starts with 0 (local format), remove the 0
-    if (substr($cleanNumber, 0, 1) === '0') {
-        $cleanNumber = substr($cleanNumber, 1);
-    }
-    
-    // Add country code and plus sign
+    if (empty($cleanNumber)) return '';
+    if (substr($cleanNumber, 0, strlen($code)) === $code) return '+' . $cleanNumber;
+    if (substr($cleanNumber, 0, 1) === '0') $cleanNumber = substr($cleanNumber, 1);
     return '+' . $code . $cleanNumber;
 }
 
-/* =========================
-   HELPERS
-========================= */
-function safeJsonDecode($value): array
-{
-    if (is_array($value)) {
-        return $value;
-    }
-
-    if ($value === null || $value === '') {
-        return [];
-    }
-
+function safeJsonDecode($value): array {
+    if (is_array($value)) return $value;
+    if ($value === null || $value === '') return [];
     $decoded = json_decode($value, true);
     return is_array($decoded) ? $decoded : [];
 }
 
-function participantIcon(array $participant): string
-{
+function participantIcon(array $participant): string {
     $type = strtoupper((string)($participant['type'] ?? ''));
     $category = strtoupper((string)($participant['category'] ?? ''));
-
-    if ($type === 'MNO') {
-        return '📱';
-    }
-
-    if ($category === 'CARD') {
-        return '💳';
-    }
-
+    if ($type === 'MNO') return '📱';
+    if ($category === 'CARD') return '💳';
     return '🏦';
 }
 
-function maskValue(string $value, int $visible = 4): string
-{
+function maskValue(string $value, int $visible = 4): string {
     $value = trim($value);
-    if ($value === '') {
-        return '';
-    }
-
+    if ($value === '') return '';
     $len = strlen($value);
-    if ($len <= $visible) {
-        return str_repeat('*', $len);
-    }
-
+    if ($len <= $visible) return str_repeat('*', $len);
     return str_repeat('*', $len - $visible) . substr($value, -$visible);
 }
 
 /* =========================
-   LOAD DATA (PERFECT PATTERN FROM ORIGINAL)
+   LOAD DATA
 ========================= */
 $stmt = $db->prepare("
     SELECT participant_id, name, type, category, provider_code, auth_type, base_url, resource_endpoints
@@ -166,32 +119,23 @@ foreach ($allRecentSwaps as $row) {
         $row['destination_institution'] = $destinationDetails['institution'] ?? '';
         $recentTransactions[] = $row;
     }
-
-    if (count($recentTransactions) >= 10) {
-        break;
-    }
+    if (count($recentTransactions) >= 10) break;
 }
 
 /* =========================
-   HANDLE SWAP - FIXED JSON RESPONSE
+   HANDLE SWAP
 ========================= */
 $error = null;
 $success = null;
 $swapResult = null;
 
-// Check if this is an AJAX request
 $isAjax = !empty($_SERVER['HTTP_X_REQUESTED_WITH']) && 
           strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'swap') {
     
-    // For AJAX requests, we need to ensure NO output before JSON
     if ($isAjax) {
-        // Clean all output buffers
-        while (ob_get_level() > 0) {
-            ob_end_clean();
-        }
-        // Set JSON header
+        while (ob_get_level() > 0) ob_end_clean();
         header('Content-Type: application/json');
         header('X-Content-Type-Options: nosniff');
     }
@@ -204,19 +148,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'swap'
         $destinationType = strtolower(trim($_POST['destination_type'] ?? ''));
         $destinationValue = trim($_POST['destination_value'] ?? '');
         
-        // Format destination phone number if it looks like a phone
         if (preg_match('/^[0-9+\-\(\)\s]+$/', $destinationValue) && strlen(preg_replace('/[^0-9]/', '', $destinationValue)) >= 8) {
             $destinationValue = formatPhoneNumberForSwap($destinationValue, $systemCountry);
         }
         
-        // Validate required fields
         if ($sourceInstitution === '' || $destinationInstitution === '' || $amount <= 0 || $destinationValue === '') {
             throw new \Exception("Please complete all required fields.");
         }
         
-        // Get source reference based on source type
         $sourceReference = null;
-        
         switch ($sourceType) {
             case 'WALLET':
                 $sourceReference = formatPhoneNumberForSwap($userPhone, $systemCountry);
@@ -238,163 +178,56 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'swap'
                 throw new \Exception("Invalid source type");
         }
         
-        // Build source payload
-        $sourcePayload = [
-            'institution' => $sourceInstitution,
-            'asset_type' => $sourceType,
-            'amount' => $amount,
-            'reference' => $sourceReference
-        ];
-        
-        // Add source-specific fields
+        $sourcePayload = ['institution' => $sourceInstitution, 'asset_type' => $sourceType, 'amount' => $amount, 'reference' => $sourceReference];
         switch ($sourceType) {
-            case 'WALLET':
-                $sourcePayload['wallet_phone'] = $sourceReference;
-                $sourcePayload['phone'] = $sourceReference;
-                break;
-            case 'ACCOUNT':
-                $sourcePayload['account_number'] = $sourceReference;
-                $sourcePayload['account_phone'] = trim($_POST['account_phone'] ?? '');
-                if (!empty($_POST['account_pin'])) {
-                    $sourcePayload['account_pin'] = $_POST['account_pin'];
-                }
-                break;
-            case 'CARD':
-                $sourcePayload['card_number'] = $sourceReference;
-                $sourcePayload['card_phone'] = trim($_POST['card_phone'] ?? '');
-                if (!empty($_POST['card_pin'])) {
-                    $sourcePayload['card_pin'] = $_POST['card_pin'];
-                }
-                break;
-            case 'VOUCHER':
-                $sourcePayload['voucher_number'] = $sourceReference;
-                $sourcePayload['claimant_phone'] = trim($_POST['voucher_phone'] ?? $userPhone);
-                if (!empty($_POST['voucher_pin'])) {
-                    $sourcePayload['voucher_pin'] = $_POST['voucher_pin'];
-                }
-                break;
+            case 'WALLET': $sourcePayload['wallet_phone'] = $sourceReference; $sourcePayload['phone'] = $sourceReference; break;
+            case 'ACCOUNT': $sourcePayload['account_number'] = $sourceReference; $sourcePayload['account_phone'] = trim($_POST['account_phone'] ?? ''); if (!empty($_POST['account_pin'])) $sourcePayload['account_pin'] = $_POST['account_pin']; break;
+            case 'CARD': $sourcePayload['card_number'] = $sourceReference; $sourcePayload['card_phone'] = trim($_POST['card_phone'] ?? ''); if (!empty($_POST['card_pin'])) $sourcePayload['card_pin'] = $_POST['card_pin']; break;
+            case 'VOUCHER': $sourcePayload['voucher_number'] = $sourceReference; $sourcePayload['claimant_phone'] = trim($_POST['voucher_phone'] ?? $userPhone); if (!empty($_POST['voucher_pin'])) $sourcePayload['voucher_pin'] = $_POST['voucher_pin']; break;
         }
         
-        // Build destination payload
-        $destinationPayload = [
-            'institution' => $destinationInstitution,
-            'delivery_mode' => $destinationType,
-            'amount' => $amount
-        ];
-        
+        $destinationPayload = ['institution' => $destinationInstitution, 'delivery_mode' => $destinationType, 'amount' => $amount];
         switch ($destinationType) {
-            case 'cashout':
-                $destinationPayload['beneficiary_phone'] = $destinationValue;
-                $destinationPayload['beneficiary'] = $destinationValue;
-                break;
-            case 'wallet':
-                $destinationPayload['beneficiary_wallet'] = $destinationValue;
-                break;
-            case 'bank':
-                $destinationPayload['beneficiary_account'] = $destinationValue;
-                break;
-            case 'card':
-                $destinationPayload['card_suffix'] = $destinationValue;
-                break;
-            default:
-                $destinationPayload['beneficiary_phone'] = $destinationValue;
+            case 'cashout': $destinationPayload['beneficiary_phone'] = $destinationValue; $destinationPayload['beneficiary'] = $destinationValue; break;
+            case 'wallet': $destinationPayload['beneficiary_wallet'] = $destinationValue; break;
+            case 'bank': $destinationPayload['beneficiary_account'] = $destinationValue; break;
+            case 'card': $destinationPayload['card_suffix'] = $destinationValue; break;
+            default: $destinationPayload['beneficiary_phone'] = $destinationValue;
         }
         
-        // Create swap reference
         $swapRef = 'SWP-' . strtoupper(bin2hex(random_bytes(6)));
+        $metadata = ['user_id' => $userId, 'user_phone' => $userPhone, 'channel' => 'user_dashboard', 'system_country' => $systemCountry, 'ui_source_type' => $sourceType, 'ui_destination_type' => $destinationType, 'masked_source_reference' => maskValue($sourceReference), 'masked_destination_value' => maskValue($destinationValue)];
         
-        $metadata = [
-            'user_id' => $userId,
-            'user_phone' => $userPhone,
-            'channel' => 'user_dashboard',
-            'system_country' => $systemCountry,
-            'ui_source_type' => $sourceType,
-            'ui_destination_type' => $destinationType,
-            'masked_source_reference' => maskValue($sourceReference),
-            'masked_destination_value' => maskValue($destinationValue)
-        ];
-        
-        // Insert swap request into database
         $stmt = $db->prepare("
-            INSERT INTO swap_requests (
-                swap_uuid,
-                from_currency,
-                to_currency,
-                amount,
-                source_details,
-                destination_details,
-                status,
-                created_at,
-                metadata
-            ) VALUES (
-                :swap_uuid,
-                :from_currency,
-                :to_currency,
-                :amount,
-                :source_details,
-                :destination_details,
-                :status,
-                NOW(),
-                :metadata
-            )
+            INSERT INTO swap_requests (swap_uuid, from_currency, to_currency, amount, source_details, destination_details, status, created_at, metadata)
+            VALUES (:swap_uuid, :from_currency, :to_currency, :amount, :source_details, :destination_details, :status, NOW(), :metadata)
         ");
-        
         $stmt->execute([
-            ':swap_uuid' => $swapRef,
-            ':from_currency' => 'BWP',
-            ':to_currency' => 'BWP',
-            ':amount' => $amount,
-            ':source_details' => json_encode($sourcePayload, JSON_UNESCAPED_UNICODE),
+            ':swap_uuid' => $swapRef, ':from_currency' => 'BWP', ':to_currency' => 'BWP',
+            ':amount' => $amount, ':source_details' => json_encode($sourcePayload, JSON_UNESCAPED_UNICODE),
             ':destination_details' => json_encode($destinationPayload, JSON_UNESCAPED_UNICODE),
-            ':status' => 'pending',
-            ':metadata' => json_encode($metadata, JSON_UNESCAPED_UNICODE)
+            ':status' => 'pending', ':metadata' => json_encode($metadata, JSON_UNESCAPED_UNICODE)
         ]);
         
-        $swapResult = [
-            'status' => 'success',
-            'swap_reference' => $swapRef,
-            'amount' => $amount,
-            'delivery_mode' => $destinationType,
-            'fee' => $destinationType === 'cashout' ? 10.00 : 6.00,
-            'net_amount' => $amount - ($destinationType === 'cashout' ? 10.00 : 6.00)
-        ];
-        
+        $swapResult = ['status' => 'success', 'swap_reference' => $swapRef, 'amount' => $amount, 'delivery_mode' => $destinationType, 'fee' => $destinationType === 'cashout' ? 10.00 : 6.00, 'net_amount' => $amount - ($destinationType === 'cashout' ? 10.00 : 6.00)];
         $success = "✅ Swap created successfully! Reference: " . substr($swapRef, 0, 16) . "…";
         
-        // If AJAX request, return JSON and exit
         if ($isAjax) {
-            echo json_encode([
-                'status' => 'success',
-                'swap_reference' => $swapRef,
-                'amount' => $amount,
-                'delivery_mode' => $destinationType,
-                'fee' => $swapResult['fee'],
-                'net_amount' => $swapResult['net_amount'],
-                'message' => $success
-            ]);
+            echo json_encode(['status' => 'success', 'swap_reference' => $swapRef, 'amount' => $amount, 'delivery_mode' => $destinationType, 'fee' => $swapResult['fee'], 'net_amount' => $swapResult['net_amount'], 'message' => $success]);
             exit;
         }
-        
     } catch (\Exception $e) {
         error_log("USER DASHBOARD SWAP ERROR: " . $e->getMessage());
         $error = $e->getMessage();
-        
         if ($isAjax) {
-            echo json_encode([
-                'status' => 'error',
-                'message' => $error
-            ]);
+            echo json_encode(['status' => 'error', 'message' => $error]);
             exit;
         }
     }
 }
 
-// If we're here and it's an AJAX request with no POST action, return error
 if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
-    echo json_encode([
-        'status' => 'error',
-        'message' => 'Invalid request'
-    ]);
+    echo json_encode(['status' => 'error', 'message' => 'Invalid request']);
     exit;
 }
 ?>
@@ -402,9 +235,10 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
-<title>VouchMorph | Secure Swap Portal</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>VouchMorph™ – Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,300;0,400;0,500;0,600;0,700;0,800;1,400&display=swap" rel="stylesheet">
+<link href="https://api.fontshare.com/v2/css?f[]=clash-display@400,500,600,700&f[]=general-sans@400,500,600&f[]=space-grotesk@400,500,600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 <style>
     * {
@@ -412,354 +246,396 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
         padding: 0;
         box-sizing: border-box;
     }
+
     body {
+        background: #050505;
         font-family: 'Inter', sans-serif;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: #FFFFFF;
         min-height: 100vh;
-        padding: 20px;
-    }
-    .main-container {
-        max-width: 760px;
-        margin: 0 auto;
-    }
-    .header-card {
-        background: white;
-        border-radius: 28px;
-        padding: 24px 28px;
-        margin-bottom: 20px;
-        box-shadow: 0 10px 30px rgba(0,0,0,0.15);
+        padding: 1.5rem;
         position: relative;
-        overflow: hidden;
+        overflow-x: hidden;
     }
-    .header-card::before {
+
+    /* GRID BACKGROUND */
+    body::before {
         content: '';
-        position: absolute;
+        position: fixed;
         top: 0;
         left: 0;
         right: 0;
-        height: 4px;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        bottom: 0;
+        background-image: 
+            linear-gradient(rgba(0, 240, 255, 0.03) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(0, 240, 255, 0.03) 1px, transparent 1px);
+        background-size: 50px 50px;
+        pointer-events: none;
+        z-index: 0;
     }
+
+    /* CUSTOM CURSOR */
+    .cursor {
+        width: 8px;
+        height: 8px;
+        background: #00F0FF;
+        position: fixed;
+        pointer-events: none;
+        z-index: 9999;
+        mix-blend-mode: difference;
+        transition: transform 0.1s ease;
+    }
+
+    .cursor-follower {
+        width: 40px;
+        height: 40px;
+        border: 1px solid rgba(0, 240, 255, 0.5);
+        position: fixed;
+        pointer-events: none;
+        z-index: 9998;
+        transition: 0.15s ease;
+    }
+
+    @media (max-width: 768px) {
+        .cursor, .cursor-follower { display: none; }
+    }
+
+    .main-container {
+        max-width: 760px;
+        margin: 0 auto;
+        position: relative;
+        z-index: 2;
+    }
+
+    /* CARDS - SHARP EDGES */
+    .header-card, .swap-card, .transactions-card, .report-container {
+        background: rgba(5, 5, 5, 0.95);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        backdrop-filter: blur(10px);
+        border-radius: 0px;
+        margin-bottom: 1.5rem;
+        overflow: hidden;
+    }
+
+    .header-card {
+        padding: 1.5rem;
+    }
+
+    .swap-card, .transactions-card, .report-container {
+        padding: 1.75rem;
+    }
+
     .user-info {
         display: flex;
         justify-content: space-between;
         align-items: center;
         flex-wrap: wrap;
-        gap: 16px;
+        gap: 1rem;
     }
+
     .user-details {
         display: flex;
         align-items: center;
-        gap: 16px;
+        gap: 1rem;
     }
+
     .user-avatar {
         width: 56px;
         height: 56px;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        border-radius: 28px;
+        background: linear-gradient(135deg, #00F0FF 0%, #B000FF 100%);
         display: flex;
         align-items: center;
         justify-content: center;
-        color: white;
-        font-size: 24px;
-        font-weight: 600;
+        border-radius: 0px;
     }
+
+    .user-avatar i {
+        font-size: 1.75rem;
+        color: #050505;
+    }
+
     .user-text h2 {
-        font-size: 20px;
-        font-weight: 700;
-        color: #1f2937;
-        margin-bottom: 4px;
+        font-family: 'Clash Display', sans-serif;
+        font-size: 1.25rem;
+        font-weight: 600;
+        margin-bottom: 0.25rem;
     }
+
     .user-text p {
-        font-size: 13px;
-        color: #6b7280;
+        font-size: 0.75rem;
+        color: #A0A0B0;
     }
-    .system-badge {
-        background: #f3f4f6;
-        padding: 8px 16px;
-        border-radius: 40px;
-        font-size: 12px;
+
+    .phone-highlight {
+        font-family: 'Space Grotesk', monospace;
+        font-size: 0.875rem;
+        font-weight: 600;
+        color: #00F0FF;
+        background: rgba(0, 240, 255, 0.1);
+        padding: 0.25rem 0.75rem;
+        border: 1px solid rgba(0, 240, 255, 0.3);
+        display: inline-block;
+    }
+
+    .system-badge, .logout-btn {
+        padding: 0.5rem 1rem;
+        font-size: 0.75rem;
         font-weight: 500;
-        color: #4b5563;
-    }
-    .logout-btn {
-        background: #f3f4f6;
-        padding: 8px 16px;
-        border-radius: 40px;
         text-decoration: none;
-        color: #6b7280;
-        font-size: 13px;
-        font-weight: 500;
-        transition: all 0.3s;
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        color: #E0E0E0;
+        transition: all 0.2s;
+        border-radius: 0px;
     }
+
     .logout-btn:hover {
-        background: #e5e7eb;
-        color: #374151;
+        border-color: #00F0FF;
+        color: #00F0FF;
+        background: rgba(0, 240, 255, 0.05);
     }
+
+    /* ALERTS */
     .alert {
-        background: white;
-        border-radius: 20px;
-        padding: 16px 20px;
-        margin-bottom: 20px;
+        padding: 1rem;
+        margin-bottom: 1.5rem;
         display: flex;
         align-items: center;
-        gap: 12px;
-        box-shadow: 0 5px 15px rgba(0,0,0,0.08);
+        gap: 0.75rem;
+        border-left: 3px solid;
+        background: rgba(5, 5, 5, 0.95);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-left-width: 3px;
+        border-radius: 0px;
     }
-    .alert-error {
-        border-left: 4px solid #ef4444;
-    }
-    .alert-error i {
-        color: #ef4444;
-    }
-    .alert-success {
-        border-left: 4px solid #10b981;
-    }
-    .alert-success i {
-        color: #10b981;
-    }
-    .swap-card {
-        background: white;
-        border-radius: 28px;
-        padding: 28px;
-        margin-bottom: 20px;
-        box-shadow: 0 10px 30px rgba(0,0,0,0.15);
-    }
+
+    .alert-error { border-left-color: #FF3030; }
+    .alert-error i { color: #FF3030; }
+    .alert-success { border-left-color: #00F0FF; }
+    .alert-success i { color: #00F0FF; }
+
+    /* CARD TITLES */
     .card-title {
         display: flex;
         align-items: center;
-        gap: 12px;
-        margin-bottom: 24px;
-        padding-bottom: 16px;
-        border-bottom: 2px solid #f3f4f6;
+        gap: 0.75rem;
+        margin-bottom: 1.5rem;
+        padding-bottom: 1rem;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
     }
+
     .card-title i {
-        font-size: 24px;
-        color: #667eea;
+        font-size: 1.25rem;
+        color: #00F0FF;
     }
+
     .card-title h3 {
-        font-size: 20px;
-        font-weight: 700;
-        color: #1f2937;
+        font-family: 'Clash Display', sans-serif;
+        font-size: 1.25rem;
+        font-weight: 600;
     }
+
+    /* FORMS */
     .form-group {
-        margin-bottom: 20px;
+        margin-bottom: 1.25rem;
     }
+
     .form-group label {
         display: block;
+        font-size: 0.7rem;
         font-weight: 600;
-        font-size: 13px;
-        margin-bottom: 8px;
-        color: #374151;
         text-transform: uppercase;
-        letter-spacing: 0.5px;
+        letter-spacing: 0.05em;
+        margin-bottom: 0.5rem;
+        color: #C0C0D0;
     }
+
     .form-control, .form-select {
         width: 100%;
-        padding: 14px 16px;
-        border: 2px solid #e5e7eb;
-        border-radius: 16px;
-        font-size: 15px;
+        padding: 0.875rem 1rem;
+        background: rgba(0, 0, 0, 0.5);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        color: #FFFFFF;
         font-family: 'Inter', sans-serif;
-        transition: all 0.3s;
-        background: white;
+        font-size: 0.875rem;
+        transition: all 0.2s;
+        border-radius: 0px;
     }
+
     .form-control:focus, .form-select:focus {
         outline: none;
-        border-color: #667eea;
-        box-shadow: 0 0 0 3px rgba(102,126,234,0.1);
+        border-color: #00F0FF;
+        box-shadow: 0 0 0 1px rgba(0, 240, 255, 0.2);
     }
+
     .form-row {
         display: grid;
         grid-template-columns: 1fr 1fr;
-        gap: 16px;
+        gap: 1rem;
     }
+
+    /* DYNAMIC FIELDS */
+    .dynamic-fields {
+        background: rgba(0, 240, 255, 0.03);
+        border: 1px solid rgba(0, 240, 255, 0.1);
+        padding: 1.25rem;
+        margin: 1rem 0;
+        border-radius: 0px;
+    }
+
+    /* BUTTONS */
     .swap-btn {
         width: 100%;
-        padding: 16px;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
+        padding: 1rem;
+        background: linear-gradient(135deg, #00F0FF 0%, #B000FF 100%);
+        color: #050505;
         border: none;
-        border-radius: 20px;
-        font-size: 16px;
-        font-weight: 600;
+        font-family: 'General Sans', sans-serif;
+        font-weight: 700;
+        font-size: 0.875rem;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
         cursor: pointer;
-        transition: all 0.3s;
-        margin-top: 8px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        gap: 10px;
+        transition: all 0.2s ease;
+        margin-top: 0.5rem;
+        border-radius: 0px;
     }
-    .swap-btn:hover {
+
+    .swap-btn:hover:not(:disabled) {
         transform: translateY(-2px);
-        box-shadow: 0 8px 25px rgba(102,126,234,0.4);
+        box-shadow: 0 10px 30px -10px rgba(0, 240, 255, 0.4);
     }
+
     .swap-btn:disabled {
         opacity: 0.6;
         cursor: not-allowed;
-        transform: none;
     }
-    .dynamic-fields {
-        margin-top: 16px;
-        margin-bottom: 16px;
-        padding: 16px;
-        background: #f9fafb;
-        border-radius: 20px;
-        border: 1px solid #e5e7eb;
-    }
+
+    /* INFO BOX */
     .info-box {
-        background: #fef3c7;
-        border-radius: 16px;
-        padding: 14px 16px;
-        margin-top: 20px;
+        background: rgba(0, 240, 255, 0.05);
+        border-left: 3px solid #00F0FF;
+        padding: 1rem;
+        margin-top: 1.25rem;
         display: flex;
         align-items: center;
-        gap: 12px;
-        font-size: 13px;
-        color: #92400e;
+        gap: 0.75rem;
+        font-size: 0.75rem;
+        color: #A0A0B0;
     }
+
     .info-box i {
-        font-size: 18px;
+        color: #00F0FF;
+        font-size: 1rem;
     }
-    .transactions-card {
-        background: white;
-        border-radius: 28px;
-        padding: 28px;
-        box-shadow: 0 10px 30px rgba(0,0,0,0.15);
-    }
+
+    /* TRANSACTIONS */
     .transaction-item {
-        padding: 14px 0;
-        border-bottom: 1px solid #f3f4f6;
+        padding: 1rem 0;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
         display: flex;
         justify-content: space-between;
         align-items: center;
-        transition: all 0.3s;
+        transition: all 0.2s;
     }
-    .transaction-item:last-child {
-        border-bottom: none;
-    }
-    .transaction-item:hover {
-        transform: translateX(4px);
-    }
-    .transaction-left {
-        flex: 1;
-    }
+
+    .transaction-item:last-child { border-bottom: none; }
+    .transaction-item:hover { transform: translateX(4px); }
+
     .transaction-date {
-        font-size: 11px;
-        color: #9ca3af;
-        margin-bottom: 4px;
+        font-size: 0.7rem;
+        color: #606070;
+        margin-bottom: 0.25rem;
     }
+
     .transaction-details {
-        font-size: 13px;
-        color: #4b5563;
+        font-size: 0.75rem;
+        color: #C0C0D0;
     }
-    .transaction-right {
-        text-align: right;
-    }
+
     .transaction-amount {
         font-weight: 700;
-        font-size: 16px;
-        color: #1f2937;
+        font-size: 1rem;
+        color: #00F0FF;
     }
+
     .transaction-status {
-        font-size: 10px;
-        padding: 3px 8px;
-        border-radius: 20px;
+        font-size: 0.65rem;
+        padding: 0.2rem 0.5rem;
         font-weight: 600;
         display: inline-block;
-        margin-top: 4px;
+        margin-top: 0.25rem;
+        border-radius: 0px;
     }
-    .status-pending {
-        background: #fef3c7;
-        color: #92400e;
-    }
-    .status-pending_auth {
-        background: #fef3c7;
-        color: #92400e;
+
+    .status-pending, .status-pending_auth {
+        background: rgba(255, 193, 7, 0.15);
+        color: #FFC107;
+        border: 1px solid rgba(255, 193, 7, 0.3);
     }
     .status-completed {
-        background: #d1fae5;
-        color: #065f46;
+        background: rgba(0, 240, 255, 0.15);
+        color: #00F0FF;
+        border: 1px solid rgba(0, 240, 255, 0.3);
     }
     .status-failed {
-        background: #fee2e2;
-        color: #991b1b;
+        background: rgba(255, 48, 48, 0.15);
+        color: #FF6060;
+        border: 1px solid rgba(255, 48, 48, 0.3);
     }
-    .status-unknown {
-        background: #e5e7eb;
-        color: #374151;
-    }
+
     .empty-state {
         text-align: center;
-        padding: 40px 20px;
-        color: #9ca3af;
+        padding: 2rem;
+        color: #606070;
     }
+
     .empty-state i {
-        font-size: 48px;
-        margin-bottom: 12px;
+        font-size: 2rem;
+        margin-bottom: 0.75rem;
         opacity: 0.5;
     }
-    .phone-highlight {
-        font-family: monospace;
-        font-size: 16px;
-        font-weight: 600;
-        color: #667eea;
-        background: #eef2ff;
-        padding: 4px 12px;
-        border-radius: 20px;
-        display: inline-block;
-    }
+
+    /* REPORT */
     .report-container {
-        margin-top: 20px;
-        background: white;
-        border-radius: 28px;
-        padding: 28px;
-        box-shadow: 0 10px 30px rgba(0,0,0,0.15);
         display: none;
     }
-    .report-container.visible {
-        display: block;
-    }
+    .report-container.visible { display: block; }
+
     .fee-breakdown {
-        background: #f0fdf4;
-        border-radius: 16px;
-        padding: 16px;
-        margin-top: 16px;
-        border: 1px solid #bbf7d0;
+        background: rgba(0, 240, 255, 0.05);
+        padding: 1rem;
+        margin-top: 1rem;
+        border: 1px solid rgba(0, 240, 255, 0.1);
+        border-radius: 0px;
     }
     .fee-row {
         display: flex;
         justify-content: space-between;
-        padding: 8px 0;
-        border-bottom: 1px solid #dcfce7;
+        padding: 0.5rem 0;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        font-size: 0.8125rem;
     }
     .fee-row.total {
         border-bottom: none;
-        margin-top: 8px;
-        padding-top: 12px;
-        border-top: 2px solid #86efac;
+        margin-top: 0.5rem;
+        padding-top: 0.75rem;
+        border-top: 2px solid rgba(0, 240, 255, 0.2);
         font-weight: 700;
-        color: #166534;
+        color: #00F0FF;
     }
+
     @media (max-width: 640px) {
-        body {
-            padding: 12px;
-        }
-        .form-row {
-            grid-template-columns: 1fr;
-        }
-        .user-info {
-            flex-direction: column;
-            align-items: flex-start;
-        }
-        .swap-card, .transactions-card, .header-card {
-            padding: 20px;
-        }
+        body { padding: 1rem; }
+        .form-row { grid-template-columns: 1fr; }
+        .user-info { flex-direction: column; align-items: flex-start; }
+        .swap-card, .transactions-card { padding: 1.25rem; }
     }
 </style>
 </head>
 <body>
+
+<div class="cursor"></div>
+<div class="cursor-follower"></div>
 
 <div class="main-container">
 
@@ -773,16 +649,16 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
                     <h2>Welcome Back</h2>
                     <p>
                         <span class="phone-highlight"><?= htmlspecialchars($userPhone) ?></span>
-                        <span style="margin-left: 8px;">• Your VouchMorph ID</span>
+                        <span style="margin-left: 0.5rem; color: #606070;">• Your VouchMorph ID</span>
                     </p>
                 </div>
             </div>
-            <div style="display: flex; gap: 12px; align-items: center;">
+            <div style="display: flex; gap: 0.75rem; align-items: center;">
                 <div class="system-badge">
                     <i class="fas fa-globe"></i> <?= htmlspecialchars(strtoupper($systemCountry)) ?>
                 </div>
                 <a href="logout.php" class="logout-btn">
-                    <i class="fas fa-sign-out-alt"></i> Exit
+                    <i class="fas fa-sign-out-alt"></i> EXIT
                 </a>
             </div>
         </div>
@@ -790,14 +666,14 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
 
     <?php if ($error): ?>
         <div class="alert alert-error">
-            <i class="fas fa-exclamation-circle" style="font-size: 20px;"></i>
+            <i class="fas fa-exclamation-circle"></i>
             <div><?= htmlspecialchars($error) ?></div>
         </div>
     <?php endif; ?>
 
     <?php if ($success): ?>
         <div class="alert alert-success">
-            <i class="fas fa-check-circle" style="font-size: 20px;"></i>
+            <i class="fas fa-check-circle"></i>
             <div><?= htmlspecialchars($success) ?></div>
         </div>
     <?php endif; ?>
@@ -872,22 +748,19 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
             </div>
 
             <button type="submit" class="swap-btn" id="submitBtn">
-                <i class="fas fa-arrow-right"></i>
-                Execute Swap
+                <i class="fas fa-arrow-right"></i> EXECUTE SWAP
             </button>
 
             <div class="info-box">
                 <i class="fas fa-shield-alt"></i>
                 <div>
                     <strong>Secure by Design</strong><br>
-                    Your transaction will be added to the settlement queue for netting. 
                     Fee: Cashout 10 BWP · Deposit 6 BWP
                 </div>
             </div>
         </form>
     </div>
 
-    <!-- Swap Report Container -->
     <div id="swapReportContainer" class="report-container">
         <div class="card-title">
             <i class="fas fa-chart-line"></i>
@@ -906,7 +779,7 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
             <div class="empty-state">
                 <i class="fas fa-history"></i>
                 <p>No transactions yet</p>
-                <p style="font-size: 12px; margin-top: 8px;">Start your first swap above</p>
+                <p style="font-size: 0.7rem; margin-top: 0.5rem;">Start your first swap above</p>
             </div>
         <?php else: ?>
             <?php foreach ($recentTransactions as $tx): ?>
@@ -918,24 +791,13 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
                         </div>
                         <div class="transaction-details">
                             <?= htmlspecialchars($tx['source_type'] ?? '?') ?>
-                            <i class="fas fa-arrow-right" style="font-size: 10px; margin: 0 4px;"></i>
+                            <i class="fas fa-arrow-right" style="font-size: 0.6rem; margin: 0 0.25rem;"></i>
                             <?= htmlspecialchars($tx['destination_type'] ?? '?') ?>
-                            <?php if (!empty($tx['source_institution'])): ?>
-                                <span style="margin-left: 8px; color: #6b7280;">
-                                    • <?= htmlspecialchars($tx['source_institution']) ?>
-                                </span>
-                            <?php endif; ?>
-                            <?php if (!empty($tx['destination_institution'])): ?>
-                                <span style="margin-left: 8px; color: #6b7280;">
-                                    → <?= htmlspecialchars($tx['destination_institution']) ?>
-                                </span>
-                            <?php endif; ?>
                         </div>
                     </div>
                     <div class="transaction-right">
                         <div class="transaction-amount">
-                            <?= number_format((float)($tx['amount'] ?? 0), 2) ?>
-                            <?= htmlspecialchars($tx['from_currency'] ?? 'BWP') ?>
+                            <?= number_format((float)($tx['amount'] ?? 0), 2) ?> BWP
                         </div>
                         <span class="transaction-status status-<?= htmlspecialchars($statusClass) ?>">
                             <?= htmlspecialchars(str_replace('_', ' ', strtoupper($tx['status'] ?? 'UNKNOWN'))) ?>
@@ -956,6 +818,18 @@ const destValue = document.getElementById('destValue');
 const submitBtn = document.getElementById('submitBtn');
 const amountInput = document.getElementById('amount');
 
+// Custom cursor
+const cursor = document.querySelector('.cursor');
+const follower = document.querySelector('.cursor-follower');
+if (cursor && follower) {
+    document.addEventListener('mousemove', (e) => {
+        cursor.style.left = e.clientX + 'px';
+        cursor.style.top = e.clientY + 'px';
+        follower.style.left = e.clientX - 16 + 'px';
+        follower.style.top = e.clientY - 16 + 'px';
+    });
+}
+
 function updateDestinationPlaceholder() {
     const type = destType.value;
     const placeholders = {
@@ -969,15 +843,17 @@ function updateDestinationPlaceholder() {
 
 function updateDynamicFields() {
     const type = sourceType.value;
+    const userPhoneEl = document.querySelector('.phone-highlight');
+    const userPhone = userPhoneEl ? userPhoneEl.innerText.trim() : '';
 
     if (type === 'WALLET') {
         dynamicContainer.innerHTML = `
             <div class="dynamic-fields">
                 <div style="display:flex; align-items:center; gap:12px;">
-                    <i class="fas fa-check-circle" style="color:#10b981; font-size:20px;"></i>
+                    <i class="fas fa-check-circle" style="color:#00F0FF; font-size:20px;"></i>
                     <div>
-                        <strong style="color:#1f2937;">Using your registered phone number</strong><br>
-                        <span style="font-size:13px; color:#6b7280;">Source: ${document.querySelector('.phone-highlight')?.innerText || 'Your phone'}</span>
+                        <strong style="color:#FFFFFF;">Using your registered phone number</strong><br>
+                        <span style="font-size:13px; color:#A0A0B0;">Source: ${userPhone || 'Your phone'}</span>
                     </div>
                 </div>
             </div>
@@ -986,15 +862,15 @@ function updateDynamicFields() {
         dynamicContainer.innerHTML = `
             <div class="dynamic-fields">
                 <div class="form-group">
-                    <label><i class="fas fa-hashtag"></i> Account Number</label>
+                    <label>ACCOUNT NUMBER</label>
                     <input type="text" name="account_number" class="form-control" placeholder="Enter your account number" required>
                 </div>
                 <div class="form-group">
-                    <label><i class="fas fa-phone"></i> Account Phone (Optional)</label>
+                    <label>ACCOUNT PHONE (Optional)</label>
                     <input type="text" name="account_phone" class="form-control" placeholder="Linked phone number">
                 </div>
                 <div class="form-group">
-                    <label><i class="fas fa-lock"></i> Account PIN</label>
+                    <label>ACCOUNT PIN</label>
                     <input type="password" name="account_pin" class="form-control" placeholder="Enter your PIN">
                 </div>
             </div>
@@ -1003,15 +879,15 @@ function updateDynamicFields() {
         dynamicContainer.innerHTML = `
             <div class="dynamic-fields">
                 <div class="form-group">
-                    <label><i class="fas fa-credit-card"></i> Card Number</label>
+                    <label>CARD NUMBER</label>
                     <input type="text" name="card_number" class="form-control" placeholder="16-digit card number" maxlength="19" required>
                 </div>
                 <div class="form-group">
-                    <label><i class="fas fa-phone"></i> Card Phone (Optional)</label>
+                    <label>CARD PHONE (Optional)</label>
                     <input type="text" name="card_phone" class="form-control" placeholder="Linked phone number">
                 </div>
                 <div class="form-group">
-                    <label><i class="fas fa-lock"></i> Card PIN</label>
+                    <label>CARD PIN</label>
                     <input type="password" name="card_pin" class="form-control" placeholder="Enter your PIN" maxlength="6">
                 </div>
             </div>
@@ -1020,15 +896,15 @@ function updateDynamicFields() {
         dynamicContainer.innerHTML = `
             <div class="dynamic-fields">
                 <div class="form-group">
-                    <label><i class="fas fa-ticket"></i> Voucher Number</label>
+                    <label>VOUCHER NUMBER</label>
                     <input type="text" name="voucher_number" class="form-control" placeholder="Enter voucher number" required>
                 </div>
                 <div class="form-group">
-                    <label><i class="fas fa-phone"></i> Claimant Phone</label>
-                    <input type="text" name="voucher_phone" class="form-control" placeholder="Claimant phone number" value="${document.querySelector('.phone-highlight')?.innerText || ''}">
+                    <label>CLAIMANT PHONE</label>
+                    <input type="text" name="voucher_phone" class="form-control" placeholder="Claimant phone number" value="${userPhone || ''}">
                 </div>
                 <div class="form-group">
-                    <label><i class="fas fa-lock"></i> Voucher PIN</label>
+                    <label>VOUCHER PIN</label>
                     <input type="password" name="voucher_pin" class="form-control" placeholder="Enter voucher PIN">
                 </div>
             </div>
@@ -1044,24 +920,24 @@ function displaySwapReport(data) {
     const netAmount = data.net_amount || (data.amount - fee);
     
     content.innerHTML = `
-        <div style="padding: 1rem;">
-            <div style="background: #f0fdf4; border-radius: 16px; padding: 20px; margin-bottom: 20px;">
-                <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 16px;">
-                    <i class="fas fa-check-circle" style="color: #10b981; font-size: 28px;"></i>
-                    <h4 style="color: #065f46; margin: 0;">Swap Executed Successfully</h4>
+        <div>
+            <div style="background: rgba(0, 240, 255, 0.05); border-left: 3px solid #00F0FF; padding: 1.25rem; margin-bottom: 1.25rem;">
+                <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem;">
+                    <i class="fas fa-check-circle" style="color: #00F0FF; font-size: 1.5rem;"></i>
+                    <h4 style="color: #00F0FF; margin: 0; font-family: 'Clash Display';">Swap Executed Successfully</h4>
                 </div>
-                <div style="font-family: monospace; font-size: 14px;">
-                    <div style="display: flex; justify-content: space-between; padding: 8px 0;">
-                        <span>Reference:</span>
-                        <span style="font-weight: 600;">${data.swap_reference.substring(0, 16)}…</span>
+                <div style="font-family: 'Space Grotesk', monospace; font-size: 0.875rem;">
+                    <div style="display: flex; justify-content: space-between; padding: 0.5rem 0;">
+                        <span style="color: #A0A0B0;">Reference:</span>
+                        <span style="color: #00F0FF;">${data.swap_reference.substring(0, 16)}…</span>
                     </div>
-                    <div style="display: flex; justify-content: space-between; padding: 8px 0;">
-                        <span>Amount:</span>
-                        <span style="font-weight: 600; color: #059669;">${data.amount.toFixed(2)} BWP</span>
+                    <div style="display: flex; justify-content: space-between; padding: 0.5rem 0;">
+                        <span style="color: #A0A0B0;">Amount:</span>
+                        <span style="color: #00F0FF;">${data.amount.toFixed(2)} BWP</span>
                     </div>
-                    <div style="display: flex; justify-content: space-between; padding: 8px 0;">
-                        <span>Delivery Mode:</span>
-                        <span style="font-weight: 600;">${data.delivery_mode.toUpperCase()}</span>
+                    <div style="display: flex; justify-content: space-between; padding: 0.5rem 0;">
+                        <span style="color: #A0A0B0;">Delivery Mode:</span>
+                        <span>${data.delivery_mode.toUpperCase()}</span>
                     </div>
                 </div>
             </div>
@@ -1073,15 +949,15 @@ function displaySwapReport(data) {
                 </div>
                 <div class="fee-row">
                     <span>Fee (${data.delivery_mode === 'cashout' ? 'Cashout' : 'Deposit'}):</span>
-                    <span style="color: #dc2626;">-${fee.toFixed(2)} BWP</span>
+                    <span style="color: #FF6060;">-${fee.toFixed(2)} BWP</span>
                 </div>
                 <div class="fee-row total">
                     <span>Net Amount:</span>
-                    <span style="color: #059669;">${netAmount.toFixed(2)} BWP</span>
+                    <span>${netAmount.toFixed(2)} BWP</span>
                 </div>
             </div>
             
-            <div class="info-box" style="margin-top: 20px; background: #e0f2fe; color: #075985;">
+            <div class="info-box" style="margin-top: 1.25rem;">
                 <i class="fas fa-chart-line"></i>
                 <div>
                     <strong>Settlement Queue Updated</strong><br>
@@ -1097,51 +973,25 @@ function displaySwapReport(data) {
 
 async function executeSwap(formData) {
     submitBtn.disabled = true;
-    submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Processing...';
+    submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> PROCESSING...';
     
     try {
         const response = await fetch(window.location.href, {
             method: 'POST',
             body: formData,
-            headers: { 
-                'X-Requested-With': 'XMLHttpRequest',
-                'Accept': 'application/json'
-            }
+            headers: { 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json' }
         });
         
-        // Check if response is OK
-        if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-        }
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
         
         const text = await response.text();
-        
-        // Try to parse JSON, handle potential HTML responses
         let data;
-        try {
-            data = JSON.parse(text);
-        } catch (e) {
-            console.error('Raw response:', text.substring(0, 500));
-            throw new Error('Invalid JSON response from server');
-        }
+        try { data = JSON.parse(text); } catch (e) { throw new Error('Invalid JSON response'); }
         
         if (data.status === 'success') {
             displaySwapReport(data);
-            
-            // Clear form
             document.getElementById('swapForm').reset();
             updateDynamicFields();
-            
-            // Show success message temporarily
-            const successDiv = document.createElement('div');
-            successDiv.className = 'alert alert-success';
-            successDiv.innerHTML = `<i class="fas fa-check-circle"></i><div>${data.message || 'Swap completed successfully!'}</div>`;
-            const mainContainer = document.querySelector('.main-container');
-            const swapCard = document.querySelector('.swap-card');
-            mainContainer.insertBefore(successDiv, swapCard);
-            setTimeout(() => successDiv.remove(), 5000);
-            
-            // Reload transactions after 2 seconds
             setTimeout(() => location.reload(), 2000);
         } else {
             alert('Failed: ' + (data.message || 'Unknown error'));
@@ -1151,65 +1001,36 @@ async function executeSwap(formData) {
         alert('Error: ' + error.message);
     } finally {
         submitBtn.disabled = false;
-        submitBtn.innerHTML = '<i class="fas fa-arrow-right"></i> Execute Swap';
+        submitBtn.innerHTML = '<i class="fas fa-arrow-right"></i> EXECUTE SWAP';
     }
 }
 
-// Form validation
 document.getElementById('swapForm').addEventListener('submit', async function(e) {
     e.preventDefault();
     
     const requiredFields = dynamicContainer.querySelectorAll('[required]');
     let isValid = true;
     
-    for (let field of requiredFields) {
-        if (!field.value.trim()) {
-            field.style.borderColor = '#ef4444';
-            isValid = false;
-        }
-    }
+    requiredFields.forEach(field => { if (!field.value.trim()) { field.style.borderColor = '#FF3030'; isValid = false; } });
+    if (!destValue.value.trim()) { destValue.style.borderColor = '#FF3030'; isValid = false; }
+    if (!amountInput.value || parseFloat(amountInput.value) <= 0) { amountInput.style.borderColor = '#FF3030'; isValid = false; }
     
-    if (!destValue.value.trim()) {
-        destValue.style.borderColor = '#ef4444';
-        isValid = false;
-    }
-    
-    if (!amountInput.value || parseFloat(amountInput.value) <= 0) {
-        amountInput.style.borderColor = '#ef4444';
-        isValid = false;
-    }
-    
-    if (!isValid) {
-        alert('Please fill in all required fields');
-        return;
-    }
+    if (!isValid) { alert('Please fill in all required fields'); return; }
     
     await executeSwap(new FormData(this));
 });
 
-// Clear error styles on focus
 document.addEventListener('focusin', function(e) {
     if (e.target.classList && e.target.classList.contains('form-control')) {
         e.target.style.borderColor = '';
     }
 });
 
-// Initialize
 sourceType.addEventListener('change', updateDynamicFields);
 destType.addEventListener('change', updateDestinationPlaceholder);
 
 updateDynamicFields();
 updateDestinationPlaceholder();
-
-const sourceInstSelect = document.querySelector('select[name="source_institution"]');
-const destInstSelect = document.querySelector('select[name="destination_institution"]');
-
-if (sourceInstSelect && sourceInstSelect.options.length === 2) {
-    sourceInstSelect.selectedIndex = 1;
-}
-if (destInstSelect && destInstSelect.options.length === 2) {
-    destInstSelect.selectedIndex = 1;
-}
 </script>
 
 </body>
