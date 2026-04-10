@@ -7,7 +7,7 @@ ini_set('display_startup_errors', 1);
 require_once __DIR__ . '/../../src/APP_LAYER/utils/SessionManager.php';
 require_once __DIR__ . '/../../src/DATA_PERSISTENCE_LAYER/config/DBConnection.php';
 require_once __DIR__ . '/../../src/INTEGRATION_LAYER/INTERFACES/CommunicationProviderInterface.php';
-require_once __DIR__ . '/../../src/INTEGRATION_LAYER/CLIENTS/CommunicationClients/CommunicationClient.php';
+require_once __DIR__ . '/../../src/INTEGRATION_LAYER/CLIENTS/CommunicationClients/SmsGatewayClient.php';
 require_once __DIR__ . '/../../src/FACTORY_LAYER/CommunicationFactory.php';
 
 $config = require __DIR__ . '/../../src/CORE_CONFIG/load_country.php';
