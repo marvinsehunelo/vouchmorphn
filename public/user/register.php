@@ -4,13 +4,43 @@ error_reporting(E_ALL);
 ini_set('display_errors', 1);
 ini_set('display_startup_errors', 1);
 
-require_once __DIR__ . '/../../src/APP_LAYER/utils/SessionManager.php';
+// ============================================================
+// FIXED PATHS - Based on your file location
+// Assuming register.php is in: /APP_LAYER/views/register.php
+// ============================================================
+
+// Try different path possibilities
+$paths = [
+    __DIR__ . '/../../src/APP_LAYER/utils/SessionManager.php',
+    __DIR__ . '/../APP_LAYER/utils/SessionManager.php',
+    __DIR__ . '/src/APP_LAYER/utils/SessionManager.php'
+];
+
+$loaded = false;
+foreach ($paths as $path) {
+    if (file_exists($path)) {
+        require_once $path;
+        $loaded = true;
+        break;
+    }
+}
+
+if (!$loaded) {
+    die("DEBUG: Could not find SessionManager.php. Current directory: " . __DIR__ . "<br>");
+}
+
 require_once __DIR__ . '/../../src/DATA_PERSISTENCE_LAYER/config/DBConnection.php';
 require_once __DIR__ . '/../../src/INTEGRATION_LAYER/INTERFACES/CommunicationProviderInterface.php';
 require_once __DIR__ . '/../../src/INTEGRATION_LAYER/CLIENTS/CommunicationClients/SmsGatewayClient.php';
 require_once __DIR__ . '/../../src/FACTORY_LAYER/CommunicationFactory.php';
 
-$config = require __DIR__ . '/../../src/CORE_CONFIG/load_country.php';
+// Check if config file exists
+$configPath = __DIR__ . '/../../src/CORE_CONFIG/load_country.php';
+if (!file_exists($configPath)) {
+    die("DEBUG: Config file not found at: " . $configPath);
+}
+
+$config = require $configPath;
 
 use APP_LAYER\utils\SessionManager;
 use DATA_PERSISTENCE_LAYER\Config\DBConnection;
@@ -47,14 +77,15 @@ $swapDbConfig = $allDbConfig['swap'] ?? null;
 $sourceKey = $allDbConfig['source_client_key'] ?? 'cazacom';
 $sourceDbConfig = $allDbConfig[$sourceKey] ?? null;
 
+// Better error messages
 if (!$swapDbConfig) {
     error_log("REGISTER: swap DB config missing for {$systemCountry}");
-    die("System initialisation error.");
+    die("System initialisation error: Swap database configuration missing.");
 }
 
 if (!$sourceDbConfig) {
     error_log("REGISTER: source DB config missing for key {$sourceKey} in {$systemCountry}");
-    die("System initialisation error.");
+    die("System initialisation error: Source database configuration missing for {$sourceKey}");
 }
 
 // ----------------------------------------
@@ -68,7 +99,7 @@ try {
     $sourceDb->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 } catch (Throwable $e) {
     error_log("REGISTER DB ERROR [{$systemCountry}]: " . $e->getMessage());
-    die("System initialisation failed.");
+    die("System initialisation failed: " . $e->getMessage());
 }
 
 // ----------------------------------------
@@ -156,7 +187,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     } catch (Throwable $e) {
         error_log("REGISTER POST ERROR [{$systemCountry}]: " . $e->getMessage());
-        echo json_encode(['success' => false, 'message' => 'System error. Please try again.']);
+        echo json_encode(['success' => false, 'message' => 'System error: ' . $e->getMessage()]);
         exit;
     }
 }
@@ -189,7 +220,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             overflow-x: hidden;
         }
 
-        /* GRID BACKGROUND - SAME AS LANDING PAGE */
         body::before {
             content: '';
             position: fixed;
@@ -205,7 +235,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             z-index: 0;
         }
 
-        /* CUSTOM CURSOR - SAME AS LANDING PAGE */
         .cursor {
             width: 8px;
             height: 8px;
@@ -231,7 +260,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             .cursor, .cursor-follower { display: none; }
         }
 
-        /* REGISTER CARD - SHARP EDGES, 0 BORDER-RADIUS */
         .register-container {
             position: relative;
             z-index: 2;
@@ -244,7 +272,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
         }
 
-        /* HEADER */
         .register-header {
             padding: 2rem 2rem 1.5rem;
             text-align: center;
@@ -282,7 +309,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             color: #00F0FF;
         }
 
-        /* FORM */
         .register-form {
             padding: 2rem;
         }
@@ -346,7 +372,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             text-align: center;
         }
 
-        /* BUTTONS */
         .btn {
             width: 100%;
             padding: 1rem;
@@ -383,7 +408,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             box-shadow: none;
         }
 
-        /* MESSAGE */
         .message {
             margin-top: 1rem;
             padding: 0.75rem;
@@ -407,13 +431,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             color: #00F0FF;
         }
 
-        /* OTP SECTION */
         .otp-section {
             display: none;
             margin-top: 0;
         }
 
-        /* FOOTER */
         .register-footer {
             padding: 1.25rem 2rem;
             border-top: 1px solid rgba(255, 255, 255, 0.05);
@@ -433,12 +455,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             color: #00F0FF;
         }
 
-        /* HIDDEN CLASS */
-        .hidden {
-            display: none;
-        }
-
-        /* ANIMATIONS */
         @keyframes fadeInUp {
             from {
                 opacity: 0;
@@ -454,7 +470,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             animation: fadeInUp 0.4s ease;
         }
 
-        /* RESPONSIVE */
         @media (max-width: 640px) {
             .register-container {
                 margin: 1rem;
@@ -484,7 +499,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <h1>VOUCHMORPH<sup style="font-size: 0.7rem;">™</sup></h1>
         <div class="subtitle">Join the Financial Revolution</div>
         <div class="system-badge">
-            <?= htmlspecialchars(strtoupper($country ?? 'BW')) ?> • REGISTER
+            <?= htmlspecialchars(strtoupper($systemCountry)) ?> • REGISTER
         </div>
     </div>
 
@@ -493,8 +508,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <div class="form-group">
                 <label>MOBILE NUMBER</label>
                 <div class="phone-input-container">
-                    <span class="phone-prefix">+267</span>
-                    <input type="tel" id="phone" class="form-control" placeholder="71 234 567" autocomplete="off">
+                    <span class="phone-prefix"><?= htmlspecialchars($countryDialCode) ?></span>
+                    <input type="tel" id="phone" class="form-control" placeholder="<?= htmlspecialchars($phonePlaceholder) ?>" autocomplete="off">
                 </div>
             </div>
             <button class="btn" onclick="sendOTP()">SEND OTP →</button>
@@ -518,7 +533,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 </div>
 
 <script>
-// Custom cursor
 const cursor = document.querySelector('.cursor');
 const follower = document.querySelector('.cursor-follower');
 
@@ -535,7 +549,6 @@ function showMessage(text, type) {
     const msgEl = document.getElementById('message');
     msgEl.textContent = text;
     msgEl.className = 'message ' + (type || '');
-    // Auto clear after 5 seconds
     setTimeout(() => {
         if (document.getElementById('message').textContent === text) {
             document.getElementById('message').textContent = '';
@@ -545,22 +558,22 @@ function showMessage(text, type) {
 }
 
 function sendOTP() {
-    const phone = document.getElementById('phone').value.trim();
-    const msgEl = document.getElementById('message');
+    const phoneInput = document.getElementById('phone').value.trim();
+    const dialCode = '<?= $countryDialCode ?>';
+    const localLength = <?= $localLength ?>;
     
-    if (!phone) {
+    if (!phoneInput) {
         showMessage('Please enter your phone number.', 'error');
         return;
     }
 
-    // Basic phone validation (Botswana format: 8 digits after 267)
-    const phoneClean = phone.replace(/\D/g, '');
-    if (phoneClean.length !== 8) {
-        showMessage('Please enter a valid 8-digit Botswana phone number.', 'error');
+    const phoneClean = phoneInput.replace(/\D/g, '');
+    if (phoneClean.length !== localLength) {
+        showMessage(`Please enter a valid ${localLength}-digit phone number.`, 'error');
         return;
     }
 
-    const fullPhone = '+267' + phoneClean;
+    const fullPhone = dialCode + phoneClean;
     showMessage('Sending OTP...', '');
 
     const formData = new URLSearchParams();
@@ -589,15 +602,16 @@ function sendOTP() {
 }
 
 function verifyOTP() {
-    const phone = document.getElementById('phone').value.trim();
+    const phoneInput = document.getElementById('phone').value.trim();
     const otp = document.getElementById('otp').value.trim();
+    const dialCode = '<?= $countryDialCode ?>';
     
     if (!otp || otp.length !== 6) {
         showMessage('Please enter the 6-digit OTP.', 'error');
         return;
     }
 
-    const fullPhone = '+267' + phone.replace(/\D/g, '');
+    const fullPhone = dialCode + phoneInput.replace(/\D/g, '');
     showMessage('Verifying...', '');
 
     const formData = new URLSearchParams();
@@ -634,7 +648,6 @@ function backToPhone() {
     document.getElementById('message').className = 'message';
 }
 
-// Enter key support
 document.getElementById('phone')?.addEventListener('keypress', function(e) {
     if (e.key === 'Enter') sendOTP();
 });
