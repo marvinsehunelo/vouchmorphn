@@ -1,119 +1,151 @@
 <?php
-// APP_LAYER/views/register.php — AJAX + page
-// STYLED TO MATCH VOUCHMORPH LANDING PAGE
-
-// Disable direct error display to prevent breaking JSON, but log everything
-ini_set('display_errors', 0);
+ob_start();
 error_reporting(E_ALL);
+ini_set('display_errors', 1);
+ini_set('display_startup_errors', 1);
 
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
+require_once __DIR__ . '/../../src/APP_LAYER/utils/SessionManager.php';
+require_once __DIR__ . '/../../src/DATA_PERSISTENCE_LAYER/config/DBConnection.php';
+require_once __DIR__ . '/../../src/INTEGRATION_LAYER/INTERFACES/CommunicationProviderInterface.php';
+require_once __DIR__ . '/../../src/INTEGRATION_LAYER/CLIENTS/CommunicationClients/CommunicationClient.php';
+require_once __DIR__ . '/../../src/FACTORY_LAYER/CommunicationFactory.php';
 
-/**
- * 1️⃣ Load Country & Config (The New Standard)
- * This automatically handles the /countries/[CODE]/.env_[CODE] logic
- */
-try {
-    // This replaces system_country.php and the manual config pathing
-    $config = require_once __DIR__ . '/../../src/CORE_CONFIG/load_country.php';
-    $country = SYSTEM_COUNTRY; 
+$config = require __DIR__ . '/../../src/CORE_CONFIG/load_country.php';
 
-    // Load Communication Stack in correct dependency order
-    require_once __DIR__ . '/../../src/DATA_PERSISTENCE_LAYER/config/DBConnection.php';
-    require_once __DIR__ . '/../../src/INTEGRATION_LAYER/INTERFACES/CommunicationProviderInterface.php';
-    require_once __DIR__ . '/../../src/INTEGRATION_LAYER/CLIENTS/CommunicationClients/CommunicationClient.php';
-    require_once __DIR__ . '/../../src/FACTORY_LAYER/CommunicationFactory.php';
-
-} catch (Throwable $e) {
-    error_log("Bootstrap Error [{$country}]: " . $e->getMessage());
-    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-        die(json_encode(['success' => false, 'message' => 'System configuration error.']));
-    }
-    die("System initialisation error.");
-}
-
+use APP_LAYER\utils\SessionManager;
 use DATA_PERSISTENCE_LAYER\Config\DBConnection;
 use FACTORY_LAYER\CommunicationFactory;
 
-/**
- * 2️⃣ Database Configuration Alignment
- */
-$dbConfig = $config['db'] ?? [];
+SessionManager::start();
 
-// Identify the source client (Cazacom, etc.) based on country config
-// For Nigeria, this might be 'cazacom_ng' or similar in your .env
-$sourceKey = $config['db']['source_client_key'] ?? 'cazacom';
+// Redirect if already logged in
+if (SessionManager::isLoggedIn()) {
+    header('Location: user_dashboard.php');
+    exit();
+}
 
-if (!isset($dbConfig['swap']) || !isset($dbConfig[$sourceKey])) {
-    error_log("DB Config missing keys for {$country}. Available: " . implode(',', array_keys($dbConfig)));
-    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-        die(json_encode(['success' => false, 'message' => 'Database mapping error.']));
-    }
+// ----------------------------------------
+// Country + config bootstrap
+// ----------------------------------------
+if (!defined('SYSTEM_COUNTRY')) {
+    define('SYSTEM_COUNTRY', $config['country'] ?? 'BW');
+}
+
+$systemCountry = SYSTEM_COUNTRY;
+
+$countryConfig = $config['country_settings'][$systemCountry] ?? [];
+$countryDialCode  = $countryConfig['dial_code'] ?? '+267';
+$localLength      = (int)($countryConfig['local_phone_length'] ?? 8);
+$phonePlaceholder = $countryConfig['phone_placeholder'] ?? str_repeat('0', $localLength);
+$countryName      = $countryConfig['name'] ?? $systemCountry;
+
+// ----------------------------------------
+// DB config bootstrap
+// ----------------------------------------
+$allDbConfig = $config['db'] ?? [];
+$swapDbConfig = $allDbConfig['swap'] ?? null;
+$sourceKey = $allDbConfig['source_client_key'] ?? 'cazacom';
+$sourceDbConfig = $allDbConfig[$sourceKey] ?? null;
+
+if (!$swapDbConfig) {
+    error_log("REGISTER: swap DB config missing for {$systemCountry}");
     die("System initialisation error.");
 }
 
-/**
- * 3️⃣ Initialize DB connections
- */
+if (!$sourceDbConfig) {
+    error_log("REGISTER: source DB config missing for key {$sourceKey} in {$systemCountry}");
+    die("System initialisation error.");
+}
+
+// ----------------------------------------
+// DB connections
+// ----------------------------------------
 try {
-    // Connection to swap_system_bw or swap_system_ng
-    $swap_systemDB  = DBConnection::getInstance($dbConfig['swap']);
-    // Connection to the source of truth (the telco/partner DB)
-    $sourceClientDB = DBConnection::getInstance($dbConfig[$sourceKey]);
+    $swapDb = DBConnection::getInstance($swapDbConfig);
+    $swapDb->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+
+    $sourceDb = DBConnection::getInstance($sourceDbConfig);
+    $sourceDb->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 } catch (Throwable $e) {
-    error_log("DB Connection Failure [{$country}]: " . $e->getMessage());
-    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-        die(json_encode(['success' => false, 'message' => 'Backend connection failed.']));
-    }
-    die("System initialisation error.");
+    error_log("REGISTER DB ERROR [{$systemCountry}]: " . $e->getMessage());
+    die("System initialisation failed.");
 }
 
-// Identify which Communication Client to use (e.g., CAZACOM_BW or CAZACOM_NG)
+// ----------------------------------------
+// Communication config
+// ----------------------------------------
 $clientPartnerKey = $config['participants'][$sourceKey]['communication_key'] ?? 'CAZACOM';
 
-/**
- * 4️⃣ Handle AJAX POST (Send OTP)
- */
+// ----------------------------------------
+// Helpers
+// ----------------------------------------
+function normalizePhone(string $phoneInput, string $dialCode): string
+{
+    $phoneInput = preg_replace('/[^\d+]/', '', trim($phoneInput));
+
+    if ($phoneInput === '') {
+        return '';
+    }
+
+    if (str_starts_with($phoneInput, '+')) {
+        return $phoneInput;
+    }
+
+    return $dialCode . ltrim($phoneInput, '0');
+}
+
+function getLocalPhonePart(string $fullPhone, string $dialCode): string
+{
+    if (str_starts_with($fullPhone, $dialCode)) {
+        return substr($fullPhone, strlen($dialCode));
+    }
+
+    return ltrim($fullPhone, '0');
+}
+
+// ----------------------------------------
+// AJAX POST: Send OTP
+// ----------------------------------------
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     header('Content-Type: application/json; charset=utf-8');
 
     try {
-        $phone = trim($_POST['phone'] ?? '');
+        $phoneInput = trim($_POST['phone'] ?? '');
+        $phone = normalizePhone($phoneInput, $countryDialCode);
+
         if ($phone === '') {
             echo json_encode(['success' => false, 'message' => 'Phone number is required.']);
             exit;
         }
 
-        // 🔍 STEP 1: Check phone in Source Client (Telco)
-        $stmt = $sourceClientDB->prepare("SELECT id FROM users WHERE phone_number = ? LIMIT 1");
+        // Check if exists in source client DB
+        $stmt = $sourceDb->prepare("SELECT id FROM users WHERE phone_number = ? LIMIT 1");
         $stmt->execute([$phone]);
-        if (!$stmt->fetch()) {
+
+        if (!$stmt->fetch(PDO::FETCH_ASSOC)) {
             echo json_encode(['success' => false, 'message' => "Phone not found in {$clientPartnerKey} records."]);
             exit;
         }
 
-        // 🔍 STEP 2: Check if already in SWAP (Country specific)
-        $stmt = $swap_systemDB->prepare("SELECT user_id FROM users WHERE phone = ? LIMIT 1");
+        // Check if already registered in swap
+        $stmt = $swapDb->prepare("SELECT user_id FROM users WHERE phone = ? LIMIT 1");
         $stmt->execute([$phone]);
-        if ($stmt->rowCount() > 0) {
+
+        if ($stmt->fetch(PDO::FETCH_ASSOC)) {
             echo json_encode(['success' => false, 'message' => 'Number already registered in SWAP.']);
             exit;
         }
 
-        // ⚡ STEP 3: Generate OTP
-        $otp = str_pad(random_int(0, 999999), 6, '0', STR_PAD_LEFT);
+        $otp = str_pad((string) random_int(0, 999999), 6, '0', STR_PAD_LEFT);
         $expiresAt = date('Y-m-d H:i:s', time() + 300);
 
-        // Transactional OTP Update
-        $swap_systemDB->prepare("DELETE FROM otp_codes WHERE phone = ?")->execute([$phone]);
-        $swap_systemDB->prepare("INSERT INTO otp_codes (phone, code, expires_at) VALUES (?, ?, ?)")
-                      ->execute([$phone, $otp, $expiresAt]);
+        $swapDb->prepare("DELETE FROM otp_codes WHERE phone = ?")->execute([$phone]);
+        $swapDb->prepare("INSERT INTO otp_codes (phone, code, expires_at) VALUES (?, ?, ?)")
+               ->execute([$phone, $otp, $expiresAt]);
 
-        // 📲 STEP 4: Send SMS via Factory
         $comm = CommunicationFactory::create($clientPartnerKey);
-        $msg  = "Your SWAP registration OTP is: {$otp}.";
-        $res  = $comm->sendSMS($phone, $msg);
+        $msg = "Your SWAP registration OTP is: {$otp}.";
+        $res = $comm->sendSMS($phone, $msg);
 
         if (!($res['success'] ?? false)) {
             throw new Exception($res['message'] ?? 'Provider failed to send SMS');
@@ -123,8 +155,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
 
     } catch (Throwable $e) {
-        error_log("Register Error [{$country}]: " . $e->getMessage());
-        echo json_encode(['success' => false, 'message' => 'Error: ' . $e->getMessage()]);
+        error_log("REGISTER POST ERROR [{$systemCountry}]: " . $e->getMessage());
+        echo json_encode(['success' => false, 'message' => 'System error. Please try again.']);
         exit;
     }
 }
