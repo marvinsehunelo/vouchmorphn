@@ -80,16 +80,26 @@ return [
     'env' => getenv('APP_ENV') ?: 'production',
 
     'db' => [
-        'swap' => [
-            'type' => 'pgsql',
-            'host' => $dbConfig['host'],
-            'port' => $dbConfig['port'],
-            'name' => $dbConfig['name'],
-            'user' => $dbConfig['user'],
-            'pass' => $dbConfig['pass'],
-            'password' => $dbConfig['password']
-        ]
+    'swap' => [
+        'type' => 'pgsql',
+        'host' => $dbConfig['host'],
+        'port' => $dbConfig['port'],
+        'name' => $dbConfig['name'],
+        'user' => $dbConfig['user'],
+        'pass' => $dbConfig['pass'],
+        'password' => $dbConfig['password']
     ],
+    'source_client_key' => 'cazacom',
+    'cazacom' => [
+        'type' => 'pgsql',
+        'host' => getenv('CAZACOM_DB_HOST') ?: $dbConfig['host'],
+        'port' => getenv('CAZACOM_DB_PORT') ?: $dbConfig['port'],
+        'name' => getenv('CAZACOM_DB_NAME') ?: 'cazacom_db',
+        'user' => getenv('CAZACOM_DB_USER') ?: $dbConfig['user'],
+        'pass' => getenv('CAZACOM_DB_PASS') ?: '',
+        'password' => getenv('CAZACOM_DB_PASS') ?: ''
+    ]
+],
     
     'security' => [
         'encryption_key' => getenv('APP_ENCRYPTION_KEY') ?: 'PRODUCTION_KEY_MUST_BE_SET_IN_ENV',
