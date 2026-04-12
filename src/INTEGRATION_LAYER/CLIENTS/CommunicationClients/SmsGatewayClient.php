@@ -25,7 +25,7 @@ class SmsGatewayClient
         $this->config = $config;
         
         // Get configuration from config array
-        $this->baseUrl = $config['base_url'] ?? 'http://localhost/CazaCom';
+        $this->baseUrl = $config['base_url'] ?? 'https://cazacom-prod.up.railway.app';
         $this->apiKey = $config['api_key'] ?? $this->getApiKeyFromDB();
         
         $this->log("SmsGatewayClient initialized with URL: {$this->baseUrl}");
