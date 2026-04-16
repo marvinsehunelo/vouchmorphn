@@ -1,21 +1,21 @@
 <?php
 declare(strict_types=1);
 
-// CORE_CONFIG/load_country.php
-
 if (!defined('SYSTEM_COUNTRY')) {
-    require_once __DIR__ . '/system_country.php';
+    require_once __DIR__ . '/SystemCountry.php';
 }
 
 $country = SYSTEM_COUNTRY;
+$countrySlug = defined('SYSTEM_COUNTRY_SLUG')
+    ? SYSTEM_COUNTRY_SLUG
+    : strtolower($country);
 
 /* -------------------------------------------------------
-   Paths - FIXED to match actual file locations
+   Paths - aligned to current file locations
 ------------------------------------------------------- */
-$countryLower = strtolower($country);
-$configFile       = __DIR__ . "/../../../config/countries/{$countryLower}/config.php";
-$participantsFile = __DIR__ . "/../../../config/countries/{$countryLower}/participants.json";
-$feesFile         = __DIR__ . "/../../../config/countries/{$countryLower}/fees.json";
+$configFile       = dirname(__DIR__, 3) . "/src/Core/Config/Countries/{$country}/config.php";
+$participantsFile = dirname(__DIR__, 3) . "/config/countries/{$countrySlug}/participants.json";
+$feesFile         = dirname(__DIR__, 3) . "/config/countries/{$countrySlug}/fees.json";
 
 /* -------------------------------------------------------
    Load Base Config
@@ -32,7 +32,7 @@ if (!file_exists($participantsFile)) {
     die("Participants file error: Missing {$participantsFile}");
 }
 
-$participantsConfig = json_decode(file_get_contents($participantsFile), true);
+$participantsConfig = json_decode((string) file_get_contents($participantsFile), true);
 if (json_last_error() !== JSON_ERROR_NONE) {
     die("JSON parse error in participants file: " . json_last_error_msg());
 }
@@ -47,26 +47,28 @@ if (!file_exists($feesFile)) {
     die("Fees file missing: {$feesFile}");
 }
 
-$feesConfig = json_decode(file_get_contents($feesFile), true);
+$feesConfig = json_decode((string) file_get_contents($feesFile), true);
 if (json_last_error() !== JSON_ERROR_NONE) {
     die("JSON parse error in fees file: " . json_last_error_msg());
 }
 
 /* -------------------------------------------------------
-   Resolve Fees Safely (NO FLOAT CORRUPTION & TYPE SAFE)
+   Resolve Fees Safely
 ------------------------------------------------------- */
 if (!function_exists('resolveFees')) {
     function decimal($value): string
     {
         if (!is_numeric($value)) {
-            return is_bool($value) ? ($value ? 'true' : 'false') : (string)$value;
+            return is_bool($value) ? ($value ? 'true' : 'false') : (string) $value;
         }
-        return number_format((float)$value, 6, '.', '');
+
+        return number_format((float) $value, 6, '.', '');
     }
 
     function resolveFees(array $feeConfig): array
     {
         $resolved = [];
+
         if (isset($feeConfig['fees'])) {
             foreach ($feeConfig['fees'] as $key => $value) {
                 if (is_array($value)) {
@@ -81,11 +83,13 @@ if (!function_exists('resolveFees')) {
                 }
             }
         }
-        foreach (['metadata','regulatory','limits','currency','aliases','rules'] as $section) {
+
+        foreach (['metadata', 'regulatory', 'limits', 'currency', 'aliases', 'rules'] as $section) {
             if (isset($feeConfig[$section])) {
                 $resolved[$section] = $feeConfig[$section];
             }
         }
+
         return $resolved;
     }
 }
@@ -93,15 +97,15 @@ if (!function_exists('resolveFees')) {
 $countryConfig['fees'] = resolveFees($feesConfig);
 
 /* -------------------------------------------------------
-   Database Configuration (RAILWAY OPTIMIZED)
+   Database Configuration
 ------------------------------------------------------- */
-$dbName = getenv('PG_NAME') ?: getenv('PG_DB_CORE') ?: ("swap_system_" . strtolower($country));
+$dbName = getenv('PG_NAME') ?: getenv('PG_DB_CORE') ?: ('swap_system_' . strtolower($country));
 
 $countryConfig['db']['swap'] = [
     'name'     => $dbName,
     'database' => $dbName,
     'host'     => getenv('PG_HOST') ?: '127.0.0.1',
-    'port'     => (int)(getenv('PG_PORT') ?: 5432),
+    'port'     => (int) (getenv('PG_PORT') ?: 5432),
     'user'     => getenv('PG_USER') ?: 'postgres',
     'password' => getenv('PG_PASS') ?: '',
 ];
