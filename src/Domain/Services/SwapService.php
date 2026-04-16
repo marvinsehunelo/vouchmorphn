@@ -1,27 +1,19 @@
 <?php
-
-require_once dirname(__DIR__, 2) . '/src/bootstrap.php';
-
 declare(strict_types=1);
 
-namespace BUSINESS_LOGIC_LAYER\services;
-
-require_once __DIR__ . '/settlement/HybridSettlementStrategy.php';
-require_once __DIR__ . '/../Helpers/SwapStatusResolver.php';
-require_once __DIR__ . '/../../INTEGRATION_LAYER/CLIENTS/BankClients/GenericBankClient.php';
-require_once __DIR__ . '/SmsNotificationService.php';
-require_once __DIR__ . '/CardService.php';
+namespace Domain\Services;
 
 use PDO;
 use Exception;
 use DateTimeImmutable;
-use SECURITY_LAYER\Encryption\TokenEncryptor;
-use BUSINESS_LOGIC_LAYER\Helpers\SwapStatusResolver;
-use BUSINESS_LOGIC_LAYER\services\settlement\HybridSettlementStrategy;
-use BUSINESS_LOGIC_LAYER\services\SmsNotificationService;
-use BUSINESS_LOGIC_LAYER\services\CardService;
 use RuntimeException;
-use INTEGRATION_LAYER\CLIENTS\BankClients\GenericBankClient;
+
+use Security\Encryption\TokenEncryptor;
+use Domain\Services\Settlement\HybridSettlementStrategy;
+use Domain\Services\CardService;
+use Infrastructure\Banks\GenericBankClient;
+use Infrastructure\SMS\SmsNotificationService;
+use Domain\Helpers\SwapStatusResolver;
 
 /**
  * SwapService - ISO20022 & FSPIOP Compliant
