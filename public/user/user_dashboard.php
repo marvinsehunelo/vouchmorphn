@@ -1,13 +1,14 @@
 <?php
+// MUST be the very first thing - no whitespace before this!
+ob_start();
+
 // Disable error reporting for AJAX requests to prevent JSON corruption
 if (!empty($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest') {
     error_reporting(0);
     ini_set('display_errors', 0);
 }
 
-ob_start();
-
-// NEW PATHS for the restructured application
+// Include files AFTER output buffering starts
 require_once __DIR__ . '/../../src/Application/Utils/SessionManager.php';
 require_once __DIR__ . '/../../src/Core/Database/DBConnection.php';
 require_once __DIR__ . '/../../src/bootstrap.php';
@@ -17,6 +18,7 @@ use Application\Utils\SessionManager;
 use Core\Database\DBConnection;
 use Domain\Services\SwapService;
 
+// Start session
 SessionManager::start();
 
 if (!SessionManager::isLoggedIn()) {
@@ -132,17 +134,21 @@ try {
 /* =========================
    LOAD USER TRANSACTIONS
 ========================= */
+// For PostgreSQL JSONB query
 $stmt = $db->prepare("
     SELECT swap_id, swap_uuid, from_currency, to_currency, amount, 
            source_details, destination_details, status, created_at, metadata
     FROM swap_requests
-    WHERE metadata::text LIKE ? OR metadata::text LIKE ? OR metadata::text LIKE ?
+    WHERE CAST(metadata AS TEXT) LIKE :phone_pattern 
+       OR CAST(metadata AS TEXT) LIKE :user_pattern
     ORDER BY created_at DESC
     LIMIT 50
 ");
 $userPhonePattern = '%' . $userPhone . '%';
 $userIdPattern = '%' . $userId . '%';
-$stmt->execute([$userPhonePattern, $userIdPattern, $userPhonePattern]);
+$stmt->bindValue(':phone_pattern', $userPhonePattern);
+$stmt->bindValue(':user_pattern', $userIdPattern);
+$stmt->execute();
 $userTransactions = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 // Also get card authorizations for this user
@@ -150,11 +156,14 @@ $stmt = $db->prepare("
     SELECT ca.*, sr.amount, sr.created_at as swap_created_at
     FROM card_authorizations ca
     JOIN swap_requests sr ON ca.swap_reference = sr.swap_uuid
-    WHERE sr.metadata::text LIKE ? OR sr.metadata::text LIKE ?
+    WHERE CAST(sr.metadata AS TEXT) LIKE :phone_pattern 
+       OR CAST(sr.metadata AS TEXT) LIKE :user_pattern
     ORDER BY ca.created_at DESC
     LIMIT 20
 ");
-$stmt->execute([$userPhonePattern, $userIdPattern]);
+$stmt->bindValue(':phone_pattern', $userPhonePattern);
+$stmt->bindValue(':user_pattern', $userIdPattern);
+$stmt->execute();
 $cardAuthorizations = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 /* =========================
@@ -170,7 +179,10 @@ $isAjax = !empty($_SERVER['HTTP_X_REQUESTED_WITH']) &&
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'swap') {
     
     if ($isAjax) {
-        while (ob_get_level() > 0) ob_end_clean();
+        // Clean output buffers before sending JSON
+        while (ob_get_level() > 0) {
+            ob_end_clean();
+        }
         header('Content-Type: application/json');
         header('X-Content-Type-Options: nosniff');
     }
@@ -392,6 +404,9 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
     echo json_encode(['status' => 'error', 'message' => 'Invalid request']);
     exit;
 }
+
+// Flush output buffer before HTML
+ob_end_flush();
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -403,6 +418,7 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
 <link href="https://api.fontshare.com/v2/css?f[]=clash-display@400,500,600,700&f[]=general-sans@400,500,600&f[]=space-grotesk@400,500,600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 <style>
+    /* ... (same CSS as before) ... */
     * {
         margin: 0;
         padding: 0;
@@ -434,31 +450,6 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
         z-index: 0;
     }
 
-    .cursor {
-        width: 8px;
-        height: 8px;
-        background: #00F0FF;
-        position: fixed;
-        pointer-events: none;
-        z-index: 9999;
-        mix-blend-mode: difference;
-        transition: transform 0.1s ease;
-    }
-
-    .cursor-follower {
-        width: 40px;
-        height: 40px;
-        border: 1px solid rgba(0, 240, 255, 0.5);
-        position: fixed;
-        pointer-events: none;
-        z-index: 9998;
-        transition: 0.15s ease;
-    }
-
-    @media (max-width: 768px) {
-        .cursor, .cursor-follower { display: none; }
-    }
-
     .main-container {
         max-width: 860px;
         margin: 0 auto;
@@ -470,13 +461,12 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
         background: rgba(5, 5, 5, 0.95);
         border: 1px solid rgba(255, 255, 255, 0.08);
         backdrop-filter: blur(10px);
-        border-radius: 0px;
         margin-bottom: 1.5rem;
         overflow: hidden;
+        padding: 1.75rem;
     }
 
     .header-card { padding: 1.5rem; }
-    .swap-card, .transactions-card, .report-container, .cards-card { padding: 1.75rem; }
 
     .user-info {
         display: flex;
@@ -499,7 +489,6 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
         display: flex;
         align-items: center;
         justify-content: center;
-        border-radius: 0px;
     }
 
     .user-avatar i {
@@ -512,11 +501,6 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
         font-size: 1.25rem;
         font-weight: 600;
         margin-bottom: 0.25rem;
-    }
-
-    .user-text p {
-        font-size: 0.75rem;
-        color: #A0A0B0;
     }
 
     .phone-highlight {
@@ -539,7 +523,6 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
         border: 1px solid rgba(255, 255, 255, 0.1);
         color: #E0E0E0;
         transition: all 0.2s;
-        border-radius: 0px;
     }
 
     .logout-btn:hover {
@@ -558,13 +541,10 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
         background: rgba(5, 5, 5, 0.95);
         border: 1px solid rgba(255, 255, 255, 0.08);
         border-left-width: 3px;
-        border-radius: 0px;
     }
 
     .alert-error { border-left-color: #FF3030; }
-    .alert-error i { color: #FF3030; }
     .alert-success { border-left-color: #00F0FF; }
-    .alert-success i { color: #00F0FF; }
 
     .card-title {
         display: flex;
@@ -609,7 +589,6 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
         font-family: 'Inter', sans-serif;
         font-size: 0.875rem;
         transition: all 0.2s;
-        border-radius: 0px;
     }
 
     .form-control:focus, .form-select:focus {
@@ -629,7 +608,6 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
         border: 1px solid rgba(0, 240, 255, 0.1);
         padding: 1.25rem;
         margin: 1rem 0;
-        border-radius: 0px;
     }
 
     .swap-btn {
@@ -646,7 +624,6 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
         cursor: pointer;
         transition: all 0.2s ease;
         margin-top: 0.5rem;
-        border-radius: 0px;
     }
 
     .swap-btn:hover:not(:disabled) {
@@ -686,17 +663,11 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     .transaction-item:last-child, .card-item:last-child { border-bottom: none; }
-    .transaction-item:hover, .card-item:hover { transform: translateX(4px); }
 
     .transaction-date, .card-date {
         font-size: 0.7rem;
         color: #606070;
         margin-bottom: 0.25rem;
-    }
-
-    .transaction-details, .card-details {
-        font-size: 0.75rem;
-        color: #C0C0D0;
     }
 
     .transaction-amount, .card-amount {
@@ -711,7 +682,6 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
         font-weight: 600;
         display: inline-block;
         margin-top: 0.25rem;
-        border-radius: 0px;
     }
 
     .status-pending, .status-pending_auth {
@@ -757,7 +727,6 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
         padding: 1rem;
         margin-top: 1rem;
         border: 1px solid rgba(0, 240, 255, 0.1);
-        border-radius: 0px;
     }
     .fee-row {
         display: flex;
@@ -782,11 +751,6 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
         color: #00F0FF;
     }
 
-    .card-balance {
-        font-size: 0.75rem;
-        color: #A0A0B0;
-    }
-
     @media (max-width: 640px) {
         body { padding: 1rem; }
         .form-row { grid-template-columns: 1fr; }
@@ -796,9 +760,6 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
 </style>
 </head>
 <body>
-
-<div class="cursor"></div>
-<div class="cursor-follower"></div>
 
 <div class="main-container">
 
@@ -1018,18 +979,6 @@ const destType = document.getElementById('destType');
 const destValue = document.getElementById('destValue');
 const submitBtn = document.getElementById('submitBtn');
 const amountInput = document.getElementById('amount');
-
-// Custom cursor
-const cursor = document.querySelector('.cursor');
-const follower = document.querySelector('.cursor-follower');
-if (cursor && follower) {
-    document.addEventListener('mousemove', (e) => {
-        cursor.style.left = e.clientX + 'px';
-        cursor.style.top = e.clientY + 'px';
-        follower.style.left = e.clientX - 16 + 'px';
-        follower.style.top = e.clientY - 16 + 'px';
-    });
-}
 
 function updateDestinationPlaceholder() {
     const type = destType.value;
