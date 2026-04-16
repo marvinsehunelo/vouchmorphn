@@ -6,11 +6,16 @@ if (!empty($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQ
 }
 
 ob_start();
-require_once __DIR__ . '/../../src/APP_LAYER/utils/SessionManager.php';
-require_once __DIR__ . '/../../src/DATA_PERSISTENCE_LAYER/config/DBConnection.php';
 
-use APP_LAYER\utils\SessionManager;
-use DATA_PERSISTENCE_LAYER\config\DBConnection;
+// NEW PATHS for the restructured application
+require_once __DIR__ . '/../../src/Application/Utils/SessionManager.php';
+require_once __DIR__ . '/../../src/Core/Database/DBConnection.php';
+require_once __DIR__ . '/../../src/bootstrap.php';
+require_once __DIR__ . '/../../src/Domain/Services/SwapService.php';
+
+use Application\Utils\SessionManager;
+use Core\Database\DBConnection;
+use Domain\Services\SwapService;
 
 SessionManager::start();
 
@@ -24,7 +29,8 @@ $userPhone = $user['phone'] ?? '';
 $userId = $user['user_id'] ?? null;
 $systemCountry = $user['country'] ?? 'BW';
 
-$config = require __DIR__ . '/../../src/CORE_CONFIG/load_country.php';
+// Load country configuration
+$config = require __DIR__ . '/../../src/Core/Config/LoadCountry.php';
 $dbConfig = $config['db']['swap'] ?? null;
 
 try {
@@ -36,11 +42,11 @@ try {
 }
 
 /* =========================
-   PHONE NUMBER FORMATTING FUNCTION
+   HELPER FUNCTIONS
 ========================= */
 function formatPhoneNumberForSwap($phoneNumber, $countryCode = 'BW') {
     $cleanNumber = preg_replace('/[^0-9]/', '', $phoneNumber);
-    $countryCodes = ['BW' => '267', 'KE' => '254', 'NG' => '234'];
+    $countryCodes = ['BW' => '267', 'KE' => '254', 'NG' => '234', 'ZA' => '27', 'GH' => '233'];
     $code = $countryCodes[$countryCode] ?? '267';
     if (empty($cleanNumber)) return '';
     if (substr($cleanNumber, 0, strlen($code)) === $code) return '+' . $cleanNumber;
@@ -72,58 +78,87 @@ function maskValue(string $value, int $visible = 4): string {
 }
 
 /* =========================
-   LOAD DATA
+   LOAD PARTICIPANTS FOR SWAPSERVICE
 ========================= */
 $stmt = $db->prepare("
-    SELECT participant_id, name, type, category, provider_code, auth_type, base_url, resource_endpoints
+    SELECT participant_id, name, type, category, provider_code, auth_type, base_url, 
+           capabilities, phone_format, config, status
     FROM participants
     WHERE status = 'ACTIVE'
     ORDER BY name
 ");
 $stmt->execute();
-$institutions = $stmt->fetchAll(PDO::FETCH_ASSOC);
+$participants = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-$stmt = $db->prepare("
-    SELECT swap_id, swap_uuid, from_currency, to_currency, amount, source_details, destination_details, status, created_at, metadata
-    FROM swap_requests
-    ORDER BY created_at DESC
-    LIMIT 150
-");
-$stmt->execute();
-$allRecentSwaps = $stmt->fetchAll(PDO::FETCH_ASSOC);
+// Build participant config for SwapService
+$participantConfig = [];
+foreach ($participants as $p) {
+    $participantConfig[$p['provider_code']] = [
+        'participant_id' => $p['participant_id'],
+        'name' => $p['name'],
+        'provider_code' => $p['provider_code'],
+        'type' => $p['type'],
+        'category' => $p['category'],
+        'auth_type' => $p['auth_type'],
+        'base_url' => $p['base_url'],
+        'capabilities' => safeJsonDecode($p['capabilities'] ?? '{}'),
+        'phone_format' => safeJsonDecode($p['phone_format'] ?? '{}'),
+        'config' => safeJsonDecode($p['config'] ?? '{}')
+    ];
+}
 
-$recentTransactions = [];
+// Load country-specific configs
+$countryConfigPath = __DIR__ . "/../../src/Core/Config/Countries/{$systemCountry}/config.php";
+$countryConfig = file_exists($countryConfigPath) ? require $countryConfigPath : [];
 
-foreach ($allRecentSwaps as $row) {
-    $metadata = safeJsonDecode($row['metadata'] ?? null);
-    $sourceDetails = safeJsonDecode($row['source_details'] ?? null);
-    $destinationDetails = safeJsonDecode($row['destination_details'] ?? null);
+// Initialize SwapService
+$encryptionKey = $config['encryption']['key'] ?? getenv('ENCRYPTION_KEY') ?: 'default-encryption-key-32-chars!!';
+$swapService = null;
 
-    $matchesUser =
-        ((string)($metadata['user_id'] ?? '') === (string)$userId) ||
-        ((string)($metadata['user_phone'] ?? '') === (string)$userPhone) ||
-        ((string)($sourceDetails['phone'] ?? '') === (string)$userPhone) ||
-        ((string)($sourceDetails['wallet_phone'] ?? '') === (string)$userPhone) ||
-        ((string)($sourceDetails['account_phone'] ?? '') === (string)$userPhone) ||
-        ((string)($sourceDetails['card_phone'] ?? '') === (string)$userPhone) ||
-        ((string)($sourceDetails['claimant_phone'] ?? '') === (string)$userPhone) ||
-        ((string)($destinationDetails['beneficiary_wallet'] ?? '') === (string)$userPhone) ||
-        ((string)($destinationDetails['beneficiary_account'] ?? '') === (string)$userPhone) ||
-        ((string)($destinationDetails['beneficiary_phone'] ?? '') === (string)$userPhone) ||
-        ((string)($destinationDetails['cashout']['beneficiary_phone'] ?? '') === (string)$userPhone);
-
-    if ($matchesUser) {
-        $row['source_type'] = $sourceDetails['asset_type'] ?? ($sourceDetails['source_type'] ?? 'SOURCE');
-        $row['source_institution'] = $sourceDetails['institution'] ?? '';
-        $row['destination_type'] = $destinationDetails['delivery_mode'] ?? ($destinationDetails['asset_type'] ?? 'DESTINATION');
-        $row['destination_institution'] = $destinationDetails['institution'] ?? '';
-        $recentTransactions[] = $row;
-    }
-    if (count($recentTransactions) >= 10) break;
+try {
+    $swapService = new SwapService(
+        $db,
+        $countryConfig,
+        $systemCountry,
+        $encryptionKey,
+        $participantConfig
+    );
+    error_log("SwapService initialized successfully in dashboard");
+} catch (\Exception $e) {
+    error_log("Failed to initialize SwapService: " . $e->getMessage());
+    // Continue without SwapService - will use fallback
 }
 
 /* =========================
-   HANDLE SWAP
+   LOAD USER TRANSACTIONS
+========================= */
+$stmt = $db->prepare("
+    SELECT swap_id, swap_uuid, from_currency, to_currency, amount, 
+           source_details, destination_details, status, created_at, metadata
+    FROM swap_requests
+    WHERE metadata::text LIKE ? OR metadata::text LIKE ? OR metadata::text LIKE ?
+    ORDER BY created_at DESC
+    LIMIT 50
+");
+$userPhonePattern = '%' . $userPhone . '%';
+$userIdPattern = '%' . $userId . '%';
+$stmt->execute([$userPhonePattern, $userIdPattern, $userPhonePattern]);
+$userTransactions = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+// Also get card authorizations for this user
+$stmt = $db->prepare("
+    SELECT ca.*, sr.amount, sr.created_at as swap_created_at
+    FROM card_authorizations ca
+    JOIN swap_requests sr ON ca.swap_reference = sr.swap_uuid
+    WHERE sr.metadata::text LIKE ? OR sr.metadata::text LIKE ?
+    ORDER BY ca.created_at DESC
+    LIMIT 20
+");
+$stmt->execute([$userPhonePattern, $userIdPattern]);
+$cardAuthorizations = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+/* =========================
+   HANDLE SWAP VIA SWAPSERVICE
 ========================= */
 $error = null;
 $success = null;
@@ -148,77 +183,204 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'swap'
         $destinationType = strtolower(trim($_POST['destination_type'] ?? ''));
         $destinationValue = trim($_POST['destination_value'] ?? '');
         
+        // Validate amount
+        if ($amount <= 0) {
+            throw new \Exception("Amount must be greater than 0");
+        }
+        
+        // Format destination value if it's a phone number
         if (preg_match('/^[0-9+\-\(\)\s]+$/', $destinationValue) && strlen(preg_replace('/[^0-9]/', '', $destinationValue)) >= 8) {
             $destinationValue = formatPhoneNumberForSwap($destinationValue, $systemCountry);
         }
         
-        if ($sourceInstitution === '' || $destinationInstitution === '' || $amount <= 0 || $destinationValue === '') {
-            throw new \Exception("Please complete all required fields.");
-        }
-        
+        // Get source reference based on source type
         $sourceReference = null;
+        $sourceExtra = [];
+        
         switch ($sourceType) {
             case 'WALLET':
                 $sourceReference = formatPhoneNumberForSwap($userPhone, $systemCountry);
                 if (empty($sourceReference)) throw new \Exception("Phone number is required");
+                $sourceExtra = ['phone' => $sourceReference, 'wallet_phone' => $sourceReference];
                 break;
             case 'ACCOUNT':
                 $sourceReference = trim($_POST['account_number'] ?? '');
                 if (empty($sourceReference)) throw new \Exception("Account number is required");
+                $sourceExtra = [
+                    'account_number' => $sourceReference,
+                    'account_phone' => trim($_POST['account_phone'] ?? '')
+                ];
+                if (!empty($_POST['account_pin'])) {
+                    $sourceExtra['account_pin'] = $_POST['account_pin'];
+                }
                 break;
             case 'CARD':
                 $sourceReference = trim($_POST['card_number'] ?? '');
                 if (empty($sourceReference)) throw new \Exception("Card number is required");
+                $sourceExtra = [
+                    'card_number' => $sourceReference,
+                    'card_phone' => trim($_POST['card_phone'] ?? '')
+                ];
+                if (!empty($_POST['card_pin'])) {
+                    $sourceExtra['card_pin'] = $_POST['card_pin'];
+                }
                 break;
             case 'VOUCHER':
                 $sourceReference = trim($_POST['voucher_number'] ?? '');
                 if (empty($sourceReference)) throw new \Exception("Voucher number is required");
+                $sourceExtra = [
+                    'voucher_number' => $sourceReference,
+                    'claimant_phone' => trim($_POST['voucher_phone'] ?? $userPhone)
+                ];
+                if (!empty($_POST['voucher_pin'])) {
+                    $sourceExtra['voucher_pin'] = $_POST['voucher_pin'];
+                }
                 break;
             default:
                 throw new \Exception("Invalid source type");
         }
         
-        $sourcePayload = ['institution' => $sourceInstitution, 'asset_type' => $sourceType, 'amount' => $amount, 'reference' => $sourceReference];
-        switch ($sourceType) {
-            case 'WALLET': $sourcePayload['wallet_phone'] = $sourceReference; $sourcePayload['phone'] = $sourceReference; break;
-            case 'ACCOUNT': $sourcePayload['account_number'] = $sourceReference; $sourcePayload['account_phone'] = trim($_POST['account_phone'] ?? ''); if (!empty($_POST['account_pin'])) $sourcePayload['account_pin'] = $_POST['account_pin']; break;
-            case 'CARD': $sourcePayload['card_number'] = $sourceReference; $sourcePayload['card_phone'] = trim($_POST['card_phone'] ?? ''); if (!empty($_POST['card_pin'])) $sourcePayload['card_pin'] = $_POST['card_pin']; break;
-            case 'VOUCHER': $sourcePayload['voucher_number'] = $sourceReference; $sourcePayload['claimant_phone'] = trim($_POST['voucher_phone'] ?? $userPhone); if (!empty($_POST['voucher_pin'])) $sourcePayload['voucher_pin'] = $_POST['voucher_pin']; break;
-        }
-        
-        $destinationPayload = ['institution' => $destinationInstitution, 'delivery_mode' => $destinationType, 'amount' => $amount];
+        // Build destination details
+        $destinationDetails = [];
         switch ($destinationType) {
-            case 'cashout': $destinationPayload['beneficiary_phone'] = $destinationValue; $destinationPayload['beneficiary'] = $destinationValue; break;
-            case 'wallet': $destinationPayload['beneficiary_wallet'] = $destinationValue; break;
-            case 'bank': $destinationPayload['beneficiary_account'] = $destinationValue; break;
-            case 'card': $destinationPayload['card_suffix'] = $destinationValue; break;
-            default: $destinationPayload['beneficiary_phone'] = $destinationValue;
+            case 'cashout':
+                if (empty($destinationValue)) throw new \Exception("Beneficiary phone is required");
+                $destinationDetails = [
+                    'cashout' => [
+                        'beneficiary_phone' => $destinationValue,
+                        'beneficiary' => $destinationValue
+                    ]
+                ];
+                break;
+            case 'wallet':
+                if (empty($destinationValue)) throw new \Exception("Wallet number is required");
+                $destinationDetails = ['beneficiary_wallet' => $destinationValue];
+                break;
+            case 'bank':
+                if (empty($destinationValue)) throw new \Exception("Account number is required");
+                $destinationDetails = ['beneficiary_account' => $destinationValue];
+                break;
+            case 'card':
+                if (empty($destinationValue)) throw new \Exception("Card suffix is required");
+                $destinationDetails = ['card_suffix' => $destinationValue];
+                $destinationType = 'card_load'; // Map to card_load for SwapService
+                break;
+            default:
+                throw new \Exception("Invalid destination type");
         }
         
-        $swapRef = 'SWP-' . strtoupper(bin2hex(random_bytes(6)));
-        $metadata = ['user_id' => $userId, 'user_phone' => $userPhone, 'channel' => 'user_dashboard', 'system_country' => $systemCountry, 'ui_source_type' => $sourceType, 'ui_destination_type' => $destinationType, 'masked_source_reference' => maskValue($sourceReference), 'masked_destination_value' => maskValue($destinationValue)];
+        // Build payload for SwapService
+        $swapPayload = [
+            'source' => array_merge([
+                'institution' => $sourceInstitution,
+                'asset_type' => $sourceType,
+                'amount' => $amount,
+                'currency' => 'BWP',
+                'reference' => $sourceReference
+            ], $sourceExtra),
+            'destination' => array_merge([
+                'institution' => $destinationInstitution,
+                'delivery_mode' => $destinationType,
+                'amount' => $amount,
+                'currency' => 'BWP'
+            ], $destinationDetails),
+            'currency' => 'BWP',
+            'metadata' => [
+                'user_id' => $userId,
+                'user_phone' => $userPhone,
+                'channel' => 'user_dashboard',
+                'system_country' => $systemCountry,
+                'ui_source_type' => $sourceType,
+                'ui_destination_type' => $destinationType,
+                'masked_source_reference' => maskValue($sourceReference),
+                'masked_destination_value' => maskValue($destinationValue)
+            ]
+        ];
         
-        $stmt = $db->prepare("
-            INSERT INTO swap_requests (swap_uuid, from_currency, to_currency, amount, source_details, destination_details, status, created_at, metadata)
-            VALUES (:swap_uuid, :from_currency, :to_currency, :amount, :source_details, :destination_details, :status, NOW(), :metadata)
-        ");
-        $stmt->execute([
-            ':swap_uuid' => $swapRef, ':from_currency' => 'BWP', ':to_currency' => 'BWP',
-            ':amount' => $amount, ':source_details' => json_encode($sourcePayload, JSON_UNESCAPED_UNICODE),
-            ':destination_details' => json_encode($destinationPayload, JSON_UNESCAPED_UNICODE),
-            ':status' => 'pending', ':metadata' => json_encode($metadata, JSON_UNESCAPED_UNICODE)
-        ]);
-        
-        $swapResult = ['status' => 'success', 'swap_reference' => $swapRef, 'amount' => $amount, 'delivery_mode' => $destinationType, 'fee' => $destinationType === 'cashout' ? 10.00 : 6.00, 'net_amount' => $amount - ($destinationType === 'cashout' ? 10.00 : 6.00)];
-        $success = "✅ Swap created successfully! Reference: " . substr($swapRef, 0, 16) . "…";
-        
-        if ($isAjax) {
-            echo json_encode(['status' => 'success', 'swap_reference' => $swapRef, 'amount' => $amount, 'delivery_mode' => $destinationType, 'fee' => $swapResult['fee'], 'net_amount' => $swapResult['net_amount'], 'message' => $success]);
-            exit;
+        // Execute swap via SwapService
+        if ($swapService !== null) {
+            error_log("Executing swap via SwapService: " . json_encode($swapPayload));
+            $result = $swapService->executeSwap($swapPayload);
+            error_log("SwapService result: " . json_encode($result));
+            
+            if ($result['status'] === 'success') {
+                $swapRef = $result['swap_reference'];
+                
+                // Calculate fee and net amount
+                $fee = $result['fee'] ?? ($destinationType === 'cashout' ? 10.00 : ($destinationType === 'card_load' ? 6.00 : 6.00));
+                $netAmount = $result['net_amount'] ?? ($amount - $fee);
+                
+                $swapResult = [
+                    'status' => 'success',
+                    'swap_reference' => $swapRef,
+                    'amount' => $amount,
+                    'delivery_mode' => $destinationType,
+                    'fee' => $fee,
+                    'net_amount' => $netAmount,
+                    'hold_reference' => $result['hold_reference'] ?? null
+                ];
+                
+                // Add card details if present
+                if (isset($result['card_details'])) {
+                    $swapResult['card_details'] = $result['card_details'];
+                }
+                
+                // Add dispensed notes if present
+                if (isset($result['dispensed_notes'])) {
+                    $swapResult['dispensed_notes'] = $result['dispensed_notes'];
+                }
+                
+                $success = "✅ Swap executed successfully! Reference: " . substr($swapRef, 0, 16) . "…";
+                
+                if ($isAjax) {
+                    echo json_encode($swapResult);
+                    exit;
+                }
+            } else {
+                throw new \Exception($result['message'] ?? 'Swap execution failed');
+            }
+        } else {
+            // Fallback: Store as pending if SwapService not available
+            $swapRef = 'SWP-' . strtoupper(bin2hex(random_bytes(6)));
+            $metadata = array_merge($swapPayload['metadata'], ['fallback_mode' => true]);
+            
+            $stmt = $db->prepare("
+                INSERT INTO swap_requests (swap_uuid, from_currency, to_currency, amount, source_details, destination_details, status, created_at, metadata)
+                VALUES (:swap_uuid, :from_currency, :to_currency, :amount, :source_details, :destination_details, :status, NOW(), :metadata)
+            ");
+            $stmt->execute([
+                ':swap_uuid' => $swapRef,
+                ':from_currency' => 'BWP',
+                ':to_currency' => 'BWP',
+                ':amount' => $amount,
+                ':source_details' => json_encode($swapPayload['source'], JSON_UNESCAPED_UNICODE),
+                ':destination_details' => json_encode($swapPayload['destination'], JSON_UNESCAPED_UNICODE),
+                ':status' => 'pending',
+                ':metadata' => json_encode($metadata, JSON_UNESCAPED_UNICODE)
+            ]);
+            
+            $fee = $destinationType === 'cashout' ? 10.00 : 6.00;
+            $swapResult = [
+                'status' => 'success',
+                'swap_reference' => $swapRef,
+                'amount' => $amount,
+                'delivery_mode' => $destinationType,
+                'fee' => $fee,
+                'net_amount' => $amount - $fee
+            ];
+            $success = "✅ Swap request created! Reference: " . substr($swapRef, 0, 16) . "… (pending processing)";
+            
+            if ($isAjax) {
+                echo json_encode($swapResult);
+                exit;
+            }
         }
+        
     } catch (\Exception $e) {
         error_log("USER DASHBOARD SWAP ERROR: " . $e->getMessage());
+        error_log("Stack trace: " . $e->getTraceAsString());
         $error = $e->getMessage();
+        
         if ($isAjax) {
             echo json_encode(['status' => 'error', 'message' => $error]);
             exit;
@@ -257,7 +419,6 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
         overflow-x: hidden;
     }
 
-    /* GRID BACKGROUND */
     body::before {
         content: '';
         position: fixed;
@@ -273,7 +434,6 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
         z-index: 0;
     }
 
-    /* CUSTOM CURSOR */
     .cursor {
         width: 8px;
         height: 8px;
@@ -300,14 +460,13 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     .main-container {
-        max-width: 760px;
+        max-width: 860px;
         margin: 0 auto;
         position: relative;
         z-index: 2;
     }
 
-    /* CARDS - SHARP EDGES */
-    .header-card, .swap-card, .transactions-card, .report-container {
+    .header-card, .swap-card, .transactions-card, .report-container, .cards-card {
         background: rgba(5, 5, 5, 0.95);
         border: 1px solid rgba(255, 255, 255, 0.08);
         backdrop-filter: blur(10px);
@@ -316,13 +475,8 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
         overflow: hidden;
     }
 
-    .header-card {
-        padding: 1.5rem;
-    }
-
-    .swap-card, .transactions-card, .report-container {
-        padding: 1.75rem;
-    }
+    .header-card { padding: 1.5rem; }
+    .swap-card, .transactions-card, .report-container, .cards-card { padding: 1.75rem; }
 
     .user-info {
         display: flex;
@@ -394,7 +548,6 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
         background: rgba(0, 240, 255, 0.05);
     }
 
-    /* ALERTS */
     .alert {
         padding: 1rem;
         margin-bottom: 1.5rem;
@@ -413,7 +566,6 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
     .alert-success { border-left-color: #00F0FF; }
     .alert-success i { color: #00F0FF; }
 
-    /* CARD TITLES */
     .card-title {
         display: flex;
         align-items: center;
@@ -434,7 +586,6 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
         font-weight: 600;
     }
 
-    /* FORMS */
     .form-group {
         margin-bottom: 1.25rem;
     }
@@ -473,7 +624,6 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
         gap: 1rem;
     }
 
-    /* DYNAMIC FIELDS */
     .dynamic-fields {
         background: rgba(0, 240, 255, 0.03);
         border: 1px solid rgba(0, 240, 255, 0.1);
@@ -482,7 +632,6 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
         border-radius: 0px;
     }
 
-    /* BUTTONS */
     .swap-btn {
         width: 100%;
         padding: 1rem;
@@ -510,7 +659,6 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
         cursor: not-allowed;
     }
 
-    /* INFO BOX */
     .info-box {
         background: rgba(0, 240, 255, 0.05);
         border-left: 3px solid #00F0FF;
@@ -528,8 +676,7 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
         font-size: 1rem;
     }
 
-    /* TRANSACTIONS */
-    .transaction-item {
+    .transaction-item, .card-item {
         padding: 1rem 0;
         border-bottom: 1px solid rgba(255, 255, 255, 0.05);
         display: flex;
@@ -538,27 +685,27 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
         transition: all 0.2s;
     }
 
-    .transaction-item:last-child { border-bottom: none; }
-    .transaction-item:hover { transform: translateX(4px); }
+    .transaction-item:last-child, .card-item:last-child { border-bottom: none; }
+    .transaction-item:hover, .card-item:hover { transform: translateX(4px); }
 
-    .transaction-date {
+    .transaction-date, .card-date {
         font-size: 0.7rem;
         color: #606070;
         margin-bottom: 0.25rem;
     }
 
-    .transaction-details {
+    .transaction-details, .card-details {
         font-size: 0.75rem;
         color: #C0C0D0;
     }
 
-    .transaction-amount {
+    .transaction-amount, .card-amount {
         font-weight: 700;
         font-size: 1rem;
         color: #00F0FF;
     }
 
-    .transaction-status {
+    .transaction-status, .card-status {
         font-size: 0.65rem;
         padding: 0.2rem 0.5rem;
         font-weight: 600;
@@ -572,15 +719,20 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
         color: #FFC107;
         border: 1px solid rgba(255, 193, 7, 0.3);
     }
-    .status-completed {
+    .status-completed, .status-processing {
         background: rgba(0, 240, 255, 0.15);
         color: #00F0FF;
         border: 1px solid rgba(0, 240, 255, 0.3);
     }
-    .status-failed {
+    .status-failed, .status-cancelled, .status-expired {
         background: rgba(255, 48, 48, 0.15);
         color: #FF6060;
         border: 1px solid rgba(255, 48, 48, 0.3);
+    }
+    .status-active {
+        background: rgba(0, 240, 255, 0.15);
+        color: #00F0FF;
+        border: 1px solid rgba(0, 240, 255, 0.3);
     }
 
     .empty-state {
@@ -595,7 +747,6 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
         opacity: 0.5;
     }
 
-    /* REPORT */
     .report-container {
         display: none;
     }
@@ -624,11 +775,23 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
         color: #00F0FF;
     }
 
+    .card-suffix {
+        font-family: 'Space Grotesk', monospace;
+        font-size: 0.875rem;
+        font-weight: 600;
+        color: #00F0FF;
+    }
+
+    .card-balance {
+        font-size: 0.75rem;
+        color: #A0A0B0;
+    }
+
     @media (max-width: 640px) {
         body { padding: 1rem; }
         .form-row { grid-template-columns: 1fr; }
         .user-info { flex-direction: column; align-items: flex-start; }
-        .swap-card, .transactions-card { padding: 1.25rem; }
+        .swap-card, .transactions-card, .cards-card { padding: 1.25rem; }
     }
 </style>
 </head>
@@ -702,9 +865,9 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
                     <label><i class="fas fa-building"></i> Source Institution</label>
                     <select name="source_institution" class="form-select" required>
                         <option value="">Select institution</option>
-                        <?php foreach ($institutions as $i): ?>
-                            <option value="<?= htmlspecialchars($i['provider_code'] ?: $i['name']) ?>">
-                                <?= participantIcon($i) ?> <?= htmlspecialchars($i['name']) ?>
+                        <?php foreach ($participants as $p): ?>
+                            <option value="<?= htmlspecialchars($p['provider_code'] ?: $p['name']) ?>">
+                                <?= participantIcon($p) ?> <?= htmlspecialchars($p['name']) ?>
                             </option>
                         <?php endforeach; ?>
                     </select>
@@ -734,9 +897,9 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
                 <label><i class="fas fa-building"></i> Destination Institution</label>
                 <select name="destination_institution" class="form-select" required>
                     <option value="">Select destination institution</option>
-                    <?php foreach ($institutions as $i): ?>
-                        <option value="<?= htmlspecialchars($i['provider_code'] ?: $i['name']) ?>">
-                            <?= participantIcon($i) ?> <?= htmlspecialchars($i['name']) ?>
+                    <?php foreach ($participants as $p): ?>
+                        <option value="<?= htmlspecialchars($p['provider_code'] ?: $p['name']) ?>">
+                            <?= participantIcon($p) ?> <?= htmlspecialchars($p['name']) ?>
                         </option>
                     <?php endforeach; ?>
                 </select>
@@ -754,8 +917,8 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
             <div class="info-box">
                 <i class="fas fa-shield-alt"></i>
                 <div>
-                    <strong>Secure by Design</strong><br>
-                    Fee: Cashout 10 BWP · Deposit 6 BWP
+                    <strong>Powered by SwapService Engine</strong><br>
+                    Fee: Cashout 10 BWP · Deposit/Card 6 BWP
                 </div>
             </div>
         </form>
@@ -769,30 +932,68 @@ if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
         <div id="swapReportContent"></div>
     </div>
 
+    <?php if (!empty($cardAuthorizations)): ?>
+    <div class="cards-card">
+        <div class="card-title">
+            <i class="fas fa-credit-card"></i>
+            <h3>Your Active Cards</h3>
+        </div>
+        <?php foreach ($cardAuthorizations as $card): ?>
+            <?php if ($card['status'] === 'ACTIVE'): ?>
+            <div class="card-item">
+                <div class="card-left">
+                    <div class="card-date">
+                        Issued: <?= date('d M Y', strtotime($card['created_at'])) ?>
+                    </div>
+                    <div class="card-details">
+                        <span class="card-suffix">•••• <?= htmlspecialchars($card['card_suffix']) ?></span>
+                        <span class="card-balance"> • Expires: <?= date('d M Y', strtotime($card['expiry_at'])) ?></span>
+                    </div>
+                </div>
+                <div class="card-right">
+                    <div class="card-amount">
+                        <?= number_format($card['remaining_balance'], 2) ?> BWP
+                    </div>
+                    <span class="card-status status-<?= strtolower($card['status']) ?>">
+                        <?= htmlspecialchars($card['status']) ?>
+                    </span>
+                </div>
+            </div>
+            <?php endif; ?>
+        <?php endforeach; ?>
+    </div>
+    <?php endif; ?>
+
     <div class="transactions-card">
         <div class="card-title">
             <i class="fas fa-clock"></i>
             <h3>Recent Transactions</h3>
         </div>
 
-        <?php if (empty($recentTransactions)): ?>
+        <?php if (empty($userTransactions)): ?>
             <div class="empty-state">
                 <i class="fas fa-history"></i>
                 <p>No transactions yet</p>
                 <p style="font-size: 0.7rem; margin-top: 0.5rem;">Start your first swap above</p>
             </div>
         <?php else: ?>
-            <?php foreach ($recentTransactions as $tx): ?>
-                <?php $statusClass = preg_replace('/[^a-zA-Z0-9_-]/', '-', strtolower($tx['status'] ?? 'unknown')); ?>
+            <?php foreach ($userTransactions as $tx): ?>
+                <?php 
+                    $statusClass = preg_replace('/[^a-zA-Z0-9_-]/', '-', strtolower($tx['status'] ?? 'unknown'));
+                    $sourceDetails = safeJsonDecode($tx['source_details'] ?? '{}');
+                    $destDetails = safeJsonDecode($tx['destination_details'] ?? '{}');
+                    $sourceType = $sourceDetails['asset_type'] ?? $sourceDetails['delivery_mode'] ?? 'UNKNOWN';
+                    $destType = $destDetails['delivery_mode'] ?? $destDetails['asset_type'] ?? 'UNKNOWN';
+                ?>
                 <div class="transaction-item">
                     <div class="transaction-left">
                         <div class="transaction-date">
                             <?= date('d M Y • H:i', strtotime($tx['created_at'])) ?>
                         </div>
                         <div class="transaction-details">
-                            <?= htmlspecialchars($tx['source_type'] ?? '?') ?>
+                            <?= htmlspecialchars($sourceType) ?>
                             <i class="fas fa-arrow-right" style="font-size: 0.6rem; margin: 0 0.25rem;"></i>
-                            <?= htmlspecialchars($tx['destination_type'] ?? '?') ?>
+                            <?= htmlspecialchars($destType) ?>
                         </div>
                     </div>
                     <div class="transaction-right">
@@ -919,6 +1120,36 @@ function displaySwapReport(data) {
     const fee = data.fee || (data.delivery_mode === 'cashout' ? 10.00 : 6.00);
     const netAmount = data.net_amount || (data.amount - fee);
     
+    let cardHtml = '';
+    if (data.card_details) {
+        cardHtml = `
+            <div style="background: rgba(0, 240, 255, 0.1); border-left: 3px solid #00F0FF; padding: 1rem; margin-bottom: 1rem;">
+                <div style="display: flex; align-items: center; gap: 0.75rem;">
+                    <i class="fas fa-credit-card" style="color: #00F0FF;"></i>
+                    <div>
+                        <strong>Card Details</strong><br>
+                        <span style="font-family: monospace;">${data.card_details.card_suffix ? '•••• ' + data.card_details.card_suffix : ''}</span>
+                        ${data.card_details.expiry ? `<br><span style="font-size: 0.7rem;">Expires: ${data.card_details.expiry}</span>` : ''}
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+    
+    let notesHtml = '';
+    if (data.dispensed_notes && Object.keys(data.dispensed_notes).length > 0) {
+        let notesList = [];
+        for (const [note, count] of Object.entries(data.dispensed_notes)) {
+            notesList.push(`${count} × ${note} BWP`);
+        }
+        notesHtml = `
+            <div style="background: rgba(0, 240, 255, 0.05); padding: 1rem; margin-bottom: 1rem;">
+                <strong><i class="fas fa-money-bill"></i> Dispensed Notes:</strong><br>
+                ${notesList.join(' + ')}
+            </div>
+        `;
+    }
+    
     content.innerHTML = `
         <div>
             <div style="background: rgba(0, 240, 255, 0.05); border-left: 3px solid #00F0FF; padding: 1.25rem; margin-bottom: 1.25rem;">
@@ -933,35 +1164,44 @@ function displaySwapReport(data) {
                     </div>
                     <div style="display: flex; justify-content: space-between; padding: 0.5rem 0;">
                         <span style="color: #A0A0B0;">Amount:</span>
-                        <span style="color: #00F0FF;">${data.amount.toFixed(2)} BWP</span>
+                        <span style="color: #00F0FF;">${parseFloat(data.amount).toFixed(2)} BWP</span>
                     </div>
                     <div style="display: flex; justify-content: space-between; padding: 0.5rem 0;">
                         <span style="color: #A0A0B0;">Delivery Mode:</span>
                         <span>${data.delivery_mode.toUpperCase()}</span>
                     </div>
+                    ${data.hold_reference ? `
+                    <div style="display: flex; justify-content: space-between; padding: 0.5rem 0;">
+                        <span style="color: #A0A0B0;">Hold Reference:</span>
+                        <span style="color: #00F0FF;">${data.hold_reference.substring(0, 16)}…</span>
+                    </div>
+                    ` : ''}
                 </div>
             </div>
+            
+            ${cardHtml}
+            ${notesHtml}
             
             <div class="fee-breakdown">
                 <div class="fee-row">
                     <span>Subtotal:</span>
-                    <span>${data.amount.toFixed(2)} BWP</span>
+                    <span>${parseFloat(data.amount).toFixed(2)} BWP</span>
                 </div>
                 <div class="fee-row">
-                    <span>Fee (${data.delivery_mode === 'cashout' ? 'Cashout' : 'Deposit'}):</span>
-                    <span style="color: #FF6060;">-${fee.toFixed(2)} BWP</span>
+                    <span>Fee (${data.delivery_mode === 'cashout' ? 'Cashout' : (data.delivery_mode === 'card_load' ? 'Card Load' : 'Deposit')}):</span>
+                    <span style="color: #FF6060;">-${parseFloat(fee).toFixed(2)} BWP</span>
                 </div>
                 <div class="fee-row total">
                     <span>Net Amount:</span>
-                    <span>${netAmount.toFixed(2)} BWP</span>
+                    <span>${parseFloat(netAmount).toFixed(2)} BWP</span>
                 </div>
             </div>
             
             <div class="info-box" style="margin-top: 1.25rem;">
                 <i class="fas fa-chart-line"></i>
                 <div>
-                    <strong>Settlement Queue Updated</strong><br>
-                    This transaction has been added to the settlement queue for netting.
+                    <strong>SwapService Engine</strong><br>
+                    This transaction has been processed through the SwapService engine.
                 </div>
             </div>
         </div>
@@ -992,9 +1232,9 @@ async function executeSwap(formData) {
             displaySwapReport(data);
             document.getElementById('swapForm').reset();
             updateDynamicFields();
-            setTimeout(() => location.reload(), 2000);
+            setTimeout(() => location.reload(), 3000);
         } else {
-            alert('Failed: ' + (data.message || 'Unknown error'));
+            alert('❌ Failed: ' + (data.message || 'Unknown error'));
         }
     } catch (error) {
         console.error('Swap error:', error);
@@ -1011,11 +1251,25 @@ document.getElementById('swapForm').addEventListener('submit', async function(e)
     const requiredFields = dynamicContainer.querySelectorAll('[required]');
     let isValid = true;
     
-    requiredFields.forEach(field => { if (!field.value.trim()) { field.style.borderColor = '#FF3030'; isValid = false; } });
-    if (!destValue.value.trim()) { destValue.style.borderColor = '#FF3030'; isValid = false; }
-    if (!amountInput.value || parseFloat(amountInput.value) <= 0) { amountInput.style.borderColor = '#FF3030'; isValid = false; }
+    requiredFields.forEach(field => { 
+        if (!field.value.trim()) { 
+            field.style.borderColor = '#FF3030'; 
+            isValid = false; 
+        } 
+    });
+    if (!destValue.value.trim()) { 
+        destValue.style.borderColor = '#FF3030'; 
+        isValid = false; 
+    }
+    if (!amountInput.value || parseFloat(amountInput.value) <= 0) { 
+        amountInput.style.borderColor = '#FF3030'; 
+        isValid = false; 
+    }
     
-    if (!isValid) { alert('Please fill in all required fields'); return; }
+    if (!isValid) { 
+        alert('Please fill in all required fields'); 
+        return; 
+    }
     
     await executeSwap(new FormData(this));
 });
