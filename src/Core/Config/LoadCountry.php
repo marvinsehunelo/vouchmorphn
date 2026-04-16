@@ -1,18 +1,16 @@
 <?php
 declare(strict_types=1);
 
-if (!defined('SYSTEM_COUNTRY')) {
-    require_once __DIR__ . '/SystemCountry.php';
-}
+$countryMeta = require __DIR__ . '/SystemCountry.php';
 
-$country = SYSTEM_COUNTRY;
+$country = defined('SYSTEM_COUNTRY')
+    ? SYSTEM_COUNTRY
+    : ($countryMeta['name'] ?? 'Botswana');
+
 $countrySlug = defined('SYSTEM_COUNTRY_SLUG')
     ? SYSTEM_COUNTRY_SLUG
-    : strtolower($country);
+    : ($countryMeta['slug'] ?? strtolower($country));
 
-/* -------------------------------------------------------
-   Paths - aligned to current file locations
-------------------------------------------------------- */
 $configFile       = dirname(__DIR__, 3) . "/src/Core/Config/Countries/{$country}/config.php";
 $participantsFile = dirname(__DIR__, 3) . "/config/countries/{$countrySlug}/participants.json";
 $feesFile         = dirname(__DIR__, 3) . "/config/countries/{$countrySlug}/fees.json";
