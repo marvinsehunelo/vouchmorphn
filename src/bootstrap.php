@@ -9,27 +9,25 @@ if (getenv('DATABASE_URL')) {
     error_log("[BOOTSTRAP DEBUG] DATABASE_URL value: " . $masked);
 }
 // ==
+
 /**
  * GLOBAL SYSTEM BOOTSTRAP
  * Banking-grade, multi-country, regulator-safe
  */
 
 /* ======================================================
- * 0️⃣ AUTOLOADER
+ * 0️⃣ AUTOLOADER - UPDATED FOR DDD STRUCTURE
  * ====================================================== */
 
 $projectRoot = dirname(__DIR__);
 
 spl_autoload_register(function ($class) use ($projectRoot) {
     $prefixes = [
-        'ADMIN_LAYER\\'            => $projectRoot . '/src/ADMIN_LAYER/', 
-        'DFSP_ADAPTER_LAYER\\'     => $projectRoot . '/src/DFSP_ADAPTER_LAYER/',
-        'BUSINESS_LOGIC_LAYER\\'   => $projectRoot . '/src/BUSINESS_LOGIC_LAYER/',
-        'DATA_PERSISTENCE_LAYER\\' => $projectRoot . '/src/DATA_PERSISTENCE_LAYER/',
-        'INTEGRATION_LAYER\\'      => $projectRoot . '/src/INTEGRATION_LAYER/',
-        'SECURITY_LAYER\\'         => $projectRoot . '/src/SECURITY_LAYER/',
-        'CORE_CONFIG\\'            => $projectRoot . '/src/CORE_CONFIG/',
-        'APP_LAYER\\'              => $projectRoot . '/src/APP_LAYER/'
+        'Application\\' => $projectRoot . '/src/Application/',
+        'Core\\'        => $projectRoot . '/src/Core/',
+        'Domain\\'      => $projectRoot . '/src/Domain/',
+        'Infrastructure\\' => $projectRoot . '/src/Infrastructure/',
+        'Security\\'    => $projectRoot . '/src/Security/',
     ];
 
     foreach ($prefixes as $prefix => $baseDir) {
@@ -52,23 +50,23 @@ define('APP_ROOT', $projectRoot);
 use Dotenv\Dotenv;
 use Dotenv\Repository\RepositoryBuilder;
 use Dotenv\Repository\Adapter\PutenvAdapter;
-use APP_LAYER\utils\SessionManager;
-use DATA_PERSISTENCE_LAYER\config\DBConnection;
-use SECURITY_LAYER\Encryption\KeyVault;
-use SECURITY_LAYER\Encryption\TokenEncryptor;
-use BUSINESS_LOGIC_LAYER\services\SwapService;
+use Application\utils\SessionManager;
+use Infrastructure\config\DBConnection;
+use Security\Encryption\KeyVault;
+use Security\Encryption\TokenEncryptor;
+use Domain\services\SwapService;
 
 /* ======================================================
- * 1️⃣ RESOLVE COUNTRY
+ * 1️⃣ RESOLVE COUNTRY - UPDATED PATH
  * ====================================================== */
 // DEBUG: Check path
 error_log("[DEBUG] APP_ROOT = " . APP_ROOT);
-$countryPath = APP_ROOT . '/src/CORE_CONFIG/system_country.php';
+$countryPath = APP_ROOT . '/src/Core/Config/SystemCountry.php';
 error_log("[DEBUG] Looking for: " . $countryPath);
 error_log("[DEBUG] File exists: " . (file_exists($countryPath) ? 'YES' : 'NO'));
 error_log("[DEBUG] File readable: " . (is_readable($countryPath) ? 'YES' : 'NO'));
 
-$country = require APP_ROOT . '/src/CORE_CONFIG/system_country.php';
+$country = require APP_ROOT . '/src/Core/Config/SystemCountry.php';
 
 if (!$country || !defined('SYSTEM_COUNTRY')) {
     throw new RuntimeException('SYSTEM_COUNTRY not resolved');
@@ -78,13 +76,13 @@ $GLOBALS['country'] = SYSTEM_COUNTRY;
 error_log("[BOOTSTRAP] Country → " . SYSTEM_COUNTRY);
 
 /* ======================================================
- * 2️⃣ LOAD ENV (LOCAL ONLY)
+ * 2️⃣ LOAD ENV (LOCAL ONLY) - UPDATED PATH
  * ====================================================== */
 
 if (!getenv('DATABASE_URL')) {
 
     $envFile = ".env_" . SYSTEM_COUNTRY;
-    $envPath = APP_ROOT . "/src/CORE_CONFIG/countries/" . SYSTEM_COUNTRY . "/" . $envFile;
+    $envPath = APP_ROOT . "/src/Core/Config/Countries/" . SYSTEM_COUNTRY . "/" . $envFile;
 
     if (!file_exists($envPath)) {
         throw new RuntimeException("Missing env file: {$envPath}");
@@ -100,14 +98,14 @@ if (!getenv('DATABASE_URL')) {
 }
 
 /* ======================================================
- * 3️⃣ LOAD COUNTRY CONFIG + PARTICIPANTS
+ * 3️⃣ LOAD COUNTRY CONFIG + PARTICIPANTS - UPDATED PATHS
  * ====================================================== */
 
-$configFile = APP_ROOT . "/src/CORE_CONFIG/countries/" . SYSTEM_COUNTRY . "/config_" . SYSTEM_COUNTRY . ".php";
-$participantsFile = APP_ROOT . "/src/CORE_CONFIG/countries/" . SYSTEM_COUNTRY . "/participants_" . SYSTEM_COUNTRY . ".json";
+$configFile = APP_ROOT . "/src/Core/Config/Countries/" . SYSTEM_COUNTRY . "/config_" . SYSTEM_COUNTRY . ".php";
+$participantsFile = APP_ROOT . "/config/countries/" . strtolower(SYSTEM_COUNTRY) . "/participants.json";
 
 if (!file_exists($configFile) || !file_exists($participantsFile)) {
-    throw new RuntimeException("Missing country configuration files");
+    throw new RuntimeException("Missing country configuration files: config=" . $configFile . " participants=" . $participantsFile);
 }
 
 $countryConfig = require $configFile;
@@ -170,11 +168,12 @@ if (!$pdo instanceof PDO) {
     error_log("[DB_DEBUG] DBConnection::getConnection() returned null");
     throw new RuntimeException("Failed to obtain PDO instance");
 }
+
 /* ======================================================
- * 7️⃣ LOAD MOJALOOP CONFIG
+ * 7️⃣ LOAD MOJALOOP CONFIG - UPDATED PATH
  * ====================================================== */
 
-$mojaloopConfigPath = APP_ROOT . '/src/CORE_CONFIG/mojaloop.php';
+$mojaloopConfigPath = APP_ROOT . '/src/Core/Config/mojaloop.php';
 $mojaloopConfig = file_exists($mojaloopConfigPath)
     ? require $mojaloopConfigPath
     : [];
@@ -190,9 +189,8 @@ $swapServiceConfig = [
     'environment'    => getenv('APP_ENV') ?: 'production'
 ];
 
-// FIXED: Changed $primaryDbConnection to $pdo
 $swapService = new SwapService(
-    $pdo,  // Fixed: using the valid PDO connection from above
+    $pdo,
     $mojaloopConfig,
     SYSTEM_COUNTRY,
     $appKey,
@@ -209,8 +207,6 @@ unset($countryConfig['security']['encryption_key']);
 
 $GLOBALS['config'] = $countryConfig;
 $GLOBALS['participants'] = $participants;
-// FIXED: Removed undefined $databases variable
-// If you need databases in global context, use:
 $GLOBALS['databases'] = ['primary' => $pdo];
 $GLOBALS['swapService'] = $swapService;
 $GLOBALS['security'] = [
@@ -219,10 +215,10 @@ $GLOBALS['security'] = [
 ];
 
 /* ======================================================
- * 🔟 ENSURE LOG DIRECTORY
+ * 🔟 ENSURE LOG DIRECTORY - UPDATED PATH
  * ====================================================== */
 
-$logDir = APP_ROOT . '/src/APP_LAYER/logs';
+$logDir = APP_ROOT . '/src/Application/logs';
 $logFile = $logDir . '/swap_audit.log';
 
 if (!is_dir($logDir)) {
