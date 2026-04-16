@@ -1,3 +1,4 @@
+cat > complete_migrate_fixed.py << 'EOF'
 #!/usr/bin/env python3
 # complete_migrate.py - Handles ALL 373 files
 
@@ -12,7 +13,6 @@ PROJECT_ROOT = Path.cwd()
 # Complete mapping for EVERY file
 MIGRATION_MAP = {
     # === ROOT LEVEL FILES ===
-    ".env": ".env",
     "Dockerfile": "Dockerfile",
     "docker-compose.yml": "docker-compose.yml",
     "composer.json": "composer.json",
@@ -446,19 +446,19 @@ def update_php_paths(file_path):
     
     # Replace old path references
     replacements = [
-        (r"src/ADMIN_LAYER/", "src/Application/Admin/"),
-        (r"src/APP_LAYER/", "src/Application/"),
-        (r"src/BUSINESS_LOGIC_LAYER/", "src/Domain/"),
-        (r"src/CORE_CONFIG/", "src/Core/Config/"),
-        (r"src/DATA_PERSISTENCE_LAYER/", "src/Core/Database/"),
-        (r"src/DFSP_ADAPTER_LAYER/", "src/Infrastructure/Mojaloop/"),
-        (r"src/FACTORY_LAYER/", "src/Core/Factories/"),
-        (r"src/INTEGRATION_LAYER/", "src/Infrastructure/"),
-        (r"src/SECURITY_LAYER/", "src/Security/"),
-        (r"src/SCHEME_LAYER/", "src/Core/Schemes/"),
-        (r"src/SYSTEM_DAEMONS/", "scripts/daemons/"),
-        (r"src/TESTS/", "tests/"),
-        (r"src/MANAGEMENT/", "scripts/management/"),
+        ("src/ADMIN_LAYER/", "src/Application/Admin/"),
+        ("src/APP_LAYER/", "src/Application/"),
+        ("src/BUSINESS_LOGIC_LAYER/", "src/Domain/"),
+        ("src/CORE_CONFIG/", "src/Core/Config/"),
+        ("src/DATA_PERSISTENCE_LAYER/", "src/Core/Database/"),
+        ("src/DFSP_ADAPTER_LAYER/", "src/Infrastructure/Mojaloop/"),
+        ("src/FACTORY_LAYER/", "src/Core/Factories/"),
+        ("src/INTEGRATION_LAYER/", "src/Infrastructure/"),
+        ("src/SECURITY_LAYER/", "src/Security/"),
+        ("src/SCHEME_LAYER/", "src/Core/Schemes/"),
+        ("src/SYSTEM_DAEMONS/", "scripts/daemons/"),
+        ("src/TESTS/", "tests/"),
+        ("src/MANAGEMENT/", "scripts/management/"),
     ]
     
     for old, new in replacements:
@@ -484,18 +484,22 @@ def migrate_file(src, dst):
     
     dst_path = PROJECT_ROOT / dst
     
-    # Skip if source and destination are the same file
-    if src.exists() and src.resolve() == dst_path.resolve():
+    # Skip if source and destination are the same (no move needed)
+    if str(src) == str(dst_path):
         print(f"⏭️ Skipping (same location): {src}")
         return
     
     dst_path.parent.mkdir(parents=True, exist_ok=True)
     
     if src.exists():
-        shutil.copy2(src, dst_path)
-        if dst_path.suffix == '.php':
-            update_php_paths(dst_path)
-        print(f"📦 Migrated: {src.name} -> {dst}")
+        # If source and destination are different files, copy
+        if str(src) != str(dst_path):
+            shutil.copy2(src, dst_path)
+            if dst_path.suffix == '.php':
+                update_php_paths(dst_path)
+            print(f"📦 Migrated: {src.name} -> {dst}")
+        else:
+            print(f"⏭️ Skipping (same file): {src}")
     else:
         print(f"⚠️ Source not found: {src}")
 
@@ -555,3 +559,4 @@ backups/
 
 if __name__ == '__main__':
     main()
+EOF
