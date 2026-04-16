@@ -1,0 +1,23 @@
+# Storage directory
+storage/logs/*.log
+storage/cache/*
+storage/sessions/*
+storage/uploads/temp/*
+
+# Environment files
+.env
+.env.*.local
+
+# Debug files
+debug_*.php
+*_debug.log
+
+# Test files
+test*.php
+*_test.php
+
+# Backups
+*.backup
+*.bak
+*.tar
+backups/
