@@ -4,12 +4,14 @@ error_reporting(E_ALL);
 ini_set('display_errors', 1);
 ini_set('display_startup_errors', 1);
 
-require_once __DIR__ . '/../../src/APP_LAYER/utils/SessionManager.php';
-require_once __DIR__ . '/../../src/DATA_PERSISTENCE_LAYER/config/DBConnection.php';
-$config = require __DIR__ . '/../../src/CORE_CONFIG/load_country.php';
+// CORRECTED PATHS FOR DDD STRUCTURE
+require_once __DIR__ . '/../../src/Application/Utils/SessionManager.php';
+require_once __DIR__ . '/../../src/Core/Database/DBConnection.php';
+require_once __DIR__ . '/../../src/Core/Config/LoadCountry.php';
 
-use APP_LAYER\utils\SessionManager;
-use DATA_PERSISTENCE_LAYER\config\DBConnection;
+use Application\Utils\SessionManager;
+use Core\Database\DBConnection;
+use Core\Config\LoadCountry;
 
 SessionManager::start();
 
@@ -22,7 +24,7 @@ if (SessionManager::isLoggedIn()) {
 // --------------------------------------------------
 // 2️⃣ Load Country & Config
 // --------------------------------------------------
-$config = require __DIR__ . '/../../src/CORE_CONFIG/load_country.php';
+$config = LoadCountry::getConfig();
 
 if (!defined('SYSTEM_COUNTRY')) {
     define('SYSTEM_COUNTRY', $config['country'] ?? 'BW');
@@ -212,7 +214,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         overflow-x: hidden;
     }
 
-    /* GRID BACKGROUND - SAME AS LANDING PAGE */
     body::before {
         content: '';
         position: fixed;
@@ -228,7 +229,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         z-index: 0;
     }
 
-    /* CUSTOM CURSOR - SAME AS LANDING PAGE */
     .cursor {
         width: 8px;
         height: 8px;
@@ -254,7 +254,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         .cursor, .cursor-follower { display: none; }
     }
 
-    /* LOGIN CARD - SHARP EDGES, 0 BORDER-RADIUS */
     .login-container {
         position: relative;
         z-index: 2;
@@ -267,7 +266,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
     }
 
-    /* HEADER */
     .login-header {
         padding: 2rem 2rem 1.5rem;
         text-align: center;
@@ -305,7 +303,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         color: #00F0FF;
     }
 
-    /* TABS */
     .login-tabs {
         display: flex;
         border-bottom: 1px solid rgba(255, 255, 255, 0.08);
@@ -339,7 +336,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         background: rgba(255, 255, 255, 0.03);
     }
 
-    /* FORM */
     .login-form {
         padding: 2rem;
     }
@@ -412,7 +408,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         text-align: center;
     }
 
-    /* BUTTON */
     .login-btn {
         width: 100%;
         padding: 1rem;
@@ -435,7 +430,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         box-shadow: 0 10px 30px -10px rgba(0, 240, 255, 0.4);
     }
 
-    /* ERROR MESSAGE */
     .error-message {
         background: rgba(255, 48, 48, 0.1);
         border-left: 3px solid #FF3030;
@@ -445,7 +439,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         color: #FF6060;
     }
 
-    /* SECURITY NOTICE */
     .security-notice {
         margin-top: 1.5rem;
         padding-top: 1rem;
@@ -455,7 +448,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         text-align: center;
     }
 
-    /* FOOTER */
     .login-footer {
         padding: 1.25rem 2rem;
         border-top: 1px solid rgba(255, 255, 255, 0.05);
@@ -481,7 +473,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         color: #00F0FF;
     }
 
-    /* ANIMATIONS */
     @keyframes fadeInUp {
         from {
             opacity: 0;
@@ -493,7 +484,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
-    /* RESPONSIVE */
     @media (max-width: 640px) {
         .login-container {
             margin: 1rem;
@@ -615,16 +605,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 </div>
 
 <script>
-    // Custom cursor
     const cursor = document.querySelector('.cursor');
     const follower = document.querySelector('.cursor-follower');
     
-    document.addEventListener('mousemove', (e) => {
-        cursor.style.left = e.clientX + 'px';
-        cursor.style.top = e.clientY + 'px';
-        follower.style.left = e.clientX - 16 + 'px';
-        follower.style.top = e.clientY - 16 + 'px';
-    });
+    if (cursor && follower) {
+        document.addEventListener('mousemove', (e) => {
+            cursor.style.left = e.clientX + 'px';
+            cursor.style.top = e.clientY + 'px';
+            follower.style.left = e.clientX - 16 + 'px';
+            follower.style.top = e.clientY - 16 + 'px';
+        });
+    }
     
     // Tab switching
     document.querySelectorAll('.tab-btn').forEach(button => {
