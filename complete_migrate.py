@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# complete_migrate.py - Handles ALL 373 files
+
 import os
 import re
 import shutil
@@ -480,6 +483,12 @@ def migrate_file(src, dst):
         return
     
     dst_path = PROJECT_ROOT / dst
+    
+    # Skip if source and destination are the same file
+    if src.exists() and src.resolve() == dst_path.resolve():
+        print(f"⏭️ Skipping (same location): {src}")
+        return
+    
     dst_path.parent.mkdir(parents=True, exist_ok=True)
     
     if src.exists():
