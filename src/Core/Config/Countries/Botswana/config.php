@@ -1,7 +1,4 @@
 <?php
-
-require_once dirname(__DIR__, 2) . '/src/bootstrap.php';
-
 /**
  * config_BW.php - Regulatory Compliant Sandbox 2026
  * UPDATED FOR RAILWAY DEPLOYMENT with function guards
