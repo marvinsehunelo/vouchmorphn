@@ -1,5 +1,5 @@
 <?php
-namespace Core/Database;
+namespace Core\Database;
 
 use PDO;
 use PDOException;
