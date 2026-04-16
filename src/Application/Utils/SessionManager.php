@@ -1,9 +1,5 @@
 <?php
-
-require_once dirname(__DIR__, 2) . '/src/bootstrap.php';
-
-// APP_LAYER/utils/session_manager.php
-namespace APP_LAYER\utils;
+namespace Application\Utils;
 
 /**
  * SessionManager
