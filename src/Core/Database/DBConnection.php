@@ -1,8 +1,5 @@
 <?php
-
-require_once dirname(__DIR__, 2) . '/src/bootstrap.php';
-
-namespace DATA_PERSISTENCE_LAYER\config;
+namespace Core/Database;
 
 use PDO;
 use PDOException;
