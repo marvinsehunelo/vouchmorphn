@@ -17,8 +17,8 @@ use Domain\Helpers\SwapStatusResolver;
 
 /**
  * SwapService - ISO20022 & FSPIOP Compliant
- * Multi-country aware, dynamic ATM denomination loading
- * Supports all wallet_types: ACCOUNT, VOUCHER, E-WALLET, WALLET, CARD, ATM
+ * Multi-country aware, dynamic configuration loading
+ * ALL fees and rates are loaded from country configuration files - NO HARDCODING
  */
 class SwapService
 {
@@ -105,7 +105,8 @@ class SwapService
             $this->loadCountryFees();
             error_log("[SwapService] Country fees loaded successfully");
         } catch (\Exception $e) {
-            error_log("[SwapService] WARNING loading country fees: " . $e->getMessage());
+            error_log("[SwapService] ERROR loading country fees: " . $e->getMessage());
+            throw new RuntimeException("Failed to load country fees: " . $e->getMessage());
         }
         
         try {
@@ -119,7 +120,8 @@ class SwapService
             $this->loadCardConfig();
             error_log("[SwapService] Card config loaded successfully");
         } catch (\Exception $e) {
-            error_log("[SwapService] WARNING loading card config: " . $e->getMessage());
+            error_log("[SwapService] ERROR loading card config: " . $e->getMessage());
+            throw new RuntimeException("Failed to load card config: " . $e->getMessage());
         }
         
         try {
@@ -139,7 +141,6 @@ class SwapService
         
         // Initialize Card Service
         try {
-            // Check if VouchMorph is in participants
             if (isset($this->participants['vouchmorph'])) {
                 $this->cardService = new CardService(
                     $this->swapDB, 
@@ -147,24 +148,13 @@ class SwapService
                     $this->participants['vouchmorph']
                 );
                 error_log("[SwapService] ✅ Card Service initialized successfully");
-                
-                // DEBUG: Log available methods
-                if ($this->cardService) {
-                    error_log("[DEBUG] CardService initialized with methods: " . implode(', ', get_class_methods($this->cardService)));
-                }
             } else {
-                // Fallback to default config
                 $this->cardService = new CardService(
                     $this->swapDB, 
                     $this->countryCode, 
                     []
                 );
                 error_log("[SwapService] ✅ Card Service initialized with default config");
-                
-                // DEBUG: Log available methods
-                if ($this->cardService) {
-                    error_log("[DEBUG] CardService initialized with methods: " . implode(', ', get_class_methods($this->cardService)));
-                }
             }
         } catch (\Exception $e) {
             error_log("[SwapService] ❌ Card Service initialization failed: " . $e->getMessage());
@@ -175,117 +165,176 @@ class SwapService
         error_log("Card service status: " . ($this->cardService ? "ACTIVE" : "NOT AVAILABLE"));
     }
     
+    /**
+     * Get country data directory path
+     */
+    private function getCountryDataDir(): string
+    {
+        $possiblePaths = [
+            __DIR__ . "/../../../config/countries/" . strtolower($this->countryCode),
+            __DIR__ . "/../../config/countries/" . strtolower($this->countryCode),
+            __DIR__ . "/../config/countries/" . strtolower($this->countryCode),
+            getenv('APP_ROOT') . "/config/countries/" . strtolower($this->countryCode),
+            __DIR__ . "/../../../../config/countries/" . strtolower($this->countryCode)
+        ];
+        
+        foreach ($possiblePaths as $path) {
+            if (is_dir($path)) {
+                error_log("[SwapService] Using country data dir: {$path}");
+                return $path;
+            }
+        }
+        
+        $fallback = __DIR__ . "/../../../config/countries/" . strtolower($this->countryCode);
+        error_log("[SwapService] WARNING: Using fallback country data dir: {$fallback}");
+        return $fallback;
+    }
+    
+    /**
+     * Load card configuration from country config - NO HARDCODING
+     */
     private function loadCardConfig(): void
     {
-        $basePath = __DIR__ . "/../../CORE_CONFIG/countries/{$this->countryCode}";
-        $cardFile = "{$basePath}/card_config_{$this->countryCode}.json";
+        $dataDir = $this->getCountryDataDir();
+        $cardFile = $dataDir . '/cards.json';
         
-        if (file_exists($cardFile)) {
-            $this->cardConfig = json_decode(file_get_contents($cardFile), true);
-            if (json_last_error() !== JSON_ERROR_NONE) {
-                throw new RuntimeException("Invalid JSON in card config file: {$cardFile}");
-            }
-            error_log("[SwapService] Card config loaded from: {$cardFile}");
-        } else {
-            // Default card configuration
-            $this->cardConfig = [
-                'message_based_issuers' => ['VOUCHMORPH', 'VOUCHMORPH_INTERNAL'],
-                'default_card_type' => 'message_based',
-                'authorization_expiry_days' => 30,
-                'fees' => [
-                    'card_issuance' => ['type' => 'fixed', 'amount' => 5.00],
-                    'card_load' => ['type' => 'percentage', 'amount' => 0.01]
-                ]
-            ];
-            $this->logEvent('CARD_CONFIG', 'WARNING', ['message' => "Card config file missing for {$this->countryCode}, using defaults"]);
+        if (!file_exists($cardFile)) {
+            throw new RuntimeException("Card config file missing for country {$this->countryCode}: {$cardFile}");
         }
+        
+        $content = file_get_contents($cardFile);
+        if ($content === false) {
+            throw new RuntimeException("Failed to read card config file: {$cardFile}");
+        }
+        
+        $this->cardConfig = json_decode($content, true);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            throw new RuntimeException("Invalid JSON in card config file: {$cardFile} - " . json_last_error_msg());
+        }
+        
+        if (!isset($this->cardConfig['message_based_issuers'])) {
+            throw new RuntimeException("Card config missing 'message_based_issuers' in {$cardFile}");
+        }
+        
+        if (!isset($this->cardConfig['default_card_type'])) {
+            throw new RuntimeException("Card config missing 'default_card_type' in {$cardFile}");
+        }
+        
+        error_log("[SwapService] Card config loaded from: {$cardFile}");
     }
 
+    /**
+     * Load country fees from configuration - NO HARDCODING, MUST load from file
+     */
     private function loadCountryFees(): void
     {
-        $basePath = __DIR__ . "/../../CORE_CONFIG/countries/{$this->countryCode}";
+        $dataDir = $this->getCountryDataDir();
         
-        $feesFile = "{$basePath}/fees_{$this->countryCode}.json";
-        if (file_exists($feesFile)) {
-            $this->feesConfig = json_decode(file_get_contents($feesFile), true);
-        } else {
-            $this->feesConfig = [
-                'fees' => [
-                    'account_issuance' => ['amount' => 0.50],
-                    'cross_border_markup' => 0.02,
-                    'cashout_fee_percentage' => 0.02,
-                    'cashout_fee_fixed' => 2.00,
-                    'CASHOUT_SWAP_FEE' => [
-                        'total_amount' => 10.00,
-                        'split' => ['source_participant' => 2.00, 'vouchmorph' => 4.00, 'destination_participant' => 4.00],
-                        'currency' => 'BWP'
-                    ],
-                    'DEPOSIT_SWAP_FEE' => [
-                        'total_amount' => 6.00,
-                        'split' => ['source_participant' => 1.20, 'vouchmorph' => 2.40, 'destination_participant' => 2.40],
-                        'currency' => 'BWP'
-                    ],
-                    'CARD_LOAD_FEE' => [
-                        'total_amount' => 6.00,
-                        'split' => ['source_participant' => 1.20, 'vouchmorph' => 2.40, 'destination_participant' => 2.40],
-                        'currency' => 'BWP'
-                    ],
-                    'CARD_ISSUANCE_FEE' => [
-                        'total_amount' => 15.00,
-                        'split' => ['source_participant' => 3.00, 'vouchmorph' => 9.00, 'destination_participant' => 3.00],
-                        'currency' => 'BWP'
-                    ]
-                ],
-                'regulatory' => [
-                    'vat_rate' => 0.14
-                ]
-            ];
-            $this->logEvent('LOAD_FEES', 'WARNING', ['message' => "Fees file missing for {$this->countryCode}, using defaults"]);
+        $feesFile = $dataDir . '/fees.json';
+        if (!file_exists($feesFile)) {
+            throw new RuntimeException("Fees file missing for country {$this->countryCode}: {$feesFile}");
         }
-
-        $atmFile = "{$basePath}/atm_notes_{$this->countryCode}.json";
-        if (file_exists($atmFile)) {
-            $this->atmNotes = json_decode(file_get_contents($atmFile), true);
-            if (json_last_error() !== JSON_ERROR_NONE) {
-                throw new RuntimeException("Invalid JSON in ATM notes file: {$atmFile}");
+        
+        $content = file_get_contents($feesFile);
+        if ($content === false) {
+            throw new RuntimeException("Failed to read fees file: {$feesFile}");
+        }
+        
+        $this->feesConfig = json_decode($content, true);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            throw new RuntimeException("Invalid JSON in fees file: {$feesFile} - " . json_last_error_msg());
+        }
+        
+        $requiredFees = ['CASHOUT_SWAP_FEE', 'DEPOSIT_SWAP_FEE', 'CARD_LOAD_FEE', 'CARD_ISSUANCE_FEE'];
+        foreach ($requiredFees as $requiredFee) {
+            if (!isset($this->feesConfig['fees'][$requiredFee])) {
+                throw new RuntimeException("Missing required fee configuration: {$requiredFee} in {$feesFile}");
             }
-            $this->logEvent('LOAD_ATM_NOTES', 'SUCCESS', ['file' => $atmFile]);
-        } else {
-            throw new RuntimeException("ATM notes file missing for country {$this->countryCode}");
+            
+            $fee = $this->feesConfig['fees'][$requiredFee];
+            if (!isset($fee['total_amount'])) {
+                throw new RuntimeException("Fee {$requiredFee} missing 'total_amount' in {$feesFile}");
+            }
+            
+            if (!isset($fee['split'])) {
+                throw new RuntimeException("Fee {$requiredFee} missing 'split' configuration in {$feesFile}");
+            }
         }
+        
+        if (!isset($this->feesConfig['regulatory']['vat_rate'])) {
+            throw new RuntimeException("Missing 'regulatory.vat_rate' in {$feesFile}");
+        }
+        
+        error_log("[SwapService] Fees loaded from: {$feesFile}");
+        
+        $atmFile = $dataDir . '/atm_notes.json';
+        if (!file_exists($atmFile)) {
+            throw new RuntimeException("ATM notes file missing for country {$this->countryCode}: {$atmFile}");
+        }
+        
+        $atmContent = file_get_contents($atmFile);
+        if ($atmContent === false) {
+            throw new RuntimeException("Failed to read ATM notes file: {$atmFile}");
+        }
+        
+        $this->atmNotes = json_decode($atmContent, true);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            throw new RuntimeException("Invalid JSON in ATM notes file: {$atmFile} - " . json_last_error_msg());
+        }
+        
+        if (!isset($this->atmNotes['BWP']) || empty($this->atmNotes['BWP'])) {
+            throw new RuntimeException("ATM notes missing BWP denominations in {$atmFile}");
+        }
+        
+        error_log("[SwapService] ATM notes loaded from: {$atmFile}");
     }
 
+    /**
+     * Initialize SMS service from country config - NO HARDCODING
+     */
     private function initSmsService(): void
     {
-        $configPath = __DIR__ . "/../../CORE_CONFIG/countries/{$this->countryCode}/communication_config_{$this->countryCode}.json";
+        $dataDir = $this->getCountryDataDir();
+        $configPath = $dataDir . '/communication.json';
         
-        $smsConfig = [];
-        if (file_exists($configPath)) {
-            $fullConfig = json_decode(file_get_contents($configPath), true);
-            $smsConfig = $fullConfig['sms_gateway'] ?? [];
-            error_log("[SwapService] Loaded SMS config for {$this->countryCode}");
-        } else {
-            $smsConfig = [
-                'base_url' => 'http://localhost/CazaCOm',
-                'api_key' => 'SACCUS_INTERNAL_KEY_2025',
-                'api_path' => '/backend/routes/api.php',
-                'sms_endpoint' => '?path=sms/send',
-                'enabled' => true
-            ];
-            error_log("[SwapService] Using default SMS config for {$this->countryCode}");
+        if (!file_exists($configPath)) {
+            error_log("[SwapService] Communication config missing for {$this->countryCode}: {$configPath}");
+            $this->smsService = null;
+            return;
+        }
+        
+        $content = file_get_contents($configPath);
+        if ($content === false) {
+            error_log("[SwapService] Failed to read communication config: {$configPath}");
+            $this->smsService = null;
+            return;
+        }
+        
+        $fullConfig = json_decode($content, true);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            error_log("[SwapService] Invalid JSON in communication config: " . json_last_error_msg());
+            $this->smsService = null;
+            return;
+        }
+        
+        $smsConfig = $fullConfig['sms_gateway'] ?? $fullConfig;
+        
+        if (empty($smsConfig) || !($smsConfig['enabled'] ?? false)) {
+            error_log("[SwapService] SMS service disabled in config for {$this->countryCode}");
+            $this->smsService = null;
+            return;
         }
         
         $this->smsService = new SmsNotificationService($this->swapDB, $smsConfig);
+        error_log("[SwapService] SMS Service initialized from: {$configPath}");
     }
 
     private function getCardType(array $destination): string
     {
-        // Check if card_type is explicitly provided
         if (isset($destination['card_type'])) {
             return $destination['card_type'];
         }
         
-        // Check institution against message-based issuers list
         $institution = $destination['institution'] ?? '';
         $messageBasedIssuers = $this->cardConfig['message_based_issuers'] ?? ['VOUCHMORPH'];
         
@@ -293,7 +342,6 @@ class SwapService
             return 'message_based';
         }
         
-        // Default from config
         return $this->cardConfig['default_card_type'] ?? 'balance_based';
     }
 
@@ -301,7 +349,6 @@ class SwapService
     {
         $deliveryMode = $destination['delivery_mode'] ?? '';
         
-        // Only card operations might skip debit
         if (!in_array($deliveryMode, ['card_load', 'card'])) {
             return false;
         }
@@ -309,13 +356,16 @@ class SwapService
         $cardType = $this->getCardType($destination);
         $institution = $destination['institution'] ?? '';
         
-        // Skip debit for message-based cards from VouchMorph
         return ($cardType === 'message_based' && strtoupper($institution) === 'VOUCHMORPH');
     }
 
     private function getDispensableAmount(float $amount, string $currency): array
     {
-        $denominations = $this->atmNotes[$currency] ?? throw new RuntimeException("No ATM denominations for currency $currency");
+        $denominations = $this->atmNotes[$currency] ?? null;
+        if (!$denominations) {
+            throw new RuntimeException("No ATM denominations for currency {$currency} in country {$this->countryCode}");
+        }
+        
         rsort($denominations);
 
         $remainingCents = (int)round($amount * 100);
@@ -664,6 +714,9 @@ class SwapService
         return $map[$transactionType] ?? 'DEPOSIT_SWAP_FEE';
     }
 
+    /**
+     * Deduct swap fee using configuration - NO HARDCODING
+     */
     private function deductSwapFee(
         string $swapRef,
         string $transactionType,
@@ -676,25 +729,28 @@ class SwapService
         $feeConfig = $this->feesConfig['fees'][$feeKey] ?? null;
         
         if (!$feeConfig) {
-            // Fallback defaults
-            $totalFee = $transactionType === 'CASHOUT' ? 10.00 : 6.00;
-            $split = $transactionType === 'CASHOUT' 
-                ? ['source_participant' => 2.00, 'vouchmorph' => 4.00, 'destination_participant' => 4.00]
-                : ['source_participant' => 1.20, 'vouchmorph' => 2.40, 'destination_participant' => 2.40];
-            
-            $this->logEvent($swapRef, 'FEE_FALLBACK_USED', ['type' => $transactionType, 'fee' => $totalFee]);
-        } else {
-            $totalFee = $feeConfig['total_amount'];
-            $split = $feeConfig['split'];
+            throw new RuntimeException("Fee configuration not found for {$feeKey} in country {$this->countryCode}");
         }
         
-        $vatRate = $this->feesConfig['regulatory']['vat_rate'] ?? 0.14;
+        if (!isset($feeConfig['total_amount'])) {
+            throw new RuntimeException("Fee {$feeKey} missing 'total_amount' in config");
+        }
+        
+        if (!isset($feeConfig['split'])) {
+            throw new RuntimeException("Fee {$feeKey} missing 'split' configuration");
+        }
+        
+        $totalFee = (float)$feeConfig['total_amount'];
+        $split = $feeConfig['split'];
+        $currency = $feeConfig['currency'] ?? 'BWP';
+        
+        $vatRate = isset($this->feesConfig['regulatory']['vat_rate']) ? (float)$this->feesConfig['regulatory']['vat_rate'] : 0;
         $vatAmount = $totalFee * $vatRate;
         
         $netAmount = $grossAmount - $totalFee;
         
         if ($netAmount <= 0) {
-            throw new RuntimeException("Amount after fee deduction must be positive. Gross: $grossAmount, Fee: $totalFee");
+            throw new RuntimeException("Amount after fee deduction must be positive. Gross: {$grossAmount}, Fee: {$totalFee}");
         }
         
         $stmt = $this->swapDB->prepare("
@@ -710,7 +766,7 @@ class SwapService
             $swapRef,
             $feeKey,
             $totalFee,
-            $feeConfig['currency'] ?? 'BWP',
+            $currency,
             $sourceInstitution,
             $destinationInstitution,
             json_encode($split),
@@ -735,7 +791,10 @@ class SwapService
             'fee' => $totalFee,
             'net' => $netAmount,
             'fee_id' => $feeId,
-            'split' => $split
+            'split' => $split,
+            'fee_key' => $feeKey,
+            'vat_rate' => $vatRate,
+            'vat_amount' => $vatAmount
         ]);
         
         return [
@@ -744,12 +803,13 @@ class SwapService
             'net_amount' => $netAmount,
             'vat_amount' => $vatAmount,
             'fee_id' => $feeId,
-            'split' => $split
+            'split' => $split,
+            'fee_key' => $feeKey
         ];
     }
 
     /**
-     * Calculate fees without deducting (for message-based cards)
+     * Calculate fees without deducting - NO HARDCODING
      */
     private function calculateFees(string $swapRef, string $transactionType, float $grossAmount): array
     {
@@ -757,16 +817,21 @@ class SwapService
         $feeConfig = $this->feesConfig['fees'][$feeKey] ?? null;
         
         if (!$feeConfig) {
-            $totalFee = $transactionType === 'CASHOUT' ? 10.00 : 6.00;
-            $split = $transactionType === 'CASHOUT' 
-                ? ['source_participant' => 2.00, 'vouchmorph' => 4.00, 'destination_participant' => 4.00]
-                : ['source_participant' => 1.20, 'vouchmorph' => 2.40, 'destination_participant' => 2.40];
-        } else {
-            $totalFee = $feeConfig['total_amount'];
-            $split = $feeConfig['split'];
+            throw new RuntimeException("Fee configuration not found for {$feeKey} in country {$this->countryCode}");
         }
         
-        $vatRate = $this->feesConfig['regulatory']['vat_rate'] ?? 0.14;
+        if (!isset($feeConfig['total_amount'])) {
+            throw new RuntimeException("Fee {$feeKey} missing 'total_amount' in config");
+        }
+        
+        if (!isset($feeConfig['split'])) {
+            throw new RuntimeException("Fee {$feeKey} missing 'split' configuration");
+        }
+        
+        $totalFee = (float)$feeConfig['total_amount'];
+        $split = $feeConfig['split'];
+        
+        $vatRate = isset($this->feesConfig['regulatory']['vat_rate']) ? (float)$this->feesConfig['regulatory']['vat_rate'] : 0;
         $vatAmount = $totalFee * $vatRate;
         
         $netAmount = $grossAmount - $totalFee;
@@ -777,7 +842,8 @@ class SwapService
             'net_amount' => $netAmount,
             'vat_amount' => $vatAmount,
             'split' => $split,
-            'fee_type' => $feeKey
+            'fee_type' => $feeKey,
+            'vat_rate' => $vatRate
         ];
     }
 
@@ -828,24 +894,24 @@ class SwapService
                 break;
 
             case 'WALLET':
-case 'E-WALLET':
-    $phone = $source['ewallet']['ewallet_phone'] ??
-             $source['ewallet']['phone'] ??
-             $source['wallet']['wallet_phone'] ??
-             $source['wallet']['phone'] ??
-             $source['ewallet_phone'] ??
-             $source['wallet_phone'] ??
-             $source['phone'] ??
-             null;
+            case 'E-WALLET':
+                $phone = $source['ewallet']['ewallet_phone'] ??
+                         $source['ewallet']['phone'] ??
+                         $source['wallet']['wallet_phone'] ??
+                         $source['wallet']['phone'] ??
+                         $source['ewallet_phone'] ??
+                         $source['wallet_phone'] ??
+                         $source['phone'] ??
+                         null;
 
-    if (!$phone) {
-        throw new RuntimeException("Phone number required for WALLET/E-WALLET verification");
-    }
+                if (!$phone) {
+                    throw new RuntimeException("Phone number required for WALLET/E-WALLET verification");
+                }
 
-    $verificationPayload = array_merge($verificationPayload, [
-        'phone' => $this->formatPhoneForInstitution($phone, $participant)
-    ]);
-    break;
+                $verificationPayload = array_merge($verificationPayload, [
+                    'phone' => $this->formatPhoneForInstitution($phone, $participant)
+                ]);
+                break;
 
             case 'CARD':
                 $card = $source['card'] ?? [];
@@ -1031,7 +1097,7 @@ case 'E-WALLET':
     }
 
     /**
-     * Execute swap with unified payload structure - ENHANCED WITH DEBUGGING
+     * Execute swap with unified payload structure
      */
     public function executeSwap(array $payload): array
     { 
@@ -1115,10 +1181,6 @@ case 'E-WALLET':
             $debugSteps[] = ['time' => microtime(true), 'step' => 'BEFORE_PROCESS_DESTINATION', 
                             'delivery_mode' => $destination['delivery_mode'] ?? 'deposit'];
 
-            // ============================================================
-            // HANDLE DIFFERENT DELIVERY MODES
-            // ============================================================
-            
             if (isset($destination['delivery_mode'])) {
                 switch ($destination['delivery_mode']) {
                     case 'card_load':
@@ -1152,10 +1214,6 @@ case 'E-WALLET':
                 $debugSteps[] = ['time' => microtime(true), 'step' => 'PROCESS_DEPOSIT_COMPLETE'];
             }
 
-            // ============================================================
-            // DECIDE WHETHER TO DEBIT FUNDS IMMEDIATELY
-            // ============================================================
-            
             $debugSteps[] = ['time' => microtime(true), 'step' => 'CHECKING_IF_DEBIT_NEEDED'];
             
             $skipDebit = $this->shouldSkipDebit($destination);
@@ -1166,7 +1224,6 @@ case 'E-WALLET':
                 $debugSteps[] = ['time' => microtime(true), 'step' => 'DEBIT_FUNDS_COMPLETE'];
             } else {
                 $debugSteps[] = ['time' => microtime(true), 'step' => 'SKIP_DEBIT_FOR_MESSAGE_CARD'];
-                // Hold remains active for future card usage
                 $this->logEvent($swapRef, 'HOLD_MAINTAINED', [
                     'hold_reference' => $holdResult['hold_reference'],
                     'reason' => 'Message-based card - funds remain at source until usage'
@@ -1195,7 +1252,6 @@ case 'E-WALLET':
                 'debug_steps' => $debugSteps
             ]);
 
-            // Prepare response
             $response = [
                 'status' => 'success',
                 'swap_reference' => $swapRef,
@@ -1204,7 +1260,6 @@ case 'E-WALLET':
                 'debug' => $debugSteps
             ];
 
-            // Add card details if this was a card operation
             if (isset($destination['delivery_mode'])) {
                 $metadata = $this->getSwapMetadata($swapRef);
                 
@@ -1334,7 +1389,7 @@ case 'E-WALLET':
     }
 
     /**
-     * Process card load - Handles both message-based and balance-based cards
+     * Process card load
      */
     private function processCardLoad(int $swapId, string $swapRef, array $source, array $destination, string $currency, array $holdResult): void
     {
@@ -1363,14 +1418,13 @@ case 'E-WALLET':
     }
 
     /**
-     * Process balance-based card (external cards - funds actually move)
+     * Process balance-based card load
      */
     private function processBalanceBasedCardLoad(int $swapId, string $swapRef, array $source, array $destination, string $currency, array $holdResult, float $grossAmount): void
     {
         $debug = [];
         $debug[] = ['time' => microtime(true), 'step' => 'BALANCE_CARD_START'];
         
-        // Deduct fees (funds are actually moving)
         $feeDetails = $this->deductSwapFee(
             $swapRef,
             'CARD_LOAD',
@@ -1393,7 +1447,6 @@ case 'E-WALLET':
         
         $debug[] = ['time' => microtime(true), 'step' => 'LOADING_BALANCE_CARD', 'card_suffix' => $cardSuffix];
         
-        // Load the card with actual funds
         $cardResult = $this->cardService->loadCard([
             'hold_reference' => $holdResult['hold_reference'],
             'swap_reference' => $swapRef,
@@ -1420,127 +1473,110 @@ case 'E-WALLET':
             'amount' => $netAmount
         ]);
         
-        // Queue settlement message for inter-institution settlement
         $this->queueSettlementMessage($swapRef, $source, $destination, $grossAmount, $holdResult, $feeDetails);
-        
-        // Update net position
         $this->settlement->updateNetPosition($source['institution'], $destination['institution'], $netAmount, 'card_load');
     }
 
- /**
- * Process message-based card (VouchMorph internal - funds stay at source)
- */
-private function processMessageBasedCardLoad(int $swapId, string $swapRef, array $source, array $destination, string $currency, array $holdResult, float $grossAmount): void
-{
-    $debug = [];
-    $debug[] = ['time' => microtime(true), 'step' => 'MESSAGE_CARD_START'];
-    
-    // Calculate fees but don't deduct yet (will be deducted when card is used)
-    $feeDetails = $this->calculateFees($swapRef, 'CARD_LOAD', $grossAmount);
-    $netAmount = $feeDetails['net_amount']; // This is 1994 (2000 - 6)
-    
-    $debug[] = ['time' => microtime(true), 'step' => 'FEES_CALCULATED', 
-                'fee' => $feeDetails['fee_amount'], 
-                'net' => $netAmount,
-                'gross' => $grossAmount];
-    
-    if (!$this->cardService) {
-        throw new RuntimeException("Card service not available");
-    }
-    
-    // DEBUG: Log what class we're dealing with
-    error_log("[DEBUG] CardService class: " . get_class($this->cardService));
-    error_log("[DEBUG] CardService methods: " . implode(', ', get_class_methods($this->cardService)));
-    
-    $cardSuffix = $destination['card_suffix'] ?? null;
-    if (!$cardSuffix) {
-        throw new RuntimeException("card_suffix is required for card_load");
-    }
-    
-    $debug[] = ['time' => microtime(true), 'step' => 'AUTHORIZING_MESSAGE_CARD', 'card_suffix' => $cardSuffix];
-    
-    // Prepare the authorization data with CORRECT key names
-    $authData = [
-        'hold_reference' => $holdResult['hold_reference'],
-        'swap_reference' => $swapRef,
-        'card_suffix' => $cardSuffix,
-        'amount' => $netAmount, // FIXED: Use net amount (1994) not gross
-        'authorized_amount' => $netAmount, // Also fixed here
-        'gross_amount' => $grossAmount, // Keep track of gross for reference
-        'fee_details' => $feeDetails,
-        'source_institution' => $source['institution'],
-        'source_hold_reference' => $holdResult['hold_reference'],
-        'expiry_days' => self::MESSAGE_CARD_EXPIRY_DAYS,
-        'metadata' => [
-            'source_institution' => $source['institution'],
-            'source_asset_type' => $source['asset_type'],
-            'destination_institution' => $destination['institution'],
-            'gross_amount' => $grossAmount,
-            'fee_amount' => $feeDetails['fee_amount']
-        ]
-    ];
-    
-    // Check if the method exists before calling
-    if (!method_exists($this->cardService, 'authorizeCardLoad')) {
-        error_log("[CRITICAL] authorizeCardLoad method missing in CardService!");
-        error_log("[CRITICAL] Available methods: " . implode(', ', get_class_methods($this->cardService)));
+    /**
+     * Process message-based card load
+     */
+    private function processMessageBasedCardLoad(int $swapId, string $swapRef, array $source, array $destination, string $currency, array $holdResult, float $grossAmount): void
+    {
+        $debug = [];
+        $debug[] = ['time' => microtime(true), 'step' => 'MESSAGE_CARD_START'];
         
-        // Try fallback to loadCard if authorizeCardLoad doesn't exist
-        if (method_exists($this->cardService, 'loadCard')) {
-            error_log("[FALLBACK] Using loadCard instead");
-            $cardResult = $this->cardService->loadCard([
-                'hold_reference' => $holdResult['hold_reference'],
-                'swap_reference' => $swapRef,
-                'card_suffix' => $cardSuffix,
-                'amount' => $netAmount // FIXED: Use net amount
-            ]);
-            
-            // Add authorization fields to make it look like an authorization response
-            $cardResult['authorized'] = true;
-            $cardResult['authorized_amount'] = $netAmount; // FIXED
-            $cardResult['gross_amount'] = $grossAmount;
-            $cardResult['status'] = 'AUTHORIZED';
-        } else {
-            throw new RuntimeException("Card service has neither authorizeCardLoad nor loadCard methods");
+        $feeDetails = $this->calculateFees($swapRef, 'CARD_LOAD', $grossAmount);
+        $netAmount = $feeDetails['net_amount'];
+        
+        $debug[] = ['time' => microtime(true), 'step' => 'FEES_CALCULATED', 
+                    'fee' => $feeDetails['fee_amount'], 
+                    'net' => $netAmount,
+                    'gross' => $grossAmount];
+        
+        if (!$this->cardService) {
+            throw new RuntimeException("Card service not available");
         }
-    } else {
-        // Method exists, call it normally
-        $cardResult = $this->cardService->authorizeCardLoad($authData);
-    }
-    
-    $debug[] = ['time' => microtime(true), 'step' => 'CARD_AUTHORIZED', 
-               'card_suffix' => $cardSuffix,
-               'result' => $cardResult];
-    
-    // Record the card authorization in database - FIXED: Use netAmount here too
-    $this->recordCardAuthorization($swapId, $swapRef, $cardSuffix, $netAmount, $holdResult, $feeDetails);
-    
-    $this->updateSwapMetadata($swapRef, [
-        'card_authorization' => [
-            'card_suffix' => $cardSuffix,
-            'authorized_amount' => $netAmount, // FIXED
-            'gross_amount' => $grossAmount,
-            'fee_amount' => $feeDetails['fee_amount'],
+        
+        $cardSuffix = $destination['card_suffix'] ?? null;
+        if (!$cardSuffix) {
+            throw new RuntimeException("card_suffix is required for card_load");
+        }
+        
+        $debug[] = ['time' => microtime(true), 'step' => 'AUTHORIZING_MESSAGE_CARD', 'card_suffix' => $cardSuffix];
+        
+        $authData = [
             'hold_reference' => $holdResult['hold_reference'],
-            'status' => 'AUTHORIZED',
-            'card_type' => 'message_based',
-            'fee_details' => $feeDetails
-        ]
-    ]);
-    
-    $this->logEvent($swapRef, 'MESSAGE_CARD_AUTHORIZED', [
-        'card_suffix' => $cardSuffix,
-        'amount' => $netAmount, // FIXED
-        'gross_amount' => $grossAmount,
-        'fee' => $feeDetails['fee_amount'],
-        'hold_reference' => $holdResult['hold_reference']
-    ]);
-    
-    // DO NOT debit funds here - Keep the hold active at source
-}
+            'swap_reference' => $swapRef,
+            'card_suffix' => $cardSuffix,
+            'amount' => $netAmount,
+            'authorized_amount' => $netAmount,
+            'gross_amount' => $grossAmount,
+            'fee_details' => $feeDetails,
+            'source_institution' => $source['institution'],
+            'source_hold_reference' => $holdResult['hold_reference'],
+            'expiry_days' => self::MESSAGE_CARD_EXPIRY_DAYS,
+            'metadata' => [
+                'source_institution' => $source['institution'],
+                'source_asset_type' => $source['asset_type'],
+                'destination_institution' => $destination['institution'],
+                'gross_amount' => $grossAmount,
+                'fee_amount' => $feeDetails['fee_amount']
+            ]
+        ];
+        
+        if (!method_exists($this->cardService, 'authorizeCardLoad')) {
+            error_log("[CRITICAL] authorizeCardLoad method missing in CardService!");
+            
+            if (method_exists($this->cardService, 'loadCard')) {
+                error_log("[FALLBACK] Using loadCard instead");
+                $cardResult = $this->cardService->loadCard([
+                    'hold_reference' => $holdResult['hold_reference'],
+                    'swap_reference' => $swapRef,
+                    'card_suffix' => $cardSuffix,
+                    'amount' => $netAmount
+                ]);
+                
+                $cardResult['authorized'] = true;
+                $cardResult['authorized_amount'] = $netAmount;
+                $cardResult['gross_amount'] = $grossAmount;
+                $cardResult['status'] = 'AUTHORIZED';
+            } else {
+                throw new RuntimeException("Card service has neither authorizeCardLoad nor loadCard methods");
+            }
+        } else {
+            $cardResult = $this->cardService->authorizeCardLoad($authData);
+        }
+        
+        $debug[] = ['time' => microtime(true), 'step' => 'CARD_AUTHORIZED', 
+                   'card_suffix' => $cardSuffix,
+                   'result' => $cardResult];
+        
+        $this->recordCardAuthorization($swapId, $swapRef, $cardSuffix, $netAmount, $holdResult, $feeDetails);
+        
+        $this->updateSwapMetadata($swapRef, [
+            'card_authorization' => [
+                'card_suffix' => $cardSuffix,
+                'authorized_amount' => $netAmount,
+                'gross_amount' => $grossAmount,
+                'fee_amount' => $feeDetails['fee_amount'],
+                'hold_reference' => $holdResult['hold_reference'],
+                'status' => 'AUTHORIZED',
+                'card_type' => 'message_based',
+                'fee_details' => $feeDetails
+            ]
+        ]);
+        
+        $this->logEvent($swapRef, 'MESSAGE_CARD_AUTHORIZED', [
+            'card_suffix' => $cardSuffix,
+            'amount' => $netAmount,
+            'gross_amount' => $grossAmount,
+            'fee' => $feeDetails['fee_amount'],
+            'hold_reference' => $holdResult['hold_reference']
+        ]);
+    }
 
     /**
-     * Process card issuance - Handles both message-based and balance-based cards
+     * Process card issuance
      */
     private function processCardIssuance(int $swapId, string $swapRef, array $source, array $destination, string $currency, array $holdResult): void
     {
@@ -1705,36 +1741,33 @@ private function processMessageBasedCardLoad(int $swapId, string $swapRef, array
             'card_suffix' => $cardResult['card_suffix'] ?? substr($cardResult['card_number'] ?? '', -4),
             'amount' => $grossAmount
         ]);
-        
-        // DO NOT debit funds here - Keep the hold active at source
     }
 
-   private function recordCardAuthorization(int $swapId, string $swapRef, string $cardSuffix, float $amount, array $holdResult, array $feeDetails): void
-{
-    $expiryDays = $this->cardConfig['authorization_expiry_days'] ?? self::MESSAGE_CARD_EXPIRY_DAYS;
-    
-    // For PostgreSQL
-    $stmt = $this->swapDB->prepare("
-        INSERT INTO card_authorizations 
-        (swap_id, swap_reference, card_suffix, authorized_amount, 
-         remaining_balance, hold_reference, source_institution, 
-         fee_amount, vat_amount, status, expiry_at, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', NOW() + (? || ' days')::INTERVAL, NOW())
-    ");
-    
-    $stmt->execute([
-        $swapId,
-        $swapRef,
-        $cardSuffix,
-        $amount,
-        $amount,
-        $holdResult['hold_reference'],
-        $holdResult['source_institution'] ?? 'SACCUSSALIS',
-        $feeDetails['fee_amount'],
-        $feeDetails['vat_amount'],
-        $expiryDays
-    ]);
-}
+    private function recordCardAuthorization(int $swapId, string $swapRef, string $cardSuffix, float $amount, array $holdResult, array $feeDetails): void
+    {
+        $expiryDays = $this->cardConfig['authorization_expiry_days'] ?? self::MESSAGE_CARD_EXPIRY_DAYS;
+        
+        $stmt = $this->swapDB->prepare("
+            INSERT INTO card_authorizations 
+            (swap_id, swap_reference, card_suffix, authorized_amount, 
+             remaining_balance, hold_reference, source_institution, 
+             fee_amount, vat_amount, status, expiry_at, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', NOW() + (? || ' days')::INTERVAL, NOW())
+        ");
+        
+        $stmt->execute([
+            $swapId,
+            $swapRef,
+            $cardSuffix,
+            $amount,
+            $amount,
+            $holdResult['hold_reference'],
+            $source['institution'] ?? 'SACCUSSALIS',
+            $feeDetails['fee_amount'],
+            $feeDetails['vat_amount'],
+            $expiryDays
+        ]);
+    }
 
     /**
      * Process cashout to ATM/Agent
@@ -1777,7 +1810,7 @@ private function processMessageBasedCardLoad(int $swapId, string $swapRef, array
             
             $rawCode = (string)random_int(100000, 999999);
             $codeHash = password_hash($rawCode, PASSWORD_BCRYPT);
-            $debug[] = ['time' => microtime(true), 'step' => 'CODE_GENERATED', 'raw_length' => strlen($rawCode), 'hash_length' => strlen($codeHash)];
+            $debug[] = ['time' => microtime(true), 'step' => 'CODE_GENERATED'];
 
             $debug[] = ['time' => microtime(true), 'step' => 'CREATING_VOUCHER'];
             $this->createCashoutVoucher($swapId, $codeHash, $destination, $rawCode, $cashoutData);
@@ -1785,23 +1818,20 @@ private function processMessageBasedCardLoad(int $swapId, string $swapRef, array
             
             $debug[] = ['time' => microtime(true), 'step' => 'REQUESTING_ATM_TOKEN'];
             $atmToken = $this->requestAtmToken($swapRef, $source, $destination, $codeHash, $holdResult, $destParticipant, $netAmount);
-            $debug[] = ['time' => microtime(true), 'step' => 'ATM_TOKEN_RECEIVED', 'token_reference' => $atmToken['token_reference'] ?? null];
+            $debug[] = ['time' => microtime(true), 'step' => 'ATM_TOKEN_RECEIVED'];
 
             $debug[] = ['time' => microtime(true), 'step' => 'SENDING_SMS'];
             $this->sendWithdrawalSms($cashoutData['beneficiary_phone'] ?? '', $rawCode, $atmToken, $netAmount, $currency);
             $debug[] = ['time' => microtime(true), 'step' => 'SMS_SENT'];
             
-            // Queue settlement message
             $debug[] = ['time' => microtime(true), 'step' => 'QUEUEING_SETTLEMENT'];
             $this->queueSettlementMessage($swapRef, $source, $destination, $grossAmount, $holdResult, $feeDetails);
             $debug[] = ['time' => microtime(true), 'step' => 'SETTLEMENT_QUEUED'];
 
-            // Update net position
             $debug[] = ['time' => microtime(true), 'step' => 'UPDATING_NET_POSITION'];
             $this->settlement->updateNetPosition($source['institution'], $destination['institution'], $netAmount, 'cashout');
             $debug[] = ['time' => microtime(true), 'step' => 'NET_POSITION_UPDATED'];
             
-            // Update swap ledger
             $debug[] = ['time' => microtime(true), 'step' => 'UPDATING_SWAP_LEDGER'];
             $this->updateSwapLedgerFees($swapRef, $source['institution'], $destination['institution'], $grossAmount, $currency);
             $debug[] = ['time' => microtime(true), 'step' => 'SWAP_LEDGER_UPDATED'];
@@ -1867,9 +1897,9 @@ private function processMessageBasedCardLoad(int $swapId, string $swapRef, array
                 'action' => 'GENERATE_ATM_TOKEN'
             ];
             
-            $debug[] = ['time' => microtime(true), 'step' => 'PAYLOAD_PREPARED', 'payload' => $payload];
+            $debug[] = ['time' => microtime(true), 'step' => 'PAYLOAD_PREPARED'];
 
-            error_log("REQUEST_TOKEN: About to call bankClient->transfer with payload: " . json_encode($payload));
+            error_log("REQUEST_TOKEN: About to call bankClient->transfer");
             
             $result = $bankClient->transfer($payload, 'generate_atm_code');
             
@@ -1899,12 +1929,11 @@ private function processMessageBasedCardLoad(int $swapId, string $swapRef, array
                     $debug[] = ['time' => microtime(true), 'step' => 'HTTP_ERROR', 'code' => $result['status_code']];
                 }
                 error_log("REQUEST_TOKEN ERROR: " . $errorMsg);
-                error_log("REQUEST_TOKEN DEBUG: " . json_encode($debug));
                 throw new RuntimeException("Failed to generate ATM token: " . $errorMsg);
             }
 
             $bankResponse = $result['data'] ?? [];
-            $debug[] = ['time' => microtime(true), 'step' => 'BANK_RESPONSE_RECEIVED', 'bank_response' => $bankResponse];
+            $debug[] = ['time' => microtime(true), 'step' => 'BANK_RESPONSE_RECEIVED'];
 
             $this->logEvent($swapRef, 'ATM_TOKEN_BANK_RESPONSE', [
                 'bank_response' => $bankResponse
@@ -1913,8 +1942,6 @@ private function processMessageBasedCardLoad(int $swapId, string $swapRef, array
             if (!isset($bankResponse['token_generated']) || $bankResponse['token_generated'] !== true) {
                 $errorMsg = $bankResponse['message'] ?? $bankResponse['error'] ?? 'Unknown error';
                 $debug[] = ['time' => microtime(true), 'step' => 'TOKEN_NOT_GENERATED', 'error' => $errorMsg];
-                error_log("REQUEST_TOKEN ERROR: Token not generated - " . $errorMsg);
-                error_log("REQUEST_TOKEN DEBUG: " . json_encode($debug));
                 throw new RuntimeException("Failed to generate ATM token: " . $errorMsg);
             }
 
@@ -1923,49 +1950,29 @@ private function processMessageBasedCardLoad(int $swapId, string $swapRef, array
                 'token_reference' => $bankResponse['token_reference'] ?? null
             ]);
             
-            $debug[] = ['time' => microtime(true), 'step' => 'TOKEN_GENERATED_SUCCESS', 'token_ref' => $bankResponse['token_reference'] ?? null];
-            error_log("REQUEST_TOKEN SUCCESS: " . json_encode($debug));
+            $debug[] = ['time' => microtime(true), 'step' => 'TOKEN_GENERATED_SUCCESS'];
+            error_log("REQUEST_TOKEN SUCCESS");
 
         } catch (Exception $e) {
             $debug[] = ['time' => microtime(true), 'step' => 'REQUEST_TOKEN_EXCEPTION', 'error' => $e->getMessage()];
             error_log("REQUEST_TOKEN EXCEPTION: " . $e->getMessage());
-            error_log("REQUEST_TOKEN EXCEPTION DEBUG: " . json_encode($debug));
-            error_log("REQUEST_TOKEN EXCEPTION TRACE: " . $e->getTraceAsString());
             throw $e;
         }
 
         return $bankResponse;
     }
 
-    private function sendBankAuthorization(string $swapRef, array $source, array $destination, string $codeHash, array $participant): void
-    {
-        $bankClient = new GenericBankClient($participant);
-        $bankClient->transfer([
-            'reference' => $swapRef,
-            'source_institution' => $source['institution'],
-            'source_hold_reference' => $source['hold_reference'] ?? null,
-            'beneficiary_phone' => $destination['cashout']['beneficiary_phone'],
-            'amount' => $destination['amount'],
-            'code_hash' => $codeHash,
-            'action' => 'AUTHORIZE_CASHOUT'
-        ], 'authorize');
-    }
-
-    /**
-     * COMPLETELY DISABLED SMS SENDING - JUST LOGS
-     */
     private function sendWithdrawalSms(string $phone, string $code, array $atmInfo, float $amount, string $currency): void
     {
-        error_log("=== SMS COMPLETELY DISABLED ===");
-        error_log("Would send SMS to: " . $phone);
-        error_log("Withdrawal code: " . $code);
-        error_log("ATM PIN: " . ($atmInfo['atm_pin'] ?? 'N/A'));
+        error_log("=== SMS DISABLED - WOULD SEND ===");
+        error_log("To: " . $phone);
+        error_log("Code: " . $code);
         error_log("Amount: " . $amount . " " . $currency);
         return;
     }
 
     /**
-     * Cancel a pending cashout swap
+     * Cancel a pending swap
      */
     public function cancelSwap(string $swapRef, string $reason = 'User requested cancellation', ?int $cancelledBy = null): array
     {
@@ -2001,7 +2008,6 @@ private function processMessageBasedCardLoad(int $swapId, string $swapRef, array
             
             error_log("[CANCEL] Cancelling swap: $swapRef, Reason: $reason");
             
-            // Release hold if active
             if ($swap['hold_reference'] && $swap['hold_status'] === 'ACTIVE' && $swap['participant_config']) {
                 $participant = json_decode($swap['participant_config'], true);
                 $bankClient = new GenericBankClient($participant);
@@ -2018,7 +2024,6 @@ private function processMessageBasedCardLoad(int $swapId, string $swapRef, array
                 $this->updateHoldStatus($swap['hold_reference'], 'RELEASED');
             }
             
-            // Void voucher if exists
             if ($swap['voucher_id'] && $swap['voucher_status'] === 'ACTIVE') {
                 $voidStmt = $this->swapDB->prepare("
                     UPDATE swap_vouchers 
@@ -2030,7 +2035,6 @@ private function processMessageBasedCardLoad(int $swapId, string $swapRef, array
                 $voidStmt->execute([$reason, $swap['voucher_id']]);
             }
             
-            // Void card authorization if exists
             if ($swap['authorization_id'] && $swap['card_auth_status'] === 'ACTIVE') {
                 $voidAuth = $this->swapDB->prepare("
                     UPDATE card_authorizations 
@@ -2103,111 +2107,11 @@ private function processMessageBasedCardLoad(int $swapId, string $swapRef, array
         }
     }
 
-    // ============================================================================
-    // CARD HELPER METHODS
-    // ============================================================================
-
-    private function sendCardDetailsSms(?string $phone, string $cardNumber, string $cvv, string $expiry, float $amount, string $currency): void
-    {
-        if (!$phone) {
-            error_log("No phone number provided for card details");
-            return;
-        }
-        
-        $message = "🔐 VOUCHMORPH MESSAGE CARD\n\n"
-            . "Card: {$cardNumber}\n"
-            . "Expiry: {$expiry}\n"
-            . "CVV: {$cvv}\n"
-            . "Amount: {$amount} {$currency}\n\n"
-            . "This card can be used multiple times.\n"
-            . "Keep these details secure!";
-        
-        if ($this->smsService) {
-            try {
-                $result = $this->smsService->sendSms($phone, $message);
-                $this->logEvent('CARD_DETAILS_SENT', 'INFO', [
-                    'phone' => substr($phone, -8),
-                    'success' => $result['success'] ?? false
-                ]);
-            } catch (Exception $e) {
-                error_log("Failed to send card details SMS: " . $e->getMessage());
-                $this->queueSmsMessage($phone, $message);
-            }
-        } else {
-            $this->queueSmsMessage($phone, $message);
-        }
-    }
-
-    private function queueSmsMessage(string $phone, string $message): void
-    {
-        try {
-            $stmt = $this->swapDB->prepare("
-                INSERT INTO message_outbox 
-                (message_id, channel, destination, payload, status, created_at)
-                VALUES (?, 'SMS', ?, ?, 'PENDING', NOW())
-            ");
-            
-            $stmt->execute([
-                'SMS-' . uniqid(),
-                $phone,
-                json_encode(['message' => $message])
-            ]);
-        } catch (Exception $e) {
-            error_log("Failed to queue SMS: " . $e->getMessage());
-        }
-    }
-
-    private function setCardResult(string $swapRef, array $cardResult): void
-    {
-        $this->updateSwapMetadata($swapRef, [
-            'card_issuance_result' => [
-                'card_suffix' => $cardResult['card_suffix'],
-                'expiry' => $cardResult['expiry'],
-                'amount' => $cardResult['initial_amount'],
-                'card_id' => $cardResult['card_id']
-            ]
-        ]);
-    }
-
-    private function updateSwapMetadata(string $swapRef, array $data): void
-    {
-        try {
-            $stmt = $this->swapDB->prepare("
-                UPDATE swap_requests 
-                SET metadata = metadata || ?::jsonb
-                WHERE swap_uuid = ?
-            ");
-            $stmt->execute([json_encode($data), $swapRef]);
-        } catch (Exception $e) {
-            error_log("Failed to update swap metadata: " . $e->getMessage());
-        }
-    }
-
-    private function getSwapMetadata(string $swapRef): array
-    {
-        try {
-            $stmt = $this->swapDB->prepare("
-                SELECT metadata FROM swap_requests WHERE swap_uuid = ?
-            ");
-            $stmt->execute([$swapRef]);
-            $metadata = $stmt->fetchColumn();
-            return $metadata ? json_decode($metadata, true) : [];
-        } catch (Exception $e) {
-            error_log("Failed to get swap metadata: " . $e->getMessage());
-            return [];
-        }
-    }
-
-    // ============================================================================
-    // CARD USAGE AND SETTLEMENT METHODS
-    // ============================================================================
-
     /**
-     * Record card swipe transaction (for message-based cards)
+     * Record card swipe transaction
      */
     public function recordCardSwipe(string $cardSuffix, float $amount, string $merchantId): array
     {
-        // Find the card and its associated hold
         $stmt = $this->swapDB->prepare("
             SELECT * FROM card_authorizations 
             WHERE card_suffix = ? AND status = 'ACTIVE'
@@ -2221,26 +2125,20 @@ private function processMessageBasedCardLoad(int $swapId, string $swapRef, array
             throw new RuntimeException("Card authorization not found or expired");
         }
         
-        // Check if card has enough authorized amount
         if ($card['remaining_balance'] < $amount) {
             throw new RuntimeException("Insufficient funds on card");
         }
         
-        // Calculate portion of fees for this transaction
         $feePortion = ($amount / $card['authorized_amount']) * $card['fee_amount'];
         $vatPortion = ($amount / $card['authorized_amount']) * $card['vat_amount'];
         
-        // Find the hold at source institution
         $holdRef = $card['hold_reference'];
         $sourceInstitution = $card['source_institution'];
         
-        // Record transaction against card
         $txnId = $this->recordCardTransaction($cardSuffix, $amount, $merchantId, $holdRef, $feePortion, $vatPortion);
         
-        // Queue settlement item - this will later debit source and credit merchant
         $this->queueSettlementForCardSwipe($txnId, $holdRef, $sourceInstitution, $merchantId, $amount, $feePortion);
         
-        // Update card's remaining balance
         $newBalance = $card['remaining_balance'] - $amount;
         $updateStmt = $this->swapDB->prepare("
             UPDATE card_authorizations 
@@ -2295,13 +2193,12 @@ private function processMessageBasedCardLoad(int $swapId, string $swapRef, array
     }
 
     /**
-     * Settlement cron job - processes all card swipes
+     * Process card settlements
      */
     public function processCardSettlements(): array
     {
         $stats = ['processed' => 0, 'total_amount' => 0, 'total_fees' => 0];
         
-        // Get all pending card swipes that need settlement
         $pending = $this->swapDB->prepare("
             SELECT sq.*, ca.source_institution, ca.hold_reference, p.config as participant_config
             FROM settlement_queue sq
@@ -2318,7 +2215,6 @@ private function processMessageBasedCardLoad(int $swapId, string $swapRef, array
             try {
                 $this->swapDB->beginTransaction();
                 
-                // Get source participant
                 $sourceKey = $this->findInstitutionKey($txn['source_institution']);
                 if (!$sourceKey || !isset($this->participants[$sourceKey])) {
                     throw new RuntimeException("Source institution not found: {$txn['source_institution']}");
@@ -2327,7 +2223,6 @@ private function processMessageBasedCardLoad(int $swapId, string $swapRef, array
                 $sourceParticipant = $this->participants[$sourceKey];
                 $bankClient = new GenericBankClient($sourceParticipant);
                 
-                // Debit the source hold for the exact amount used
                 $debitResult = $bankClient->debitHold([
                     'hold_reference' => $txn['hold_reference'],
                     'amount' => $txn['amount'],
@@ -2339,10 +2234,8 @@ private function processMessageBasedCardLoad(int $swapId, string $swapRef, array
                     throw new RuntimeException("Failed to debit source: " . ($debitResult['message'] ?? 'Unknown'));
                 }
                 
-                // Credit merchant (via settlement)
                 $this->creditMerchant($txn['destination_institution'], $txn['amount'], $txn['transaction_id']);
                 
-                // Mark transaction as settled
                 $updateStmt = $this->swapDB->prepare("
                     UPDATE settlement_queue 
                     SET status = 'SETTLED', settled_at = NOW()
@@ -2350,7 +2243,6 @@ private function processMessageBasedCardLoad(int $swapId, string $swapRef, array
                 ");
                 $updateStmt->execute([$txn['transaction_id']]);
                 
-                // Update card transaction status
                 $updateCardTxn = $this->swapDB->prepare("
                     UPDATE card_transactions 
                     SET settlement_status = 'SETTLED', settled_at = NOW()
@@ -2368,7 +2260,6 @@ private function processMessageBasedCardLoad(int $swapId, string $swapRef, array
                 $this->swapDB->rollBack();
                 error_log("Failed to settle card transaction {$txn['transaction_id']}: " . $e->getMessage());
                 
-                // Mark as failed
                 $failStmt = $this->swapDB->prepare("
                     UPDATE settlement_queue 
                     SET status = 'FAILED', error_message = ?
@@ -2383,8 +2274,6 @@ private function processMessageBasedCardLoad(int $swapId, string $swapRef, array
 
     private function creditMerchant(string $merchantId, float $amount, string $reference): void
     {
-        // Implementation depends on how merchants are credited
-        // This could be another bank transfer, adding to merchant's wallet, etc.
         $stmt = $this->swapDB->prepare("
             INSERT INTO merchant_settlements 
             (merchant_id, amount, reference, status, created_at)
@@ -2393,10 +2282,9 @@ private function processMessageBasedCardLoad(int $swapId, string $swapRef, array
         $stmt->execute([$merchantId, $amount, $reference]);
     }
 
-    // ============================================================================
-    // EXPIRY PROCESSING METHODS
-    // ============================================================================
-
+    /**
+     * Process expired holds
+     */
     public function processExpiredHolds(): array
     {
         $stats = [
@@ -2486,7 +2374,6 @@ private function processMessageBasedCardLoad(int $swapId, string $swapRef, array
                     $updateHold->execute([$holdReleased ? 'true' : 'false', $hold['hold_reference']]);
                     $stats['holds_released']++;
                     
-                    // Void associated card authorization if exists
                     if ($hold['authorization_id']) {
                         $voidAuth = $this->swapDB->prepare("
                             UPDATE card_authorizations 
@@ -2670,8 +2557,6 @@ private function processMessageBasedCardLoad(int $swapId, string $swapRef, array
             ];
         }
 
-        error_log("[QUEUE_SETTLEMENT] Metadata: " . json_encode($metadata));
-
         $stmt = $this->swapDB->prepare("
             INSERT INTO settlement_messages
             (transaction_id, from_participant, to_participant, amount, type, status, metadata, created_at)
@@ -2753,8 +2638,6 @@ private function processMessageBasedCardLoad(int $swapId, string $swapRef, array
                             null
         ];
 
-        error_log("[recordMasterSwap] Destination details: " . json_encode($destinationDetails));
-
         $stmt = $this->swapDB->prepare("
             INSERT INTO swap_requests 
             (swap_uuid, from_currency, to_currency, amount, source_details, destination_details, status, created_at)
@@ -2767,7 +2650,7 @@ private function processMessageBasedCardLoad(int $swapId, string $swapRef, array
             json_encode($sourceDetails), json_encode($destinationDetails)
         ]);
 
-        return $stmt->fetchColumn();
+        return (int)$stmt->fetchColumn();
     }
 
     private function updateSwapLedgerFees(string $swapRef, string $from, string $to, float $amount, string $currency): void
@@ -2853,7 +2736,6 @@ private function processMessageBasedCardLoad(int $swapId, string $swapRef, array
         }
         
         $this->queueSettlementMessage($swapRef, $source, $destination, $grossAmount, $holdResult, $feeDetails);
-        
         $this->settlement->updateNetPosition($source['institution'], $destination['institution'], $netAmount, 'deposit');
     }
 
@@ -2861,7 +2743,6 @@ private function processMessageBasedCardLoad(int $swapId, string $swapRef, array
     {
         $assetType = 'UNKNOWN';
         
-        // Safely check for asset_type in various possible locations
         if (isset($source['asset_type'])) {
             $assetType = strtoupper($source['asset_type']);
         } elseif (isset($source['type'])) {
@@ -2869,11 +2750,8 @@ private function processMessageBasedCardLoad(int $swapId, string $swapRef, array
         } elseif (isset($source['source']['asset_type'])) {
             $assetType = strtoupper($source['source']['asset_type']);
         } elseif (isset($source['delivery_mode'])) {
-            // For destination arrays, use delivery_mode as fallback
             $assetType = strtoupper($source['delivery_mode']);
         }
-        
-        error_log("[maskIdentifier] Asset type: {$assetType}, Source keys: " . implode(', ', array_keys($source)));
         
         switch ($assetType) {
             case 'VOUCHER':
@@ -2911,7 +2789,6 @@ private function processMessageBasedCardLoad(int $swapId, string $swapRef, array
             case 'CARD_LOAD':
             case 'CARD_ISSUANCE':
             case 'DEPOSIT':
-                // Handle destination types
                 if (isset($source['card_suffix'])) {
                     return 'CRD-' . $source['card_suffix'];
                 }
@@ -2959,6 +2836,35 @@ private function processMessageBasedCardLoad(int $swapId, string $swapRef, array
         $flowsFile = __DIR__ . "/../../CORE_CONFIG/flows.php";
         if (file_exists($flowsFile)) {
             $this->flowsConfig = include $flowsFile;
+        }
+    }
+
+    private function updateSwapMetadata(string $swapRef, array $data): void
+    {
+        try {
+            $stmt = $this->swapDB->prepare("
+                UPDATE swap_requests 
+                SET metadata = COALESCE(metadata, '{}'::jsonb) || ?::jsonb
+                WHERE swap_uuid = ?
+            ");
+            $stmt->execute([json_encode($data), $swapRef]);
+        } catch (Exception $e) {
+            error_log("Failed to update swap metadata: " . $e->getMessage());
+        }
+    }
+
+    private function getSwapMetadata(string $swapRef): array
+    {
+        try {
+            $stmt = $this->swapDB->prepare("
+                SELECT metadata FROM swap_requests WHERE swap_uuid = ?
+            ");
+            $stmt->execute([$swapRef]);
+            $metadata = $stmt->fetchColumn();
+            return $metadata ? json_decode($metadata, true) : [];
+        } catch (Exception $e) {
+            error_log("Failed to get swap metadata: " . $e->getMessage());
+            return [];
         }
     }
 
@@ -3029,5 +2935,3 @@ private function processMessageBasedCardLoad(int $swapId, string $swapRef, array
         }
     }
 }
-
-
