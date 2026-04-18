@@ -1,37 +1,40 @@
 # Use PHP CLI so we can run the built-in server
 FROM php:8.2-cli
 
-# Install system dependencies
+# Install system dependencies and PHP extensions
 RUN apt-get update && apt-get install -y \
     libpq-dev \
     unzip \
     git \
     curl \
     libzip-dev \
-    && docker-php-ext-install pdo pdo_pgsql pgsql zip
+    && docker-php-ext-install pdo pdo_pgsql pgsql zip \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
 WORKDIR /var/www/html
 
-# Copy composer.json only (lock file optional)
-COPY composer.json ./
-
 # Install Composer
-RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+
+# Copy Composer files first for better layer caching
+COPY composer.json ./
+COPY composer.lock* ./
 
 # Install PHP dependencies
-RUN composer install --no-dev --optimize-autoloader || true
+RUN composer install --no-dev --optimize-autoloader --no-interaction || true
 
 # Copy application code
 COPY src/ src/
 COPY public/ public/
+COPY config/ config/
 
-# Expose port (Railway will override $PORT anyway)
+# Expose port
 EXPOSE 9000
 
-RUN composer dump-autoload --optimize
+# Refresh autoload after full source copy
+RUN composer dump-autoload --optimize --no-interaction || true
 
 # Start PHP built-in server
-CMD php -S 0.0.0.0:${PORT} -t public/
-
-
+CMD ["sh", "-c", "php -S 0.0.0.0:${PORT:-9000} -t public/"]
