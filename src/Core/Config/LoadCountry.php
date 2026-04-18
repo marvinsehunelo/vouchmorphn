@@ -12,8 +12,8 @@ $countrySlug = defined('SYSTEM_COUNTRY_SLUG')
     : ($countryMeta['slug'] ?? strtolower($country));
 
 $configFile       = dirname(__DIR__, 3) . "/src/Core/Config/Countries/{$country}/config.php";
-$participantsFile = dirname(__DIR__, 3) . "/config/countries/{$countrySlug}/participants.json";
-$feesFile         = dirname(__DIR__, 3) . "/config/countries/{$countrySlug}/fees.json";
+$participantsFile = dirname(__DIR__, 3) . "/config/countries/{$country}/participants.json";
+$feesFile         = dirname(__DIR__, 3) . "/config/countries/{$country}/fees.json";
 
 /* -------------------------------------------------------
    Load Base Config
