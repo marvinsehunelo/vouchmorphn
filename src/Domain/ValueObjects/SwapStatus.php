@@ -4,7 +4,7 @@ require_once dirname(__DIR__, 2) . '/src/bootstrap.php';
 
 declare(strict_types=1);
 
-namespace BUSINESS_LOGIC_LAYER\Helpers;
+namespace Domain\ValueObjects;
 
 use PDO;
 use Exception;
