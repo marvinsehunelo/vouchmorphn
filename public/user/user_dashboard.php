@@ -85,8 +85,9 @@ function maskValue(string $value, int $visible = 4): string {
    LOAD PARTICIPANTS FOR SWAPSERVICE
 ========================= */
 $stmt = $db->prepare("
-    SELECT participant_id, name, type, category, provider_code, auth_type, base_url, 
-           capabilities, phone_format, config, status
+    SELECT participant_id, name, type, category, provider_code, auth_type, base_url,
+           capabilities, resource_endpoints, phone_format, security_config,
+           message_profile, routing_info, metadata, status
     FROM participants
     WHERE status = 'ACTIVE'
     ORDER BY name
@@ -97,18 +98,22 @@ $participants = $stmt->fetchAll(PDO::FETCH_ASSOC);
 // Build participant config for SwapService
 $participantConfig = [];
 foreach ($participants as $p) {
-    $participantConfig[$p['provider_code']] = [
-        'participant_id' => $p['participant_id'],
-        'name' => $p['name'],
-        'provider_code' => $p['provider_code'],
-        'type' => $p['type'],
-        'category' => $p['category'],
-        'auth_type' => $p['auth_type'],
-        'base_url' => $p['base_url'],
-        'capabilities' => safeJsonDecode($p['capabilities'] ?? '{}'),
-        'phone_format' => safeJsonDecode($p['phone_format'] ?? '{}'),
-        'config' => safeJsonDecode($p['config'] ?? '{}')
-    ];
+   $participantConfig[$p['provider_code']] = [
+    'participant_id' => $p['participant_id'],
+    'name' => $p['name'],
+    'provider_code' => $p['provider_code'],
+    'type' => $p['type'],
+    'category' => $p['category'],
+    'auth_type' => $p['auth_type'],
+    'base_url' => $p['base_url'],
+    'capabilities' => safeJsonDecode($p['capabilities'] ?? '{}'),
+    'resource_endpoints' => safeJsonDecode($p['resource_endpoints'] ?? '{}'),
+    'phone_format' => safeJsonDecode($p['phone_format'] ?? '{}'),
+    'security_config' => safeJsonDecode($p['security_config'] ?? '{}'),
+    'message_profile' => safeJsonDecode($p['message_profile'] ?? '{}'),
+    'routing_info' => safeJsonDecode($p['routing_info'] ?? '{}'),
+    'metadata' => safeJsonDecode($p['metadata'] ?? '{}')
+];
 }
 
 // Load country-specific configs
