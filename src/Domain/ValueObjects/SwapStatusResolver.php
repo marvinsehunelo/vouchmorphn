@@ -4,7 +4,7 @@ require_once dirname(__DIR__, 2) . '/src/bootstrap.php';
 
 declare(strict_types=1);
 
-namespace Domain\ValueObjects;
+namespace Domain\ValueObjects\SwapStatusResolver;
 
 use PDO;
 use Exception;
