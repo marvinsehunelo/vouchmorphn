@@ -13,7 +13,7 @@ use Domain\Services\Settlement\HybridSettlementStrategy;
 use Domain\Services\CardService;
 use Infrastructure\Banks\GenericBankClient;
 use Infrastructure\SMS\SmsNotificationService;
-use Domain\Helpers\SwapStatusResolver;
+use Domain\ValueObjects\SwapStatus;
 
 /**
  * SwapService - ISO20022 & FSPIOP Compliant
