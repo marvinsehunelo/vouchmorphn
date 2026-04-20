@@ -10,23 +10,18 @@
   },
   "autoload": {
     "psr-4": {
-      "APP_LAYER\\": "src/APP_LAYER/",
-      "BUSINESS_LOGIC_LAYER\\": "src/BUSINESS_LOGIC_LAYER/",
-      "DATA_PERSISTENCE_LAYER\\": "src/DATA_PERSISTENCE_LAYER/",
-      "CORE_CONFIG\\": "src/CORE_CONFIG/",
-      "FACTORY_LAYER\\": "src/FACTORY_LAYER/",
-      "INTEGRATION_LAYER\\": "src/INTEGRATION_LAYER/",
-      "SECURITY_LAYER\\": "src/SECURITY_LAYER/",
-      "DFSP_ADAPTER_LAYER\\": "src/DFSP_ADAPTER_LAYER/",
-      "SYSTEM_DAEMONS\\": "src/SYSTEM_DAEMONS/"
+      "Application\\": "src/Application/",
+      "Core\\": "src/Core/",
+      "Domain\\": "src/Domain/",
+      "Infrastructure\\": "src/Infrastructure/",
+      "Security\\": "src/Security/"
     }
   },
   "autoload-dev": {
     "psr-4": {
-      "TESTS\\": "src/TESTS/"
+      "Tests\\": "tests/"
     }
   },
   "minimum-stability": "stable",
   "prefer-stable": true
 }
-
