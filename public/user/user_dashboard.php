@@ -139,7 +139,7 @@ try {
 }
 
 /* =========================
-   LOAD USER TRANSACTIONS
+   LOAD USER TRANSACTIONS WITH CASHOUT CODES
 ========================= */
 // For PostgreSQL JSONB query
 $stmt = $db->prepare("
@@ -157,6 +157,39 @@ $stmt->bindValue(':phone_pattern', $userPhonePattern);
 $stmt->bindValue(':user_pattern', $userIdPattern);
 $stmt->execute();
 $userTransactions = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+// Get active cashout vouchers with codes
+$stmt = $db->prepare("
+    SELECT sv.voucher_id, sv.swap_id, sv.code_suffix, sv.amount, 
+           sv.expiry_at, sv.status, sv.claimant_phone, sv.created_at,
+           sr.swap_uuid, sr.destination_details, sr.metadata as swap_metadata
+    FROM swap_vouchers sv
+    JOIN swap_requests sr ON sv.swap_id = sr.swap_id
+    WHERE (CAST(sr.metadata AS TEXT) LIKE :phone_pattern 
+       OR CAST(sr.metadata AS TEXT) LIKE :user_pattern)
+    AND sv.status = 'ACTIVE'
+    AND sv.expiry_at > NOW()
+    ORDER BY sv.created_at DESC
+");
+$stmt->bindValue(':phone_pattern', $userPhonePattern);
+$stmt->bindValue(':user_pattern', $userIdPattern);
+$stmt->execute();
+$activeVouchers = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+// Get destination tokens from metadata (SAT numbers from Saccussalis)
+$stmt = $db->prepare("
+    SELECT swap_uuid, metadata, amount, created_at, status
+    FROM swap_requests
+    WHERE (CAST(metadata AS TEXT) LIKE :phone_pattern 
+       OR CAST(metadata AS TEXT) LIKE :user_pattern)
+    AND metadata->>'destination_token' IS NOT NULL
+    ORDER BY created_at DESC
+    LIMIT 20
+");
+$stmt->bindValue(':phone_pattern', $userPhonePattern);
+$stmt->bindValue(':user_pattern', $userIdPattern);
+$stmt->execute();
+$destinationTokens = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 // Also get card authorizations for this user
 $stmt = $db->prepare("
@@ -339,6 +372,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'swap'
                     'hold_reference' => $result['hold_reference'] ?? null
                 ];
                 
+                // Add cashout code details if present
+                if (isset($result['withdrawal_code'])) {
+                    $swapResult['withdrawal_code'] = $result['withdrawal_code'];
+                    $swapResult['sat_number'] = $result['sat_number'] ?? null;
+                    $swapResult['token_reference'] = $result['token_reference'] ?? null;
+                    $swapResult['expires_at'] = $result['expires_at'] ?? null;
+                }
+                
                 // Add card details if present
                 if (isset($result['card_details'])) {
                     $swapResult['card_details'] = $result['card_details'];
@@ -425,7 +466,6 @@ ob_end_flush();
 <link href="https://api.fontshare.com/v2/css?f[]=clash-display@400,500,600,700&f[]=general-sans@400,500,600&f[]=space-grotesk@400,500,600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 <style>
-    /* ... (same CSS as before) ... */
     * {
         margin: 0;
         padding: 0;
@@ -464,7 +504,7 @@ ob_end_flush();
         z-index: 2;
     }
 
-    .header-card, .swap-card, .transactions-card, .report-container, .cards-card {
+    .header-card, .swap-card, .transactions-card, .report-container, .cards-card, .active-codes-card {
         background: rgba(5, 5, 5, 0.95);
         border: 1px solid rgba(255, 255, 255, 0.08);
         backdrop-filter: blur(10px);
@@ -660,7 +700,7 @@ ob_end_flush();
         font-size: 1rem;
     }
 
-    .transaction-item, .card-item {
+    .transaction-item, .card-item, .code-item {
         padding: 1rem 0;
         border-bottom: 1px solid rgba(255, 255, 255, 0.05);
         display: flex;
@@ -669,21 +709,21 @@ ob_end_flush();
         transition: all 0.2s;
     }
 
-    .transaction-item:last-child, .card-item:last-child { border-bottom: none; }
+    .transaction-item:last-child, .card-item:last-child, .code-item:last-child { border-bottom: none; }
 
-    .transaction-date, .card-date {
+    .transaction-date, .card-date, .code-date {
         font-size: 0.7rem;
         color: #606070;
         margin-bottom: 0.25rem;
     }
 
-    .transaction-amount, .card-amount {
+    .transaction-amount, .card-amount, .code-amount {
         font-weight: 700;
         font-size: 1rem;
         color: #00F0FF;
     }
 
-    .transaction-status, .card-status {
+    .transaction-status, .card-status, .code-status {
         font-size: 0.65rem;
         padding: 0.2rem 0.5rem;
         font-weight: 600;
@@ -758,11 +798,62 @@ ob_end_flush();
         color: #00F0FF;
     }
 
+    /* Code Display Styles */
+    .code-display {
+        background: linear-gradient(135deg, rgba(0, 240, 255, 0.15) 0%, rgba(176, 0, 255, 0.15) 100%);
+        border: 2px solid #00F0FF;
+        border-radius: 12px;
+        padding: 1.5rem;
+        margin: 1rem 0;
+        text-align: center;
+    }
+
+    .code-number {
+        font-family: 'Space Grotesk', monospace;
+        font-size: 3rem;
+        font-weight: 800;
+        letter-spacing: 0.5rem;
+        color: #00F0FF;
+        text-shadow: 0 0 20px rgba(0, 240, 255, 0.5);
+        margin: 0.5rem 0;
+    }
+
+    .code-label {
+        font-size: 0.7rem;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        color: #A0A0B0;
+    }
+
+    .countdown-timer {
+        font-family: 'Space Grotesk', monospace;
+        font-size: 0.875rem;
+        color: #FFC107;
+        margin-top: 0.5rem;
+    }
+
+    .copy-btn {
+        background: rgba(255, 255, 255, 0.1);
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        padding: 0.5rem 1rem;
+        color: #FFFFFF;
+        cursor: pointer;
+        transition: all 0.2s;
+        margin-top: 0.5rem;
+    }
+
+    .copy-btn:hover {
+        background: #00F0FF;
+        color: #050505;
+        border-color: #00F0FF;
+    }
+
     @media (max-width: 640px) {
         body { padding: 1rem; }
         .form-row { grid-template-columns: 1fr; }
         .user-info { flex-direction: column; align-items: flex-start; }
-        .swap-card, .transactions-card, .cards-card { padding: 1.25rem; }
+        .swap-card, .transactions-card, .cards-card, .active-codes-card { padding: 1.25rem; }
+        .code-number { font-size: 2rem; letter-spacing: 0.25rem; }
     }
 </style>
 </head>
@@ -807,6 +898,132 @@ ob_end_flush();
             <i class="fas fa-check-circle"></i>
             <div><?= htmlspecialchars($success) ?></div>
         </div>
+    <?php endif; ?>
+
+    <!-- ACTIVE CASHOUT CODES SECTION - PROMINENT DISPLAY -->
+    <?php if (!empty($activeVouchers) || !empty($destinationTokens)): ?>
+    <div class="active-codes-card">
+        <div class="card-title">
+            <i class="fas fa-key"></i>
+            <h3>Your Active Withdrawal Codes</h3>
+        </div>
+        <div class="info-box" style="margin-bottom: 1rem;">
+            <i class="fas fa-info-circle"></i>
+            <div>Present these codes at the ATM/Agent to complete your withdrawal. Codes expire after 24 hours.</div>
+        </div>
+        
+        <?php 
+        // Combine and sort by expiry
+        $allActiveCodes = [];
+        
+        // Process vouchers (these contain the code suffix)
+        foreach ($activeVouchers as $voucher):
+            $metadata = safeJsonDecode($voucher['swap_metadata'] ?? '{}');
+            $destinationToken = $metadata['destination_token'] ?? null;
+            $expiryTime = strtotime($voucher['expiry_at']);
+            $isExpiringSoon = ($expiryTime - time()) < 3600; // Less than 1 hour
+        ?>
+        <div class="code-item" data-expiry="<?= $expiryTime ?>">
+            <div class="code-left">
+                <div class="code-date">
+                    <i class="far fa-clock"></i> Created: <?= date('d M Y • H:i', strtotime($voucher['created_at'])) ?>
+                </div>
+                <div class="code-display" style="margin: 0.5rem 0; padding: 1rem;">
+                    <div class="code-label">YOUR WITHDRAWAL CODE</div>
+                    <div class="code-number" id="code-<?= $voucher['voucher_id'] ?>">
+                        <?php if ($destinationToken && isset($destinationToken['sat_number'])): ?>
+                            <!-- SAT Number from Saccussalis -->
+                            <span style="font-size: 1rem; letter-spacing: normal;">SAT: </span><?= htmlspecialchars($destinationToken['sat_number']) ?>
+                        <?php else: ?>
+                            <!-- Fallback to code suffix -->
+                            <span style="font-size: 1rem; letter-spacing: normal;">CODE: </span>****<?= htmlspecialchars($voucher['code_suffix']) ?>
+                        <?php endif; ?>
+                    </div>
+                    <?php if ($destinationToken && isset($destinationToken['generated_code'])): ?>
+                        <div class="code-number" style="font-size: 2rem; margin-top: 0.5rem;">
+                            PIN: <?= htmlspecialchars($destinationToken['generated_code']) ?>
+                        </div>
+                    <?php endif; ?>
+                    <button class="copy-btn" onclick="copyToClipboard('<?= $destinationToken['generated_code'] ?? '****' . $voucher['code_suffix'] ?>')">
+                        <i class="fas fa-copy"></i> Copy Code
+                    </button>
+                </div>
+                <div class="code-details">
+                    <strong>Amount:</strong> <?= number_format($voucher['amount'], 2) ?> BWP<br>
+                    <strong>Reference:</strong> <?= htmlspecialchars(substr($voucher['swap_uuid'], 0, 16)) ?>…<br>
+                    <strong>Expires:</strong> <span class="expiry-timer" data-expiry="<?= $expiryTime ?>">
+                        <?= date('d M Y H:i', $expiryTime) ?>
+                    </span>
+                    <?php if ($isExpiringSoon): ?>
+                        <span style="color: #FFC107; margin-left: 0.5rem;">
+                            <i class="fas fa-exclamation-triangle"></i> Expiring soon!
+                        </span>
+                    <?php endif; ?>
+                </div>
+            </div>
+            <div class="code-right">
+                <div class="code-amount">
+                    💰 <?= number_format($voucher['amount'], 2) ?> BWP
+                </div>
+                <span class="code-status status-active">
+                    <i class="fas fa-check-circle"></i> READY
+                </span>
+            </div>
+        </div>
+        <?php endforeach; ?>
+        
+        <!-- Process destination tokens from metadata -->
+        <?php foreach ($destinationTokens as $token):
+            $tokenData = safeJsonDecode($token['metadata'] ?? '{}');
+            $destToken = $tokenData['destination_token'] ?? null;
+            if (!$destToken) continue;
+            
+            $expiryTime = isset($destToken['expires_at']) ? strtotime($destToken['expires_at']) : (time() + 86400);
+            $isExpiringSoon = ($expiryTime - time()) < 3600;
+        ?>
+        <div class="code-item" data-expiry="<?= $expiryTime ?>">
+            <div class="code-left">
+                <div class="code-date">
+                    <i class="far fa-clock"></i> Created: <?= date('d M Y • H:i', strtotime($token['created_at'])) ?>
+                </div>
+                <div class="code-display" style="margin: 0.5rem 0; padding: 1rem;">
+                    <div class="code-label">YOUR WITHDRAWAL CODE</div>
+                    <div class="code-number" id="token-<?= $token['swap_uuid'] ?>">
+                        SAT: <?= htmlspecialchars($destToken['sat_number'] ?? $destToken['token_reference'] ?? 'N/A') ?>
+                    </div>
+                    <?php if (isset($destToken['generated_code'])): ?>
+                        <div class="code-number" style="font-size: 2rem; margin-top: 0.5rem;">
+                            PIN: <?= htmlspecialchars($destToken['generated_code']) ?>
+                        </div>
+                        <button class="copy-btn" onclick="copyToClipboard('<?= htmlspecialchars($destToken['generated_code']) ?>')">
+                            <i class="fas fa-copy"></i> Copy PIN
+                        </button>
+                    <?php endif; ?>
+                </div>
+                <div class="code-details">
+                    <strong>Amount:</strong> <?= number_format($token['amount'] ?? 0, 2) ?> BWP<br>
+                    <strong>Reference:</strong> <?= htmlspecialchars(substr($token['swap_uuid'], 0, 16)) ?>…<br>
+                    <strong>Expires:</strong> <span class="expiry-timer" data-expiry="<?= $expiryTime ?>">
+                        <?= date('d M Y H:i', $expiryTime) ?>
+                    </span>
+                    <?php if ($isExpiringSoon): ?>
+                        <span style="color: #FFC107; margin-left: 0.5rem;">
+                            <i class="fas fa-exclamation-triangle"></i> Expiring soon!
+                        </span>
+                    <?php endif; ?>
+                </div>
+            </div>
+            <div class="code-right">
+                <div class="code-amount">
+                    💰 <?= number_format($token['amount'] ?? 0, 2) ?> BWP
+                </div>
+                <span class="code-status status-active">
+                    <i class="fas fa-check-circle"></i> READY
+                </span>
+            </div>
+        </div>
+        <?php endforeach; ?>
+    </div>
     <?php endif; ?>
 
     <div class="swap-card">
@@ -952,6 +1169,8 @@ ob_end_flush();
                     $destDetails = safeJsonDecode($tx['destination_details'] ?? '{}');
                     $sourceType = $sourceDetails['asset_type'] ?? $sourceDetails['delivery_mode'] ?? 'UNKNOWN';
                     $destType = $destDetails['delivery_mode'] ?? $destDetails['asset_type'] ?? 'UNKNOWN';
+                    $txMetadata = safeJsonDecode($tx['metadata'] ?? '{}');
+                    $hasCode = isset($txMetadata['destination_token']['generated_code']);
                 ?>
                 <div class="transaction-item">
                     <div class="transaction-left">
@@ -962,6 +1181,11 @@ ob_end_flush();
                             <?= htmlspecialchars($sourceType) ?>
                             <i class="fas fa-arrow-right" style="font-size: 0.6rem; margin: 0 0.25rem;"></i>
                             <?= htmlspecialchars($destType) ?>
+                            <?php if ($hasCode): ?>
+                                <span style="color: #00F0FF; margin-left: 0.5rem;">
+                                    <i class="fas fa-key"></i> Code Generated
+                                </span>
+                            <?php endif; ?>
                         </div>
                     </div>
                     <div class="transaction-right">
@@ -980,6 +1204,64 @@ ob_end_flush();
 </div>
 
 <script>
+// Countdown timer function
+function updateCountdowns() {
+    const timers = document.querySelectorAll('.expiry-timer');
+    const now = Math.floor(Date.now() / 1000);
+    
+    timers.forEach(timer => {
+        const expiry = parseInt(timer.dataset.expiry);
+        const remaining = expiry - now;
+        
+        if (remaining <= 0) {
+            timer.innerHTML = '<span style="color: #FF6060;">EXPIRED</span>';
+            const codeItem = timer.closest('.code-item');
+            if (codeItem) {
+                codeItem.style.opacity = '0.5';
+                const statusSpan = codeItem.querySelector('.code-status');
+                if (statusSpan) {
+                    statusSpan.innerHTML = '<i class="fas fa-times-circle"></i> EXPIRED';
+                    statusSpan.className = 'code-status status-expired';
+                }
+            }
+        } else if (remaining < 3600) {
+            const minutes = Math.floor(remaining / 60);
+            const seconds = remaining % 60;
+            timer.innerHTML = `<span style="color: #FFC107;">Expires in: ${minutes}m ${seconds}s</span>`;
+        } else {
+            const hours = Math.floor(remaining / 3600);
+            const minutes = Math.floor((remaining % 3600) / 60);
+            timer.innerHTML = `<span>Expires in: ${hours}h ${minutes}m</span>`;
+        }
+    });
+}
+
+// Copy to clipboard function
+function copyToClipboard(text) {
+    navigator.clipboard.writeText(text).then(() => {
+        // Show temporary notification
+        const notification = document.createElement('div');
+        notification.innerHTML = '✅ Code copied to clipboard!';
+        notification.style.cssText = `
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #00F0FF;
+            color: #050505;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-weight: 600;
+            z-index: 9999;
+            animation: fadeOut 2s ease-out;
+        `;
+        document.body.appendChild(notification);
+        setTimeout(() => notification.remove(), 2000);
+    }).catch(() => {
+        alert('Press Ctrl+C to copy the code');
+    });
+}
+
 const sourceType = document.getElementById('sourceType');
 const dynamicContainer = document.getElementById('dynamicContainer');
 const destType = document.getElementById('destType');
@@ -1076,6 +1358,21 @@ function displaySwapReport(data) {
     const fee = data.fee || (data.delivery_mode === 'cashout' ? 10.00 : 6.00);
     const netAmount = data.net_amount || (data.amount - fee);
     
+    let codeHtml = '';
+    if (data.withdrawal_code) {
+        codeHtml = `
+            <div class="code-display" style="margin-bottom: 1.5rem;">
+                <div class="code-label">YOUR WITHDRAWAL CODE</div>
+                <div class="code-number" style="font-size: 2.5rem;">${data.withdrawal_code}</div>
+                ${data.sat_number ? `<div class="code-label" style="margin-top: 0.5rem;">SAT Reference: ${data.sat_number}</div>` : ''}
+                ${data.expires_at ? `<div class="countdown-timer">Valid until: ${new Date(data.expires_at).toLocaleString()}</div>` : ''}
+                <button class="copy-btn" onclick="copyToClipboard('${data.withdrawal_code}')">
+                    <i class="fas fa-copy"></i> Copy Code
+                </button>
+            </div>
+        `;
+    }
+    
     let cardHtml = '';
     if (data.card_details) {
         cardHtml = `
@@ -1135,6 +1432,7 @@ function displaySwapReport(data) {
                 </div>
             </div>
             
+            ${codeHtml}
             ${cardHtml}
             ${notesHtml}
             
@@ -1241,6 +1539,20 @@ destType.addEventListener('change', updateDestinationPlaceholder);
 
 updateDynamicFields();
 updateDestinationPlaceholder();
+
+// Update countdowns every second
+setInterval(updateCountdowns, 1000);
+updateCountdowns();
+
+// Add fade-out animation style
+const style = document.createElement('style');
+style.textContent = `
+    @keyframes fadeOut {
+        0% { opacity: 1; transform: translateX(-50%) translateY(0); }
+        100% { opacity: 0; transform: translateX(-50%) translateY(-20px); }
+    }
+`;
+document.head.appendChild(style);
 </script>
 
 </body>
