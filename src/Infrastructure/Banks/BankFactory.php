@@ -2,8 +2,8 @@
 
 namespace Infrastructure\Banks;
 
-use CORE_CONFIG\CountryBankRegistry;
-use CORE_CONFIG\SystemCountry;
+use Core\Config\CountryBankRegistry;
+use Core\Config\SystemCountry;
 
 class BankFactory
 {
