@@ -1,10 +1,6 @@
 <?php
 
-require_once dirname(__DIR__, 2) . '/src/bootstrap.php';
-
-
-namespace INTEGRATION_LAYER\INTERFACES;
-
+namespace Infrastructure\Banks\Contracts;
 /**
  * Complete Bank API Interface for VouchMorph Swap System
  * Supports all wallet_types: ACCOUNT, VOUCHER, E-WALLET, WALLET, CARD, ATM, AGENT
