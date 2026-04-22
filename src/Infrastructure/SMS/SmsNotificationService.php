@@ -1,14 +1,12 @@
 <?php
 
-require_once dirname(__DIR__, 2) . '/src/bootstrap.php';
-
 declare(strict_types=1);
 
-namespace BUSINESS_LOGIC_LAYER\services;
+namespace Infrastructure\SMS;
 
 use PDO;
 use Exception;
-use INTEGRATION_LAYER\CLIENTS\CommunicationClients\SmsGatewayClient;
+use Infrastructure\SMS\SmsGatewayClient;
 
 /**
  * SMS Notification Service
