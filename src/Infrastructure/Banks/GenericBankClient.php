@@ -1,13 +1,10 @@
 <?php
 
-require_once dirname(__DIR__, 2) . '/src/bootstrap.php';
+namespace Infrastructure\Banks;
 
+require_once __DIR__ . '/Contracts/BankAPIInterface.php';
 
-namespace INTEGRATION_LAYER\CLIENTS\BankClients;
-
-require_once __DIR__ . '/../../INTERFACES/BankAPIInterface.php';
-
-use INTEGRATION_LAYER\INTERFACES\BankAPIInterface;
+use Infrastructure\Banks\Contracts\BankAPIInterface;
 
 class GenericBankClient implements BankAPIInterface
 {
