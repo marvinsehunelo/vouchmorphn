@@ -1894,7 +1894,7 @@ class SwapService
 
     /**
      * Request token/code from destination institution (e.g., Saccussalis)
-     * This replaces the old requestAtmToken method
+     * FIXED: Matches generate_code.php expectations
      */
     private function requestTokenFromDestination(
         string $swapRef, 
@@ -1911,8 +1911,7 @@ class SwapService
             $bankClient = new GenericBankClient($participant);
             $debug[] = ['time' => microtime(true), 'step' => 'BANK_CLIENT_CREATED'];
 
-            // Prepare payload as per BankAPIInterface::generateToken()
-            // Note: We do NOT send a code_hash - let destination generate its own code
+            // FIX: Match exactly what generate_code.php expects
             $payload = [
                 'reference' => $swapRef,
                 'source_institution' => $source['institution'],
@@ -1920,17 +1919,16 @@ class SwapService
                 'source_asset_type' => $source['asset_type'],
                 'beneficiary_phone' => $destination['cashout']['beneficiary_phone'] ?? '',
                 'amount' => $netAmount ?? $destination['amount'],
-                'currency' => $destination['currency'] ?? 'BWP',
-                'expiry_hours' => 24,
-                'action' => 'GENERATE_TOKEN'
+                'code_hash' => null,  // generate_code.php expects this, even if null
+                'action' => 'GENERATE_ATM_TOKEN'  // Important: matches generate_code.php logic
             ];
             
             $debug[] = ['time' => microtime(true), 'step' => 'PAYLOAD_PREPARED'];
 
-            error_log("REQUEST_TOKEN: About to call bankClient->generateToken with payload: " . json_encode($payload));
+            error_log("REQUEST_TOKEN: About to call bankClient->transfer with payload: " . json_encode($payload));
             
-            // Use the generateToken method as defined in BankAPIInterface
-            $result = $bankClient->generateToken($payload);
+            // Use transfer with 'generate_atm_code' type to match existing logic
+            $result = $bankClient->transfer($payload, 'generate_atm_code');
             
             $debug[] = ['time' => microtime(true), 'step' => 'API_CALL_COMPLETE', 'result_success' => $result['success'] ?? false];
             error_log("REQUEST_TOKEN: API call result: " . json_encode($result));
@@ -2011,6 +2009,7 @@ class SwapService
 
     /**
      * Store destination token reference in database
+     * FIXED: Stores the generated_code as well
      */
     private function storeDestinationToken(int $swapId, array $tokenResult): void
     {
@@ -2021,14 +2020,17 @@ class SwapService
                 WHERE swap_id = ?
             ");
             
+            // IMPORTANT: Store the generated_code as well for dashboard display
             $metadata = json_encode([
                 'destination_token' => [
                     'token_reference' => $tokenResult['token_reference'] ?? null,
                     'sat_number' => $tokenResult['sat_number'] ?? null,
+                    'generated_code' => $tokenResult['generated_code'] ?? $tokenResult['pin'] ?? null,
                     'expires_at' => $tokenResult['expires_at'] ?? null,
                     'instrument_id' => $tokenResult['instrument_id'] ?? null,
                     'sat_id' => $tokenResult['sat_id'] ?? null,
                     'issuer_bank' => $tokenResult['issuer_bank'] ?? null,
+                    'acquirer_network' => $tokenResult['acquirer_network'] ?? null,
                     'institution' => 'DESTINATION'
                 ]
             ]);
@@ -2037,6 +2039,7 @@ class SwapService
             
             $this->logEvent((string)$swapId, 'DESTINATION_TOKEN_STORED', [
                 'token_reference' => $tokenResult['token_reference'] ?? null,
+                'has_code' => !empty($tokenResult['generated_code']),
                 'expires_at' => $tokenResult['expires_at'] ?? null
             ]);
         } catch (Exception $e) {
