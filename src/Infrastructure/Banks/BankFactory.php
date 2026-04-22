@@ -1,9 +1,6 @@
 <?php
 
-require_once dirname(__DIR__, 2) . '/src/bootstrap.php';
-
-
-namespace INTEGRATION_LAYER\CLIENTS\BankClients;
+namespace Infrastructure\Banks;
 
 use CORE_CONFIG\CountryBankRegistry;
 use CORE_CONFIG\SystemCountry;
