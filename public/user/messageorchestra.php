@@ -16,8 +16,13 @@ if (!defined('APP_ROOT')) {
 }
 
 @include_once APP_ROOT . '/vendor/autoload.php';
-require_once APP_ROOT . '/src/DATA_PERSISTENCE_LAYER/config/DBConnection.php';
-use DATA_PERSISTENCE_LAYER\config\DBConnection;
+
+// FIX: Correct path to DBConnection.php
+require_once APP_ROOT . '/src/Core/Database/DBConnection.php';
+
+// FIX: Use the correct namespace
+use Core\Database\DBConnection;
+
 $db = DBConnection::getConnection();
 
 // ============================================================================
