@@ -140,6 +140,7 @@ class GenericBankClient implements BankAPIInterface
         
         switch ($action) {
             case 'GENERATE_ATM_TOKEN':
+            case 'generate_atm_code':  // FIX: ADD THIS CASE
                 error_log("Mapping to generateToken");
                 return $this->generateToken($payload);
                 
@@ -178,6 +179,8 @@ class GenericBankClient implements BankAPIInterface
         error_log("=== GENERIC BANK CLIENT SEND ===");
         error_log("Bank: " . ($this->config['provider_code'] ?? 'unknown'));
         error_log("Action: " . $action);
+        error_log("Endpoint: " . ($endpoint ?? 'null'));
+        error_log("Full URL: " . (rtrim($this->config['base_url'] ?? '', '/') . '/' . ltrim($endpoint ?? '', '/')));
 
         // ADD THIS CRITICAL DEBUG
         error_log("🚨 FULL PAYLOAD BEING SENT TO BANK: " . json_encode($payload));
