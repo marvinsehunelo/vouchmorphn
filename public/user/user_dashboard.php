@@ -181,7 +181,7 @@ $stmt = $db->prepare("
     FROM swap_requests
     WHERE (CAST(metadata AS TEXT) LIKE :phone_pattern 
        OR CAST(metadata AS TEXT) LIKE :user_pattern)
-    AND metadata ? 'destination_token'
+    AND metadata @> '{\"destination_token\": null}'   
     ORDER BY created_at DESC
     LIMIT 20
 ");
