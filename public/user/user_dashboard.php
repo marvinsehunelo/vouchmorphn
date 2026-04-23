@@ -120,9 +120,21 @@ foreach ($participants as $p) {
 $countryConfigPath = __DIR__ . "/../../src/Core/Config/Countries/{$systemCountry}/config.php";
 $countryConfig = file_exists($countryConfigPath) ? require $countryConfigPath : [];
 
-// Initialize SwapService
+// Initialize SwapService - NO FALLBACK, MUST SUCCEED
 $encryptionKey = $config['encryption']['key'] ?? getenv('ENCRYPTION_KEY') ?: 'default-encryption-key-32-chars!!';
-$swapService = null;
+
+// Validate required country configs exist
+$countryDataDir = __DIR__ . "/../../src/Core/Config/Countries/{$systemCountry}";
+if (!is_dir($countryDataDir)) {
+    die("System Error: Country configuration missing for {$systemCountry}");
+}
+
+$requiredFiles = ['fees.json', 'cards.json', 'atm_notes.json'];
+foreach ($requiredFiles as $file) {
+    if (!file_exists($countryDataDir . '/' . $file)) {
+        die("System Error: Missing required config file: {$file} for {$systemCountry}");
+    }
+}
 
 try {
     $swapService = new SwapService(
@@ -134,8 +146,9 @@ try {
     );
     error_log("SwapService initialized successfully in dashboard");
 } catch (\Exception $e) {
-    error_log("Failed to initialize SwapService: " . $e->getMessage());
-    // Continue without SwapService - will use fallback
+    error_log("CRITICAL: Failed to initialize SwapService: " . $e->getMessage());
+    error_log("Stack trace: " . $e->getTraceAsString());
+    die("System Error: Swap service unavailable. Please contact support. Error: " . $e->getMessage());
 }
 
 /* =========================
@@ -158,30 +171,13 @@ $stmt->bindValue(':user_pattern', $userIdPattern);
 $stmt->execute();
 $userTransactions = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-// Get active cashout vouchers with codes
-$stmt = $db->prepare("
-    SELECT sv.voucher_id, sv.swap_id, sv.code_suffix, sv.amount, 
-           sv.expiry_at, sv.status, sv.claimant_phone, sv.created_at,
-           sr.swap_uuid, sr.destination_details, sr.metadata as swap_metadata
-    FROM swap_vouchers sv
-    JOIN swap_requests sr ON sv.swap_id = sr.swap_id
-    WHERE (CAST(sr.metadata AS TEXT) LIKE :phone_pattern 
-       OR CAST(sr.metadata AS TEXT) LIKE :user_pattern)
-    AND sv.status = 'ACTIVE'
-    AND sv.expiry_at > NOW()
-    ORDER BY sv.created_at DESC
-");
-$stmt->bindValue(':phone_pattern', $userPhonePattern);
-$stmt->bindValue(':user_pattern', $userIdPattern);
-$stmt->execute();
-$activeVouchers = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
+// Get destination tokens from metadata (SAT numbers from destination institution)
 $stmt = $db->prepare("
     SELECT swap_uuid, metadata, amount, created_at, status
     FROM swap_requests
     WHERE (CAST(metadata AS TEXT) LIKE :phone_pattern 
        OR CAST(metadata AS TEXT) LIKE :user_pattern)
-    AND metadata @> '{\"destination_token\": null}'   
+    AND metadata @> '{\"destination_token\": null}'
     ORDER BY created_at DESC
     LIMIT 20
 ");
@@ -206,7 +202,7 @@ $stmt->execute();
 $cardAuthorizations = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 /* =========================
-   HANDLE SWAP VIA SWAPSERVICE
+   HANDLE SWAP VIA SWAPSERVICE - NO FALLBACK
 ========================= */
 $error = null;
 $success = null;
@@ -342,84 +338,49 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'swap'
             ]
         ];
         
-        if ($swapService !== null) {
-            error_log("Executing swap via SwapService: " . json_encode($swapPayload));
-            $result = $swapService->executeSwap($swapPayload);
-            error_log("SwapService result: " . json_encode($result));
+        // Execute swap via SwapService - NO FALLBACK
+        error_log("Executing swap via SwapService: " . json_encode($swapPayload));
+        $result = $swapService->executeSwap($swapPayload);
+        error_log("SwapService result: " . json_encode($result));
+        
+        if ($result['status'] === 'success') {
+            $swapRef = $result['swap_reference'];
+            $fee = $result['fee'] ?? ($destinationType === 'cashout' ? 10.00 : ($destinationType === 'card_load' ? 6.00 : 6.00));
+            $netAmount = $result['net_amount'] ?? ($amount - $fee);
             
-            if ($result['status'] === 'success') {
-                $swapRef = $result['swap_reference'];
-                $fee = $result['fee'] ?? ($destinationType === 'cashout' ? 10.00 : ($destinationType === 'card_load' ? 6.00 : 6.00));
-                $netAmount = $result['net_amount'] ?? ($amount - $fee);
-                
-                $swapResult = [
-                    'status' => 'success',
-                    'swap_reference' => $swapRef,
-                    'amount' => $amount,
-                    'delivery_mode' => $destinationType,
-                    'fee' => $fee,
-                    'net_amount' => $netAmount,
-                    'hold_reference' => $result['hold_reference'] ?? null
-                ];
-                
-                if (isset($result['withdrawal_code'])) {
-                    $swapResult['withdrawal_code'] = $result['withdrawal_code'];
-                    $swapResult['sat_number'] = $result['sat_number'] ?? null;
-                    $swapResult['token_reference'] = $result['token_reference'] ?? null;
-                    $swapResult['expires_at'] = $result['expires_at'] ?? null;
-                }
-                
-                if (isset($result['card_details'])) {
-                    $swapResult['card_details'] = $result['card_details'];
-                }
-                
-                if (isset($result['dispensed_notes'])) {
-                    $swapResult['dispensed_notes'] = $result['dispensed_notes'];
-                }
-                
-                $success = "✅ Swap executed successfully! Reference: " . substr($swapRef, 0, 16) . "…";
-                
-                if ($isAjax) {
-                    echo json_encode($swapResult);
-                    exit;
-                }
-            } else {
-                throw new \Exception($result['message'] ?? 'Swap execution failed');
-            }
-        } else {
-            $swapRef = 'SWP-' . strtoupper(bin2hex(random_bytes(6)));
-            $metadata = array_merge($swapPayload['metadata'], ['fallback_mode' => true]);
-            
-            $stmt = $db->prepare("
-                INSERT INTO swap_requests (swap_uuid, from_currency, to_currency, amount, source_details, destination_details, status, created_at, metadata)
-                VALUES (:swap_uuid, :from_currency, :to_currency, :amount, :source_details, :destination_details, :status, NOW(), :metadata)
-            ");
-            $stmt->execute([
-                ':swap_uuid' => $swapRef,
-                ':from_currency' => 'BWP',
-                ':to_currency' => 'BWP',
-                ':amount' => $amount,
-                ':source_details' => json_encode($swapPayload['source'], JSON_UNESCAPED_UNICODE),
-                ':destination_details' => json_encode($swapPayload['destination'], JSON_UNESCAPED_UNICODE),
-                ':status' => 'pending',
-                ':metadata' => json_encode($metadata, JSON_UNESCAPED_UNICODE)
-            ]);
-            
-            $fee = $destinationType === 'cashout' ? 10.00 : 6.00;
             $swapResult = [
                 'status' => 'success',
                 'swap_reference' => $swapRef,
                 'amount' => $amount,
                 'delivery_mode' => $destinationType,
                 'fee' => $fee,
-                'net_amount' => $amount - $fee
+                'net_amount' => $netAmount,
+                'hold_reference' => $result['hold_reference'] ?? null
             ];
-            $success = "✅ Swap request created! Reference: " . substr($swapRef, 0, 16) . "… (pending processing)";
+            
+            if (isset($result['withdrawal_code'])) {
+                $swapResult['withdrawal_code'] = $result['withdrawal_code'];
+                $swapResult['sat_number'] = $result['sat_number'] ?? null;
+                $swapResult['token_reference'] = $result['token_reference'] ?? null;
+                $swapResult['expires_at'] = $result['expires_at'] ?? null;
+            }
+            
+            if (isset($result['card_details'])) {
+                $swapResult['card_details'] = $result['card_details'];
+            }
+            
+            if (isset($result['dispensed_notes'])) {
+                $swapResult['dispensed_notes'] = $result['dispensed_notes'];
+            }
+            
+            $success = "✅ Swap executed successfully! Reference: " . substr($swapRef, 0, 16) . "…";
             
             if ($isAjax) {
                 echo json_encode($swapResult);
                 exit;
             }
+        } else {
+            throw new \Exception($result['message'] ?? 'Swap execution failed');
         }
         
     } catch (\Exception $e) {
@@ -1486,7 +1447,7 @@ async function executeSwap(formData) {
         
         const text = await response.text();
         let data;
-        try { data = JSON.parse(text); } catch (e) { throw new Error('Invalid JSON response'); }
+        try { data = JSON.parse(text); } catch (e) { throw new Error('Invalid JSON response: ' + text.substring(0, 200)); }
         
         if (data.status === 'success') {
             displaySwapReport(data);
