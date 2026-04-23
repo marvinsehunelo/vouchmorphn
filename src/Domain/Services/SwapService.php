@@ -9,6 +9,8 @@ use DateTimeImmutable;
 use RuntimeException;
 require_once __DIR__ . '/../ValueObjects/SwapStatusResolver.php';
 require_once __DIR__ . '/Settlement/HybridSettlementStrategy.php';
+require_once __DIR__ . '/../../Infrastructure/SMS/SmsNotificationService.php';
+
 
 use Security\Encryption\TokenEncryptor;
 use Domain\Services\Settlement\HybridSettlementStrategy;
