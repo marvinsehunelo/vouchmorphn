@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 namespace Infrastructure\SMS;
+require_once __DIR__ . '/SmsGatewayClient.php';
 
 use PDO;
 use Exception;
