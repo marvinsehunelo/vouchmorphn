@@ -1,38 +1,39 @@
 {
-  "metadata": {
-    "version": "1.0.0",
-    "standard": "VOUCHMORPH-FEE-STANDARD",
-    "region": "BW",
-    "last_updated": "2026-03-02"
-  },
-
   "fees": {
     "CASHOUT_SWAP_FEE": {
-      "description": "Fee for swapping asset to cashout via ATM/Agent",
       "total_amount": 10.00,
       "currency": "BWP",
-      "taxable": true,
       "split": {
-        "source_participant": 2.00,
-        "vouchmorph": 4.00,
-        "destination_participant": 4.00
+        "platform": 5.00,
+        "partner": 5.00
       }
     },
-    
     "DEPOSIT_SWAP_FEE": {
-      "description": "Fee for swapping asset to deposit in account/wallet",
       "total_amount": 6.00,
       "currency": "BWP",
-      "taxable": true,
       "split": {
-        "source_participant": 1.20,
-        "vouchmorph": 2.40,
-        "destination_participant": 2.40
+        "platform": 3.00,
+        "partner": 3.00
+      }
+    },
+    "CARD_LOAD_FEE": {
+      "total_amount": 6.00,
+      "currency": "BWP",
+      "split": {
+        "platform": 3.00,
+        "partner": 3.00
+      }
+    },
+    "CARD_ISSUANCE_FEE": {
+      "total_amount": 25.00,
+      "currency": "BWP",
+      "split": {
+        "platform": 12.50,
+        "partner": 12.50
       }
     }
   },
-
   "regulatory": {
-    "vat_rate": 0.14
+    "vat_rate": 0.12
   }
 }
