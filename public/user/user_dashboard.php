@@ -116,25 +116,12 @@ foreach ($participants as $p) {
 ];
 }
 
-// Load country-specific configs
+// Load country-specific configs - just pass to SwapService, don't validate
 $countryConfigPath = __DIR__ . "/../../src/Core/Config/Countries/{$systemCountry}/config.php";
 $countryConfig = file_exists($countryConfigPath) ? require $countryConfigPath : [];
 
-// Initialize SwapService - NO FALLBACK, MUST SUCCEED
+// Initialize SwapService - let it handle its own validation
 $encryptionKey = $config['encryption']['key'] ?? getenv('ENCRYPTION_KEY') ?: 'default-encryption-key-32-chars!!';
-
-// Validate required country configs exist
-$countryDataDir = __DIR__ . "/../../src/Core/Config/Countries/{$systemCountry}";
-if (!is_dir($countryDataDir)) {
-    die("System Error: Country configuration missing for {$systemCountry}");
-}
-
-$requiredFiles = ['fees.json', 'cards.json', 'atm_notes.json'];
-foreach ($requiredFiles as $file) {
-    if (!file_exists($countryDataDir . '/' . $file)) {
-        die("System Error: Missing required config file: {$file} for {$systemCountry}");
-    }
-}
 
 try {
     $swapService = new SwapService(
@@ -148,7 +135,16 @@ try {
 } catch (\Exception $e) {
     error_log("CRITICAL: Failed to initialize SwapService: " . $e->getMessage());
     error_log("Stack trace: " . $e->getTraceAsString());
-    die("System Error: Swap service unavailable. Please contact support. Error: " . $e->getMessage());
+    
+    // For AJAX requests, return JSON error
+    if (!empty($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest') {
+        header('Content-Type: application/json');
+        echo json_encode(['status' => 'error', 'message' => 'Swap service unavailable: ' . $e->getMessage()]);
+        exit;
+    }
+    
+    // For regular page loads, show error
+    die("System Error: Swap service unavailable. Please contact support.<br>Error: " . htmlspecialchars($e->getMessage()));
 }
 
 /* =========================
