@@ -1,20 +1,17 @@
 <?php
-
-require_once dirname(__DIR__, 2) . '/src/bootstrap.php';
-
 declare(strict_types=1);
 
-namespace BUSINESS_LOGIC_LAYER\services;
+namespace Domain\Services;
 
-require_once __DIR__ . '/../../INTEGRATION_LAYER/CLIENTS/CardSchemes/CardNumberGenerator.php';
+require_once __DIR__ . '/../../Infrastructure/Cards/CardNumberGenerator.php';
 require_once __DIR__ . '/../Helpers/CardHelper.php';
 
 use PDO;
 use Exception;
 use DateTimeImmutable;
 use RuntimeException;
-use BUSINESS_LOGIC_LAYER\Helpers\CardHelper;
-use INTEGRATION_LAYER\CLIENTS\CardSchemes\CardNumberGenerator;
+use Domain\Helpers\CardHelper;
+use Infrastructure\Cards\CardNumberGenerator;
 
 /**
  * CardService - Message Card Management
@@ -244,7 +241,7 @@ class CardService
             $cardStmt = $this->db->prepare("
                 SELECT * FROM message_cards 
                 WHERE card_suffix = :suffix 
-                AND lifecycle_status IN ('ASSIGNED', 'DELIVERED', 'ACTIVE')
+                AND status IN ('ASSIGNED', 'DELIVERED', 'ACTIVE')
                 FOR UPDATE
             ");
             $cardStmt->execute([':suffix' => $data['card_suffix']]);
@@ -272,8 +269,7 @@ class CardService
                     swap_reference = :swap_ref,
                     initial_amount = initial_amount + :amount,
                     remaining_amount = remaining_amount + :amount,
-                    financial_status = 'FUNDED',
-                    lifecycle_status = 'ACTIVE',
+                    status = 'ACTIVE',
                     activated_at = COALESCE(activated_at, NOW()),
                     updated_at = NOW()
                 WHERE card_id = :card_id
@@ -313,117 +309,109 @@ class CardService
     }
 
     /**
- * Get card authorization details (the message)
- * 
- * @param string $cardSuffix The card suffix (last 4 digits)
- * @return array Card authorization details
- * @throws RuntimeException if card not found or expired
- */
-public function getCardAuthorization(string $cardSuffix): array
-{
-    $stmt = $this->db->prepare("
-        SELECT 
-            ca.authorization_id,
-            ca.swap_id,
-            ca.swap_reference,
-            ca.card_suffix,
-            ca.authorized_amount,
-            ca.remaining_balance,
-            ca.hold_reference,
-            ca.source_institution,
-            ca.fee_amount,
-            ca.vat_amount,
-            ca.status,
-            ca.expiry_at,
-            ca.created_at,
-            mc.cardholder_name,
-            mc.currency,
-            mc.daily_limit,
-            mc.monthly_limit,
-            mc.atm_daily_limit
-        FROM card_authorizations ca
-        JOIN message_cards mc ON ca.card_suffix = mc.card_suffix
-        WHERE ca.card_suffix = ? 
-        AND ca.status = 'ACTIVE'
-        AND ca.expiry_at > NOW()
-        ORDER BY ca.created_at DESC
-        LIMIT 1
-    ");
-    
-    $stmt->execute([$cardSuffix]);
-    $auth = $stmt->fetch(PDO::FETCH_ASSOC);
-    
-    if (!$auth) {
-        // Try to find any active card without authorization
-        $cardStmt = $this->db->prepare("
-            SELECT * FROM message_cards 
-            WHERE card_suffix = ? 
-            AND status = 'ACTIVE'
+     * Get card authorization details (the message)
+     */
+    public function getCardAuthorization(string $cardSuffix): array
+    {
+        $stmt = $this->db->prepare("
+            SELECT 
+                ca.authorization_id,
+                ca.swap_id,
+                ca.swap_reference,
+                ca.card_suffix,
+                ca.authorized_amount,
+                ca.remaining_balance,
+                ca.hold_reference,
+                ca.source_institution,
+                ca.fee_amount,
+                ca.vat_amount,
+                ca.status,
+                ca.expiry_at,
+                ca.created_at,
+                mc.cardholder_name,
+                mc.currency,
+                mc.daily_limit,
+                mc.monthly_limit,
+                mc.atm_daily_limit
+            FROM card_authorizations ca
+            JOIN message_cards mc ON ca.card_suffix = mc.card_suffix
+            WHERE ca.card_suffix = ? 
+            AND ca.status = 'ACTIVE'
+            AND ca.expiry_at > NOW()
+            ORDER BY ca.created_at DESC
             LIMIT 1
         ");
-        $cardStmt->execute([$cardSuffix]);
-        $card = $cardStmt->fetch(PDO::FETCH_ASSOC);
         
-        if ($card) {
-            // Card exists but no active authorization
-            return [
-                'authorization_id' => null,
-                'card_suffix' => $card['card_suffix'],
-                'cardholder_name' => $card['cardholder_name'],
-                'authorized_amount' => (float)$card['initial_amount'],
-                'remaining_balance' => (float)$card['remaining_amount'],
-                'hold_reference' => $card['hold_reference'],
-                'source_institution' => $card['source_institution'] ?? 'VOUCHMORPH',
-                'expiry' => $card['expiry_year'] . '-' . $card['expiry_month'] . '-01',
-                'currency' => $card['currency'] ?? 'BWP',
-                'is_authorization' => false
-            ];
+        $stmt->execute([$cardSuffix]);
+        $auth = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+        if (!$auth) {
+            $cardStmt = $this->db->prepare("
+                SELECT * FROM message_cards 
+                WHERE card_suffix = ? 
+                AND status = 'ACTIVE'
+                LIMIT 1
+            ");
+            $cardStmt->execute([$cardSuffix]);
+            $card = $cardStmt->fetch(PDO::FETCH_ASSOC);
+            
+            if ($card) {
+                return [
+                    'authorization_id' => null,
+                    'card_suffix' => $card['card_suffix'],
+                    'cardholder_name' => $card['cardholder_name'],
+                    'authorized_amount' => (float)$card['initial_amount'],
+                    'remaining_balance' => (float)$card['remaining_amount'],
+                    'hold_reference' => $card['hold_reference'],
+                    'source_institution' => $card['source_institution'] ?? 'VOUCHMORPH',
+                    'expiry' => $card['expiry_year'] . '-' . $card['expiry_month'] . '-01',
+                    'currency' => $card['currency'] ?? 'BWP',
+                    'is_authorization' => false
+                ];
+            }
+            
+            throw new RuntimeException("Card not found or no active authorization");
         }
         
-        throw new RuntimeException("Card not found or no active authorization");
+        return [
+            'authorization_id' => (int)$auth['authorization_id'],
+            'card_suffix' => $auth['card_suffix'],
+            'cardholder_name' => $auth['cardholder_name'],
+            'authorized_amount' => (float)$auth['authorized_amount'],
+            'remaining_balance' => (float)$auth['remaining_balance'],
+            'hold_reference' => $auth['hold_reference'],
+            'source_institution' => $auth['source_institution'] ?? 'VOUCHMORPH',
+            'expiry' => $auth['expiry_at'],
+            'currency' => $auth['currency'] ?? 'BWP',
+            'fee_amount' => (float)$auth['fee_amount'],
+            'vat_amount' => (float)$auth['vat_amount'],
+            'status' => $auth['status'],
+            'daily_limit' => (float)$auth['daily_limit'],
+            'monthly_limit' => (float)$auth['monthly_limit'],
+            'atm_daily_limit' => (float)$auth['atm_daily_limit'],
+            'is_authorization' => true
+        ];
     }
-    
-    return [
-        'authorization_id' => (int)$auth['authorization_id'],
-        'card_suffix' => $auth['card_suffix'],
-        'cardholder_name' => $auth['cardholder_name'],
-        'authorized_amount' => (float)$auth['authorized_amount'],
-        'remaining_balance' => (float)$auth['remaining_balance'],
-        'hold_reference' => $auth['hold_reference'],
-        'source_institution' => $auth['source_institution'] ?? 'VOUCHMORPH',
-        'expiry' => $auth['expiry_at'],
-        'currency' => $auth['currency'] ?? 'BWP',
-        'fee_amount' => (float)$auth['fee_amount'],
-        'vat_amount' => (float)$auth['vat_amount'],
-        'status' => $auth['status'],
-        'daily_limit' => (float)$auth['daily_limit'],
-        'monthly_limit' => (float)$auth['monthly_limit'],
-        'atm_daily_limit' => (float)$auth['atm_daily_limit'],
-        'is_authorization' => true
-    ];
-}
 
     private function generateVRN($cardSuffix, $amount, $holdReference): array
-{
-    // ISO 8583 compliant format
-    $timestamp = date('YmdHis');
-    $random = bin2hex(random_bytes(4));
-    $uniqueId = substr(md5($cardSuffix . $amount . $holdReference . $timestamp), 0, 8);
-    
-    $vrn = "VRN-{$timestamp}-{$random}-{$uniqueId}";
-    
-    // Create cryptographic signature (for non-repudiation)
-    $signature = hash_hmac('sha256', 
-        $vrn . $cardSuffix . $amount . $holdReference, 
-        getenv('VRN_SIGNING_KEY')
-    );
-    
-    return [
-        'vrn' => $vrn,
-        'signature' => $signature,
-        'format' => 'ISO-8583-COMPLIANT'
-    ];
-}
+    {
+        $timestamp = date('YmdHis');
+        $random = bin2hex(random_bytes(4));
+        $uniqueId = substr(md5($cardSuffix . $amount . $holdReference . $timestamp), 0, 8);
+        
+        $vrn = "VRN-{$timestamp}-{$random}-{$uniqueId}";
+        
+        $signature = hash_hmac('sha256', 
+            $vrn . $cardSuffix . $amount . $holdReference, 
+            getenv('VRN_SIGNING_KEY') ?: 'default-vrn-key-32-chars-long!!'
+        );
+        
+        return [
+            'vrn' => $vrn,
+            'signature' => $signature,
+            'format' => 'ISO-8583-COMPLIANT'
+        ];
+    }
     
     /**
      * Authorize a transaction (called by ATM/POS/online)
@@ -466,7 +454,7 @@ public function getCardAuthorization(string $cardSuffix): array
             
             $amount = (float)$data['amount'];
             
-            if ($card['remaining_amount'] < $amount) {
+            if ((float)$card['remaining_amount'] < $amount) {
                 throw new RuntimeException("Insufficient funds");
             }
             
@@ -535,7 +523,7 @@ public function getCardAuthorization(string $cardSuffix): array
             ");
             
             $settlementStmt->execute([
-                $card['source_institution'],
+                $card['source_institution'] ?? 'VOUCHMORPH',
                 $data['acquirer'] ?? 'UNKNOWN',
                 $amount,
                 $card['hold_reference'],
@@ -549,6 +537,8 @@ public function getCardAuthorization(string $cardSuffix): array
                 ])
             ]);
             
+            $settlementId = $settlementStmt->fetchColumn();
+            
             $this->logTransaction([
                 'card_id' => $card['card_id'],
                 'type' => $channel === 'ATM' ? 'ATM_WITHDRAWAL' : 'PURCHASE',
@@ -560,7 +550,7 @@ public function getCardAuthorization(string $cardSuffix): array
                 'terminal_id' => $data['terminal_id'] ?? null,
                 'atm_id' => $data['atm_id'] ?? null,
                 'channel' => $channel,
-                'settlement_id' => $settlementId ?? null,
+                'settlement_id' => $settlementId,
                 'reference' => $data['reference'] ?? null
             ]);
             
@@ -903,41 +893,45 @@ public function getCardAuthorization(string $cardSuffix): array
      */
     private function logTransaction(array $data): void
     {
-        $stmt = $this->db->prepare("
-            INSERT INTO card_transactions (
-                card_id,
-                transaction_type,
-                amount,
-                auth_code,
-                auth_status,
-                merchant_name,
-                merchant_id,
-                terminal_id,
-                atm_id,
-                channel,
-                settlement_queue_id,
-                reference,
-                response_code,
-                response_message
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ");
-        
-        $stmt->execute([
-            $data['card_id'],
-            $data['type'],
-            $data['amount'],
-            $data['auth_code'] ?? null,
-            $data['auth_status'] ?? 'APPROVED',
-            $data['merchant_name'] ?? null,
-            $data['merchant_id'] ?? null,
-            $data['terminal_id'] ?? null,
-            $data['atm_id'] ?? null,
-            $data['channel'] ?? null,
-            $data['settlement_id'] ?? null,
-            $data['reference'] ?? null,
-            $data['response_code'] ?? '00',
-            $data['response_message'] ?? 'Approved'
-        ]);
+        try {
+            $stmt = $this->db->prepare("
+                INSERT INTO card_transactions (
+                    card_id,
+                    transaction_type,
+                    amount,
+                    auth_code,
+                    auth_status,
+                    merchant_name,
+                    merchant_id,
+                    terminal_id,
+                    atm_id,
+                    channel,
+                    settlement_queue_id,
+                    reference,
+                    response_code,
+                    response_message
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ");
+            
+            $stmt->execute([
+                $data['card_id'],
+                $data['type'],
+                $data['amount'],
+                $data['auth_code'] ?? null,
+                $data['auth_status'] ?? 'APPROVED',
+                $data['merchant_name'] ?? null,
+                $data['merchant_id'] ?? null,
+                $data['terminal_id'] ?? null,
+                $data['atm_id'] ?? null,
+                $data['channel'] ?? null,
+                $data['settlement_id'] ?? null,
+                $data['reference'] ?? null,
+                $data['response_code'] ?? '00',
+                $data['response_message'] ?? 'Approved'
+            ]);
+        } catch (Exception $e) {
+            error_log("Failed to log transaction: " . $e->getMessage());
+        }
     }
     
     /**
