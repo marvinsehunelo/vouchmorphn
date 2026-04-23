@@ -172,7 +172,6 @@ $stmt = $db->prepare("
     ORDER BY sv.created_at DESC
 ");
 $stmt->bindValue(':phone_pattern', $userPhonePattern);
-$stmt->bindValue(':user_pattern', $userIdPattern);
 $stmt->execute();
 $activeVouchers = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
