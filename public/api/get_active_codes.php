@@ -17,7 +17,7 @@ use Core\Config\LoadCountry;
 SessionManager::start();
 
 if (!SessionManager::isLoggedIn()) {
-    echo json_encode(['error' => 'Not authenticated', 'codes' => []]);
+    echo json_encode(['success' => false, 'error' => 'Not authenticated', 'codes' => []]);
     exit;
 }
 
@@ -26,7 +26,7 @@ $userPhone = $user['phone'] ?? '';
 $userId = $user['user_id'] ?? null;
 
 if (empty($userPhone) && empty($userId)) {
-    echo json_encode(['error' => 'No user identifier', 'codes' => []]);
+    echo json_encode(['success' => false, 'error' => 'No user identifier', 'codes' => []]);
     exit;
 }
 
@@ -39,7 +39,7 @@ try {
     $db->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
 } catch (\Throwable $e) {
     error_log("GET ACTIVE CODES DB ERROR: " . $e->getMessage());
-    echo json_encode(['error' => 'Database error', 'codes' => []]);
+    echo json_encode(['success' => false, 'error' => 'Database error', 'codes' => []]);
     exit;
 }
 
@@ -69,22 +69,22 @@ $stmt = $db->prepare("
 $stmt->bindValue(':phone_pattern', $userPhonePattern);
 $stmt->bindValue(':user_pattern', $userIdPattern);
 $stmt->execute();
-$activeVouchers = $stmt->fetchAll(PDO::FETCH_ASSOC);
+$activeVouchers = $stmt->fetchAll(\PDO::FETCH_ASSOC);
 
-// Get destination tokens from metadata
+// FIXED: Use @> operator instead of ? to avoid PDO parameter conflict
 $stmt = $db->prepare("
     SELECT swap_uuid, metadata, amount, created_at, status
     FROM swap_requests
     WHERE (CAST(metadata AS TEXT) LIKE :phone_pattern 
        OR CAST(metadata AS TEXT) LIKE :user_pattern)
-    AND metadata ? 'destination_token'
+    AND metadata @> '{\"destination_token\": null}'
     ORDER BY created_at DESC
     LIMIT 20
 ");
 $stmt->bindValue(':phone_pattern', $userPhonePattern);
 $stmt->bindValue(':user_pattern', $userIdPattern);
 $stmt->execute();
-$destinationTokens = $stmt->fetchAll(PDO::FETCH_ASSOC);
+$destinationTokens = $stmt->fetchAll(\PDO::FETCH_ASSOC);
 
 // Combine and format codes
 $codes = [];
@@ -97,7 +97,7 @@ foreach ($activeVouchers as $voucher) {
     $codes[] = [
         'id' => $voucher['voucher_id'],
         'type' => 'voucher',
-        'amount' => $voucher['amount'],
+        'amount' => (float)$voucher['amount'],
         'created_at' => $voucher['created_at'],
         'expires_at' => $voucher['expiry_at'],
         'expiry_timestamp' => $expiryTime,
@@ -119,7 +119,7 @@ foreach ($destinationTokens as $token) {
     $codes[] = [
         'id' => $token['swap_uuid'],
         'type' => 'token',
-        'amount' => $token['amount'] ?? 0,
+        'amount' => (float)($token['amount'] ?? 0),
         'created_at' => $token['created_at'],
         'expires_at' => $destToken['expires_at'] ?? null,
         'expiry_timestamp' => $expiryTime,
