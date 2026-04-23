@@ -177,13 +177,13 @@ $stmt->execute();
 $activeVouchers = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 // Get destination tokens from metadata (SAT numbers from Saccussalis)
-// FIXED: Use proper JSONB operator
+// FIXED: Use jsonb_exists function instead of ? operator
 $stmt = $db->prepare("
     SELECT swap_uuid, metadata, amount, created_at, status
     FROM swap_requests
     WHERE (CAST(metadata AS TEXT) LIKE :phone_pattern 
        OR CAST(metadata AS TEXT) LIKE :user_pattern)
-    AND metadata ? 'destination_token'
+    AND jsonb_exists(metadata, 'destination_token')
     ORDER BY created_at DESC
     LIMIT 20
 ");
