@@ -102,12 +102,46 @@ class SwapService
             $this->swapStatusResolver = null;
         }
 
-        try {
-            $this->loadCountryFees();
-            error_log("[SwapService] Country fees loaded successfully");
-        } catch (\Exception $e) {
-            error_log("[SwapService] ERROR loading country fees: " . $e->getMessage());
-            throw new RuntimeException("Failed to load country fees: " . $e->getMessage());
+        // PRIORITY 1: Use config from LoadCountry (already loaded)
+        if (isset($config['fees']) && !empty($config['fees'])) {
+            $this->feesConfig = $config['fees'];
+            error_log("[SwapService] Using fees config from LoadCountry");
+        } else {
+            try {
+                $this->loadCountryFees();
+                error_log("[SwapService] Country fees loaded successfully from files");
+            } catch (\Exception $e) {
+                error_log("[SwapService] ERROR loading country fees: " . $e->getMessage());
+                throw new RuntimeException("Failed to load country fees: " . $e->getMessage());
+            }
+        }
+        
+        // PRIORITY 1: Use card config from LoadCountry
+        if (isset($config['card_config']) && !empty($config['card_config'])) {
+            $this->cardConfig = $config['card_config'];
+            error_log("[SwapService] Using card config from LoadCountry");
+        } else {
+            try {
+                $this->loadCardConfig();
+                error_log("[SwapService] Card config loaded successfully from files");
+            } catch (\Exception $e) {
+                error_log("[SwapService] ERROR loading card config: " . $e->getMessage());
+                throw new RuntimeException("Failed to load card config: " . $e->getMessage());
+            }
+        }
+        
+        // PRIORITY 1: Use ATM notes from LoadCountry
+        if (isset($config['atm_notes']) && !empty($config['atm_notes'])) {
+            $this->atmNotes = $config['atm_notes'];
+            error_log("[SwapService] Using ATM notes from LoadCountry");
+        } else {
+            try {
+                $this->loadAtmNotes();
+                error_log("[SwapService] ATM notes loaded successfully from files");
+            } catch (\Exception $e) {
+                error_log("[SwapService] ERROR loading ATM notes: " . $e->getMessage());
+                throw new RuntimeException("Failed to load ATM notes: " . $e->getMessage());
+            }
         }
         
         try {
@@ -115,14 +149,6 @@ class SwapService
             error_log("[SwapService] Flows loaded successfully");
         } catch (\Exception $e) {
             error_log("[SwapService] WARNING loading flows: " . $e->getMessage());
-        }
-        
-        try {
-            $this->loadCardConfig();
-            error_log("[SwapService] Card config loaded successfully");
-        } catch (\Exception $e) {
-            error_log("[SwapService] ERROR loading card config: " . $e->getMessage());
-            throw new RuntimeException("Failed to load card config: " . $e->getMessage());
         }
         
         try {
@@ -167,28 +193,82 @@ class SwapService
     }
     
     /**
-     * Get country data directory path
+     * Get country data directory path - Compatible with LoadCountry paths
+     * Now searches in the correct locations for config files
      */
     private function getCountryDataDir(): string
     {
+        // First, get the country slug from SystemCountry.php (same as LoadCountry)
+        $systemCountryFile = __DIR__ . "/../../Core/Config/SystemCountry.php";
+        if (file_exists($systemCountryFile)) {
+            $countryMeta = require $systemCountryFile;
+            $countrySlug = $countryMeta['slug'] ?? 'botswana';
+            
+            // Look in the same locations as LoadCountry
+            $possibleLocations = [
+                dirname(__DIR__, 3) . "/config/countries/" . $countrySlug,
+                __DIR__ . "/../../../config/countries/" . $countrySlug,
+                __DIR__ . "/../../config/countries/" . $countrySlug,
+                getenv('APP_ROOT') . "/config/countries/" . $countrySlug,
+            ];
+            
+            foreach ($possibleLocations as $location) {
+                if (is_dir($location)) {
+                    error_log("[SwapService] Using country data dir: {$location}");
+                    return $location;
+                }
+            }
+        }
+        
+        // Fallback: try with country code
         $possiblePaths = [
+            dirname(__DIR__, 3) . "/config/countries/" . strtolower($this->countryCode),
             __DIR__ . "/../../../config/countries/" . strtolower($this->countryCode),
             __DIR__ . "/../../config/countries/" . strtolower($this->countryCode),
-            __DIR__ . "/../config/countries/" . strtolower($this->countryCode),
             getenv('APP_ROOT') . "/config/countries/" . strtolower($this->countryCode),
-            __DIR__ . "/../../../../config/countries/" . strtolower($this->countryCode)
+            __DIR__ . "/../../../../config/countries/" . strtolower($this->countryCode),
         ];
         
         foreach ($possiblePaths as $path) {
             if (is_dir($path)) {
-                error_log("[SwapService] Using country data dir: {$path}");
+                error_log("[SwapService] Using country data dir (fallback): {$path}");
                 return $path;
             }
         }
         
-        $fallback = __DIR__ . "/../../../config/countries/" . strtolower($this->countryCode);
+        // Ultimate fallback
+        $fallback = dirname(__DIR__, 3) . "/config/countries/botswana";
         error_log("[SwapService] WARNING: Using fallback country data dir: {$fallback}");
         return $fallback;
+    }
+    
+    /**
+     * Load ATM notes from configuration
+     */
+    private function loadAtmNotes(): void
+    {
+        $dataDir = $this->getCountryDataDir();
+        $atmFile = $dataDir . '/atm_notes.json';
+        
+        if (!file_exists($atmFile)) {
+            throw new RuntimeException("ATM notes file missing for country {$this->countryCode}: {$atmFile}");
+        }
+        
+        $atmContent = file_get_contents($atmFile);
+        if ($atmContent === false) {
+            throw new RuntimeException("Failed to read ATM notes file: {$atmFile}");
+        }
+        
+        $this->atmNotes = json_decode($atmContent, true);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            throw new RuntimeException("Invalid JSON in ATM notes file: {$atmFile} - " . json_last_error_msg());
+        }
+        
+        if (!isset($this->atmNotes['BWP']) || empty($this->atmNotes['BWP'])) {
+            throw new RuntimeException("ATM notes missing BWP denominations in {$atmFile}");
+        }
+        
+        error_log("[SwapService] ATM notes loaded from: {$atmFile}");
     }
     
     /**
@@ -267,27 +347,6 @@ class SwapService
         }
         
         error_log("[SwapService] Fees loaded from: {$feesFile}");
-        
-        $atmFile = $dataDir . '/atm_notes.json';
-        if (!file_exists($atmFile)) {
-            throw new RuntimeException("ATM notes file missing for country {$this->countryCode}: {$atmFile}");
-        }
-        
-        $atmContent = file_get_contents($atmFile);
-        if ($atmContent === false) {
-            throw new RuntimeException("Failed to read ATM notes file: {$atmFile}");
-        }
-        
-        $this->atmNotes = json_decode($atmContent, true);
-        if (json_last_error() !== JSON_ERROR_NONE) {
-            throw new RuntimeException("Invalid JSON in ATM notes file: {$atmFile} - " . json_last_error_msg());
-        }
-        
-        if (!isset($this->atmNotes['BWP']) || empty($this->atmNotes['BWP'])) {
-            throw new RuntimeException("ATM notes missing BWP denominations in {$atmFile}");
-        }
-        
-        error_log("[SwapService] ATM notes loaded from: {$atmFile}");
     }
 
     /**
@@ -1819,10 +1878,6 @@ class SwapService
                 $debug[] = ['time' => microtime(true), 'step' => 'PHONE_FORMATTED', 'original' => $originalPhone, 'formatted' => $cashoutData['beneficiary_phone']];
             }
             
-            // NO LONGER generating code here - let destination institution generate it
-            // $rawCode = (string)random_int(100000, 999999); // REMOVED
-            // $codeHash = password_hash($rawCode, PASSWORD_BCRYPT); // REMOVED
-            
             $debug[] = ['time' => microtime(true), 'step' => 'REQUESTING_TOKEN_FROM_DESTINATION'];
             
             // Request token from destination institution - it will generate its own code
@@ -1846,10 +1901,8 @@ class SwapService
             
             $debug[] = ['time' => microtime(true), 'step' => 'CODE_FROM_DESTINATION', 'code_suffix' => substr($generatedCode, -4)];
             
-            // Store the token reference (but NOT the raw code - destination stores it hashed)
             $this->storeDestinationToken($swapId, $tokenResult);
             
-            // Send SMS with the destination-generated code
             $debug[] = ['time' => microtime(true), 'step' => 'SENDING_SMS_WITH_DESTINATION_CODE'];
             $this->sendWithdrawalSms(
                 $cashoutData['beneficiary_phone'] ?? '', 
@@ -1875,7 +1928,6 @@ class SwapService
             
             error_log("CASHOUT DEBUG: " . json_encode($debug));
             
-            // Return the generated code so it can be included in API response
             return [
                 'generated_code' => $generatedCode,
                 'sat_number' => $satNumber,
@@ -1893,8 +1945,7 @@ class SwapService
     }
 
     /**
-     * Request token/code from destination institution (e.g., Saccussalis)
-     * FIXED: Matches generate_code.php expectations
+     * Request token/code from destination institution
      */
     private function requestTokenFromDestination(
         string $swapRef, 
@@ -1911,7 +1962,6 @@ class SwapService
             $bankClient = new GenericBankClient($participant);
             $debug[] = ['time' => microtime(true), 'step' => 'BANK_CLIENT_CREATED'];
 
-            // FIX: Match exactly what generate_code.php expects
             $payload = [
                 'reference' => $swapRef,
                 'source_institution' => $source['institution'],
@@ -1919,15 +1969,14 @@ class SwapService
                 'source_asset_type' => $source['asset_type'],
                 'beneficiary_phone' => $destination['cashout']['beneficiary_phone'] ?? '',
                 'amount' => $netAmount ?? $destination['amount'],
-                'code_hash' => null,  // generate_code.php expects this, even if null
-                'action' => 'GENERATE_ATM_TOKEN'  // Important: matches generate_code.php logic
+                'code_hash' => null,
+                'action' => 'GENERATE_ATM_TOKEN'
             ];
             
             $debug[] = ['time' => microtime(true), 'step' => 'PAYLOAD_PREPARED'];
 
             error_log("REQUEST_TOKEN: About to call bankClient->transfer with payload: " . json_encode($payload));
             
-            // Use transfer with 'generate_atm_code' type to match existing logic
             $result = $bankClient->transfer($payload, 'generate_atm_code');
             
             $debug[] = ['time' => microtime(true), 'step' => 'API_CALL_COMPLETE', 'result_success' => $result['success'] ?? false];
@@ -1972,7 +2021,6 @@ class SwapService
                 throw new RuntimeException("Failed to generate token: " . $errorMsg);
             }
 
-            // Extract the generated code and token reference
             $generatedCode = $bankResponse['pin'] ?? $bankResponse['atm_pin'] ?? null;
             $tokenReference = $bankResponse['token_reference'] ?? $bankResponse['sat_number'] ?? null;
             
@@ -1985,7 +2033,6 @@ class SwapService
             $debug[] = ['time' => microtime(true), 'step' => 'TOKEN_GENERATED_SUCCESS'];
             error_log("REQUEST_TOKEN SUCCESS - Code: " . ($generatedCode ? substr($generatedCode, -4) : 'null'));
 
-            // Return standardized response
             return [
                 'token_generated' => true,
                 'generated_code' => $generatedCode,
@@ -2009,7 +2056,6 @@ class SwapService
 
     /**
      * Store destination token reference in database
-     * FIXED: Stores the generated_code as well
      */
     private function storeDestinationToken(int $swapId, array $tokenResult): void
     {
@@ -2020,7 +2066,6 @@ class SwapService
                 WHERE swap_id = ?
             ");
             
-            // IMPORTANT: Store the generated_code as well for dashboard display
             $metadata = json_encode([
                 'destination_token' => [
                     'token_reference' => $tokenResult['token_reference'] ?? null,
@@ -2058,7 +2103,6 @@ class SwapService
         error_log("Amount: " . $amount . " " . $currency);
         error_log("Expires: " . $expiryText);
         
-        // If SMS service is available, send actual SMS
         if ($this->smsService) {
             $message = "Your withdrawal code is: {$code}\n";
             $message .= "Amount: {$amount} {$currency}\n";
