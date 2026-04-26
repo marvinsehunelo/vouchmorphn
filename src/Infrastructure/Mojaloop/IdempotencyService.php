@@ -1,8 +1,6 @@
 <?php
 
-require_once dirname(__DIR__, 2) . '/src/bootstrap.php';
-
-namespace DFSP_ADAPTER_LAYER;
+namespace Infrastructure\Mojaloop;
 
 use PDO;
 
