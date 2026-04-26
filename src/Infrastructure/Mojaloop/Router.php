@@ -1,19 +1,26 @@
 <?php
 
-require_once dirname(__DIR__, 2) . '/src/bootstrap.php';
+/**
+ * Mojaloop Router - Routes ISO 20022 requests to appropriate handlers
+ * 
+ * Namespace: Infrastructure\Mojaloop
+ */
 
-namespace DFSP_ADAPTER_LAYER;
+namespace Infrastructure\Mojaloop;
 
-use DFSP_ADAPTER_LAYER\mapper\ResponseMapper;
-use DFSP_ADAPTER_LAYER\mapper\ErrorMapper;
-use BUSINESS_LOGIC_LAYER\services\SwapService;
-use DATA_PERSISTENCE_LAYER\config\DBConnection;
+use Infrastructure\Mojaloop\Mappers\ResponseMapper;
+use Infrastructure\Mojaloop\Mappers\ErrorMapper;
+use Domain\Services\SwapService;
+use Infrastructure\Mojaloop\Handlers\PartiesHandler;
+use Infrastructure\Mojaloop\Handlers\QuotesHandler;
+use Infrastructure\Mojaloop\Handlers\TransfersHandler;
+use Core\Database\DBConnection;
 
-class MojaloopRouter
+class Router
 {
-    private $participants;
-    private $quotes;
-    private $transfers;
+    private $partiesHandler;
+    private $quotesHandler;
+    private $transfersHandler;
     private $swapService;
     private $db;
 
@@ -29,7 +36,7 @@ class MojaloopRouter
         // Initialize DBConnection with config
         $this->db = new DBConnection($dbConfig);
         
-        // CRITICAL: Get the PDO instance from DBConnection, not the DBConnection object itself
+        // Get the PDO instance from DBConnection
         $pdo = $this->db->getConnection();
         
         if (!$pdo instanceof \PDO) {
@@ -38,6 +45,9 @@ class MojaloopRouter
         
         // Get encryption key from environment
         $appKey = getenv('APP_ENCRYPTION_KEY') ?: 'default_test_key';
+        
+        // Get country code from constant or global
+        $countryCode = defined('SYSTEM_COUNTRY') ? SYSTEM_COUNTRY : (getenv('COUNTRY_CODE') ?: 'botswana');
         
         // Prepare participants array
         $participantsList = [];
@@ -54,23 +64,31 @@ class MojaloopRouter
         $this->swapService = new SwapService(
             $pdo,                                   // Argument 1: PDO
             $mojaloopConfig ?? [],                   // Argument 2: Config array
-            SYSTEM_COUNTRY,                          // Argument 3: Country string
+            $countryCode,                            // Argument 3: Country string
             $appKey,                                 // Argument 4: Encryption key
             $participantsList                         // Argument 5: Participants array
         );
         
         // Initialize endpoint handlers
-        $this->participants = new \DFSP_ADAPTER_LAYER\mojaloop\parties($this->swapService);
-        $this->quotes = new \DFSP_ADAPTER_LAYER\mojaloop\quotes($this->swapService);
-        $this->transfers = new \DFSP_ADAPTER_LAYER\mojaloop\transfers($this->swapService);
+        $this->partiesHandler = new PartiesHandler($this->swapService);
+        $this->quotesHandler = new QuotesHandler($this->swapService);
+        $this->transfersHandler = new TransfersHandler($this->swapService);
         
-        error_log("[MojaloopRouter] Initialized successfully with PDO and country: " . SYSTEM_COUNTRY);
+        error_log("[MojaloopRouter] Initialized successfully with PDO and country: " . $countryCode);
     }
 
+    /**
+     * Route incoming request to appropriate handler
+     * 
+     * @param string $path Request path
+     * @param array $payload Request payload (decoded JSON)
+     * @param array $headers Request headers
+     * @return array Response data
+     */
     public function route(string $path, array $payload = [], array $headers = []): array
     {
         try {
-            error_log("MojaloopRouter routing: $path");
+            error_log("[MojaloopRouter] Routing request: $path");
             
             switch (true) {
                 case strpos($path, '/participants') === 0:
@@ -80,7 +98,7 @@ class MojaloopRouter
                     $partyType = $pathParts[1] ?? 'MSISDN';
                     $partyId = $pathParts[2] ?? '';
                     
-                    $result = $this->participants->lookup([
+                    $result = $this->partiesHandler->lookup([
                         'type' => $partyType,
                         'id' => $partyId
                     ], $headers);
@@ -88,11 +106,11 @@ class MojaloopRouter
                     return ResponseMapper::mapPartyLookup($result);
 
                 case strpos($path, '/quotes') === 0:
-                    $quote = $this->quotes->createQuote($payload, $headers);
+                    $quote = $this->quotesHandler->createQuote($payload, $headers);
                     return ResponseMapper::mapQuote($quote);
 
                 case strpos($path, '/transfers') === 0:
-                    $swap = $this->transfers->executeTransfer($payload, $headers);
+                    $swap = $this->transfersHandler->executeTransfer($payload, $headers);
 
                     if (($swap['status'] ?? '') !== 'success') {
                         return ErrorMapper::map($swap);
@@ -106,12 +124,12 @@ class MojaloopRouter
                         'data' => [
                             'status' => 'OK',
                             'timestamp' => date('c'),
-                            'service' => 'VouchMorphn Mojaloop Adapter'
+                            'service' => 'VouchMorph Mojaloop Adapter'
                         ]
                     ];
 
                 default:
-                    error_log("Endpoint not implemented: $path");
+                    error_log("[MojaloopRouter] Endpoint not implemented: $path");
                     return ErrorMapper::map([
                         'status' => 'error',
                         'message' => "Endpoint '{$path}' not implemented"
@@ -119,7 +137,7 @@ class MojaloopRouter
             }
 
         } catch (\Throwable $e) {
-            error_log("MojaloopRouter error: " . $e->getMessage());
+            error_log("[MojaloopRouter] Error: " . $e->getMessage());
             return ErrorMapper::map([
                 'status' => 'error',
                 'message' => $e->getMessage()
@@ -128,17 +146,21 @@ class MojaloopRouter
     }
 
     /**
-     * Send callback to TTK
+     * Send callback to TTK (Test Toolkit)
+     * 
+     * @param string $path Callback path
+     * @param array $payload Callback payload
+     * @param array $headers Original request headers
+     * @return bool Success status
      */
     public function sendCallback(string $path, array $payload, array $headers = []): bool
     {
-        // IMPORTANT: TTK expects callbacks on port 5050 with the original path
-        // The path already includes /parties, /quotes, etc.
-        $ttkHost = '172.17.0.1'; // Default Docker IP that works
+        // TTK expects callbacks on port 5050 with the original path
+        $ttkHost = '172.17.0.1';
         $callbackUrl = "http://{$ttkHost}:5050{$path}";
         
-        error_log("[Callback] 🔄 Sending callback to TTK: $callbackUrl");
-        error_log("[Callback] 📦 Payload: " . json_encode($payload));
+        error_log("[Callback] Sending callback to TTK: $callbackUrl");
+        error_log("[Callback] Payload: " . json_encode($payload));
         
         $ch = curl_init($callbackUrl);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
@@ -146,8 +168,8 @@ class MojaloopRouter
         curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
         curl_setopt($ch, CURLOPT_HTTPHEADER, [
             'Content-Type: application/vnd.interoperability.parties+json;version=1.0',
-            'FSPIOP-Source: ' . ($headers['FSPIOP-SOURCE'] ?? $headers['Fspiop-Source'] ?? 'VOUCHMORPHN'),
-            'FSPIOP-Destination: ' . ($headers['FSPIOP-DESTINATION'] ?? $headers['Fspiop-Destination'] ?? $headers['FSPIOP-SOURCE'] ?? 'VOUCHMORPHN'),
+            'FSPIOP-Source: ' . ($headers['FSPIOP-SOURCE'] ?? $headers['Fspiop-Source'] ?? 'VOUCHMORPH'),
+            'FSPIOP-Destination: ' . ($headers['FSPIOP-DESTINATION'] ?? $headers['Fspiop-Destination'] ?? $headers['FSPIOP-SOURCE'] ?? 'VOUCHMORPH'),
             'Accept: application/json',
             'Date: ' . gmdate('D, d M Y H:i:s GMT')
         ]);
@@ -160,12 +182,12 @@ class MojaloopRouter
         $error = curl_error($ch);
         
         if ($error) {
-            error_log("[Callback] ❌ Connection error: $error");
+            error_log("[Callback] Connection error: $error");
             
             // Try alternative IP as fallback
             if ($ttkHost === '172.17.0.1') {
                 $altUrl = "http://172.18.0.1:5050{$path}";
-                error_log("[Callback] 🔄 Trying alternative IP: $altUrl");
+                error_log("[Callback] Trying alternative IP: $altUrl");
                 
                 curl_setopt($ch, CURLOPT_URL, $altUrl);
                 $response = curl_exec($ch);
@@ -181,26 +203,30 @@ class MojaloopRouter
         curl_close($ch);
         
         if ($error) {
-            error_log("[Callback] ❌ Failed: $error");
+            error_log("[Callback] Failed: $error");
             return false;
         }
         
         if ($httpCode >= 200 && $httpCode < 300) {
-            error_log("[Callback] ✅ Success (HTTP $httpCode)");
+            error_log("[Callback] Success (HTTP $httpCode)");
             return true;
         } else {
-            error_log("[Callback] ⚠️ Received HTTP $httpCode from TTK");
-            // TTK might return 404 for some paths but still accept the callback
+            error_log("[Callback] Received HTTP $httpCode from TTK");
             return $httpCode === 404 ? true : false;
         }
     }
 
     /**
-     * Alternative callback method using file-based queue if HTTP fails
+     * Queue callback for later processing if HTTP fails
+     * 
+     * @param string $path Callback path
+     * @param array $payload Callback payload
+     * @param array $headers Original request headers
+     * @return bool Success status
      */
     public function queueCallback(string $path, array $payload, array $headers = []): bool
     {
-        $queueDir = __DIR__ . '/../../APP_LAYER/callback_queue';
+        $queueDir = __DIR__ . '/../../../storage/callback_queue';
         if (!is_dir($queueDir)) {
             mkdir($queueDir, 0777, true);
         }
@@ -215,7 +241,7 @@ class MojaloopRouter
         ];
         
         $result = file_put_contents($filename, json_encode($data));
-        error_log("[Callback] 📝 Queued callback to: $filename");
+        error_log("[Callback] Queued callback to: $filename");
         return $result !== false;
     }
 }
