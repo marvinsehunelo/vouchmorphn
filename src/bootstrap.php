@@ -93,7 +93,8 @@ try {
     ]);
 } catch (PDOException $e) {
     error_log("Database connection failed: " . $e->getMessage());
-    $db = null;
+    http_response_code(500);
+    die("Database connection failed. Check your database environment variables.");
 }
 
 // ============================================================================
@@ -419,33 +420,33 @@ $container->setFactory('VouchMorph\Application\Controllers\AdminController', fun
 });
 
 // ============================================================================
-// 13. REGISTER API HANDLERS
+// 13. REGISTER API HANDLERS - FIXED NAMESPACE
 // ============================================================================
 
 // TransfersHandler
-$container->setFactory('VouchMorph\Api\Handlers\TransfersHandler', function($c) {
-    return new \VouchMorph\Api\Handlers\TransfersHandler(
+$container->setFactory('VouchMorph\Application\Handlers\TransfersHandler', function($c) {
+    return new \VouchMorph\Application\Handlers\TransfersHandler(
         $c->get('VouchMorph\Domain\Services\SwapService')
     );
 });
 
 // PartiesHandler
-$container->setFactory('VouchMorph\Api\Handlers\PartiesHandler', function($c) {
-    return new \VouchMorph\Api\Handlers\PartiesHandler(
+$container->setFactory('VouchMorph\Application\Handlers\PartiesHandler', function($c) {
+    return new \VouchMorph\Application\Handlers\PartiesHandler(
         $c->get('VouchMorph\Domain\Services\SwapService')
     );
 });
 
 // QuotesHandler
-$container->setFactory('VouchMorph\Api\Handlers\QuotesHandler', function($c) {
-    return new \VouchMorph\Api\Handlers\QuotesHandler(
+$container->setFactory('VouchMorph\Application\Handlers\QuotesHandler', function($c) {
+    return new \VouchMorph\Application\Handlers\QuotesHandler(
         $c->get('VouchMorph\Domain\Services\SwapService')
     );
 });
 
 // ParticipantsHandler
-$container->setFactory('VouchMorph\Api\Handlers\ParticipantsHandler', function($c) {
-    return new \VouchMorph\Api\Handlers\ParticipantsHandler(
+$container->setFactory('VouchMorph\Application\Handlers\ParticipantsHandler', function($c) {
+    return new \VouchMorph\Application\Handlers\ParticipantsHandler(
         $c->get('VouchMorph\Domain\Services\SwapService')
     );
 });
@@ -467,33 +468,8 @@ $container->setFactory('VouchMorph\Application\Middleware\AccessControl', functi
 });
 
 // ============================================================================
-// 15. GLOBAL BACKWARD COMPATIBILITY
+// 15. RETURN CONTAINER (NO GLOBAL EAGER LOADING)
 // ============================================================================
-
-global $swapService;
-$swapService = $container->get('VouchMorph\Domain\Services\SwapService');
-
-global $db;
-$db = $container->get(PDO::class);
-
-global $settings;
-$settings = $container->get('settings');
-
-global $participants;
-$participants = $container->get('participants');
-
-global $banks;
-$banks = $container->get('banks');
-
-global $fees;
-$fees = $container->get('fees');
-
-// ============================================================================
-// 16. RETURN CONTAINER
-// ============================================================================
-
-global $container;
-$container = $container;
 
 error_log("[Bootstrap] VouchMorph initialized successfully. Environment: " . ($settings['app_env'] ?? 'unknown'));
 
