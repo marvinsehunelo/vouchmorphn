@@ -35,118 +35,121 @@ require_once $autoloader;
 // 3. LOAD ENVIRONMENT VARIABLES
 // ============================================================================
 
-// Load main .env from root
-$mainEnv = ROOT_PATH . '/.env';
-if (file_exists($mainEnv)) {
-    $lines = file($mainEnv, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-    foreach ($lines as $line) {
-        if (strpos(trim($line), '#') === 0) continue;
-        if (strpos($line, '=') !== false) {
-            list($key, $value) = explode('=', $line, 2);
-            $_ENV[trim($key)] = trim($value);
-            $_SERVER[trim($key)] = trim($value);
-            putenv(trim($key) . '=' . trim($value));
-        }
-    }
+// Load main .env from root if using phpdotenv
+if (class_exists('Dotenv\Dotenv') && file_exists(ROOT_PATH . '/.env')) {
+    $dotenv = \Dotenv\Dotenv::createImmutable(ROOT_PATH);
+    $dotenv->load();
 }
 
-// Load country-specific .env for Botswana
-$botswanaEnv = CONFIG_PATH . '/countries/botswana/.env';
-if (file_exists($botswanaEnv)) {
-    $lines = file($botswanaEnv, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-    foreach ($lines as $line) {
-        if (strpos(trim($line), '#') === 0) continue;
-        if (strpos($line, '=') !== false) {
-            list($key, $value) = explode('=', $line, 2);
-            $_ENV[trim($key)] = trim($value);
-            $_SERVER[trim($key)] = trim($value);
-            putenv(trim($key) . '=' . trim($value));
-        }
-    }
-}
+// Load country-specific configuration
+$countryCode = $_ENV['COUNTRY_CODE'] ?? getenv('COUNTRY_CODE') ?: 'botswana';
+$countryConfigPath = CONFIG_PATH . '/countries/' . $countryCode;
 
 // ============================================================================
-// 4. LOAD DATABASE CONFIGURATION
+// 4. LOAD DATABASE CONFIGURATION (PostgreSQL for Railway)
 // ============================================================================
 
-$dbConfig = [];
-if (file_exists(CONFIG_PATH . '/database_settings.php')) {
-    $dbConfig = require_once CONFIG_PATH . '/database_settings.php';
-} elseif (file_exists(CONFIG_PATH . '/database.php')) {
-    $dbConfig = require_once CONFIG_PATH . '/database.php';
+// Load country-specific database config
+$dbConfigFile = $countryConfigPath . '/database.php';
+if (!file_exists($dbConfigFile)) {
+    die("Database configuration not found at: $dbConfigFile");
 }
 
-// Create database connection using PDO
+$dbConfig = require $dbConfigFile;
+
+// Create PostgreSQL connection using PDO
 try {
-    $host = $dbConfig['host'] ?? $_ENV['DB_HOST'] ?? 'localhost';
-    $port = $dbConfig['port'] ?? $_ENV['DB_PORT'] ?? '3306';
-    $database = $dbConfig['database'] ?? $_ENV['DB_DATABASE'] ?? 'vouchmorph';
-    $username = $dbConfig['username'] ?? $_ENV['DB_USERNAME'] ?? 'root';
-    $password = $dbConfig['password'] ?? $_ENV['DB_PASSWORD'] ?? '';
+    // Check if using Railway DATABASE_URL or individual configs
+    if (defined('DB_HOST') && defined('DB_NAME')) {
+        // Using the constants from database.php
+        $host = DB_HOST;
+        $port = DB_PORT;
+        $database = DB_NAME;
+        $username = DB_USER;
+        $password = DB_PASSWORD;
+        $driver = 'pgsql';
+    } else {
+        // Fallback to environment variables
+        $host = $_ENV['DB_HOST'] ?? getenv('DB_HOST') ?? 'localhost';
+        $port = $_ENV['DB_PORT'] ?? getenv('DB_PORT') ?? '5432';
+        $database = $_ENV['DB_NAME'] ?? getenv('DB_NAME') ?? 'swap_system_bw';
+        $username = $_ENV['DB_USER'] ?? getenv('DB_USER') ?? 'postgres';
+        $password = $_ENV['DB_PASSWORD'] ?? getenv('DB_PASSWORD') ?? '';
+        $driver = $_ENV['DB_DRIVER'] ?? getenv('DB_DRIVER') ?? 'pgsql';
+    }
     
-    $dsn = "mysql:host=$host;port=$port;dbname=$database;charset=utf8mb4";
+    // Build DSN for PostgreSQL
+    $dsn = "pgsql:host=$host;port=$port;dbname=$database";
     
     $db = new PDO($dsn, $username, $password, [
         PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
         PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
         PDO::ATTR_EMULATE_PREPARES => false,
     ]);
+    
+    // Set PostgreSQL specific options
+    $db->exec("SET NAMES 'UTF8'");
+    $db->exec("SET timezone = 'UTC'");
+    
+    error_log("[Bootstrap] PostgreSQL connection established to database: $database");
+    
 } catch (PDOException $e) {
-    error_log("Database connection failed: " . $e->getMessage());
-    http_response_code(500);
-    die("Database connection failed. Check your database environment variables.");
+    error_log("PostgreSQL connection failed for country {$countryCode}: " . $e->getMessage());
+    
+    // During healthcheck, don't crash - but log error
+    if (PHP_SAPI === 'cli') {
+        die("Database connection failed: " . $e->getMessage());
+    }
+    
+    $db = null;
 }
 
 // ============================================================================
 // 5. LOAD COUNTRY CONFIGURATION
 // ============================================================================
 
-$countryCode = $_ENV['COUNTRY_CODE'] ?? 'botswana';
 $countryConfig = [];
-
-$countryConfigPath = SRC_PATH . '/Core/Config/Countries/' . ucfirst($countryCode) . '/config.php';
-if (file_exists($countryConfigPath)) {
-    $countryConfig = require_once $countryConfigPath;
+$countryConfigFile = SRC_PATH . '/Core/Config/Countries/' . ucfirst($countryCode) . '/config.php';
+if (file_exists($countryConfigFile)) {
+    $countryConfig = require_once $countryConfigFile;
 }
 
 // ============================================================================
 // 6. LOAD COUNTRY-SPECIFIC JSON DATA
 // ============================================================================
 
-$countryDataPath = CONFIG_PATH . '/countries/' . $countryCode;
-
 $banks = [];
-$banksFile = $countryDataPath . '/banks.json';
+$banksFile = $countryConfigPath . '/banks.json';
 if (file_exists($banksFile)) {
     $banks = json_decode(file_get_contents($banksFile), true) ?? [];
 }
 
 $participants = [];
-$participantsFile = $countryDataPath . '/participants.json';
+$participantsFile = $countryConfigPath . '/participants.json';
 if (file_exists($participantsFile)) {
     $participants = json_decode(file_get_contents($participantsFile), true) ?? [];
 }
 
 $fees = [];
-$feesFile = $countryDataPath . '/fees.json';
+$feesFile = $countryConfigPath . '/fees.json';
 if (file_exists($feesFile)) {
     $fees = json_decode(file_get_contents($feesFile), true) ?? [];
 }
 
 $cards = [];
-$cardsFile = $countryDataPath . '/cards.json';
+$cardsFile = $countryConfigPath . '/cards.json';
 if (file_exists($cardsFile)) {
     $cards = json_decode(file_get_contents($cardsFile), true) ?? [];
 }
 
 $communication = [];
-$commFile = $countryDataPath . '/communication.json';
+$commFile = $countryConfigPath . '/communication.json';
 if (file_exists($commFile)) {
     $communication = json_decode(file_get_contents($commFile), true) ?? [];
 }
 
 $atmNotes = [];
-$atmFile = $countryDataPath . '/atm_notes.json';
+$atmFile = $countryConfigPath . '/atm_notes.json';
 if (file_exists($atmFile)) {
     $atmNotes = json_decode(file_get_contents($atmFile), true) ?? [];
 }
@@ -156,14 +159,15 @@ if (file_exists($atmFile)) {
 // ============================================================================
 
 $settings = [
-    'app_name' => $_ENV['APP_NAME'] ?? 'VouchMorph',
-    'app_env' => $_ENV['APP_ENV'] ?? 'production',
-    'app_url' => $_ENV['APP_URL'] ?? 'http://localhost',
-    'timezone' => $_ENV['APP_TIMEZONE'] ?? 'Africa/Gaborone',
+    'app_name' => $_ENV['APP_NAME'] ?? getenv('APP_NAME') ?? 'VouchMorph',
+    'app_env' => $_ENV['APP_ENV'] ?? getenv('APP_ENV') ?? 'production',
+    'app_url' => $_ENV['APP_URL'] ?? getenv('APP_URL') ?? 'http://localhost',
+    'timezone' => $_ENV['APP_TIMEZONE'] ?? getenv('APP_TIMEZONE') ?? 'Africa/Gaborone',
     'country_code' => $countryCode,
     'country_config' => $countryConfig,
-    'encryption_key' => $_ENV['ENCRYPTION_KEY'] ?? '',
-    'jwt_secret' => $_ENV['JWT_SECRET'] ?? '',
+    'encryption_key' => $_ENV['ENCRYPTION_KEY'] ?? getenv('ENCRYPTION_KEY') ?? '',
+    'jwt_secret' => $_ENV['JWT_SECRET'] ?? getenv('JWT_SECRET') ?? '',
+    'db_driver' => 'pgsql',
 ];
 
 date_default_timezone_set($settings['timezone']);
@@ -420,7 +424,7 @@ $container->setFactory('VouchMorph\Application\Controllers\AdminController', fun
 });
 
 // ============================================================================
-// 13. REGISTER API HANDLERS - FIXED NAMESPACE
+// 13. REGISTER API HANDLERS (Fixed namespace)
 // ============================================================================
 
 // TransfersHandler
@@ -468,9 +472,9 @@ $container->setFactory('VouchMorph\Application\Middleware\AccessControl', functi
 });
 
 // ============================================================================
-// 15. RETURN CONTAINER (NO GLOBAL EAGER LOADING)
+// 15. RETURN CONTAINER (No global eager loading)
 // ============================================================================
 
-error_log("[Bootstrap] VouchMorph initialized successfully. Environment: " . ($settings['app_env'] ?? 'unknown'));
+error_log("[Bootstrap] VouchMorph initialized successfully. Country: {$countryCode}, Environment: " . ($settings['app_env'] ?? 'unknown'));
 
 return $container;
