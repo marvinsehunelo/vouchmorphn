@@ -1,10 +1,8 @@
 <?php
 
-require_once dirname(__DIR__, 2) . '/src/bootstrap.php';
+namespace public\api\mojaloop;
 
-namespace DFSP_ADAPTER_LAYER\mojaloop;
-
-use BUSINESS_LOGIC_LAYER\services\SwapService;
+use Domain\Services\SwapService;
 
 class parties
 {
