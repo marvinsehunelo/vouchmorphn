@@ -1,12 +1,10 @@
 <?php
 
-require_once dirname(__DIR__, 2) . '/src/bootstrap.php';
-
 declare(strict_types=1);
 
-namespace INTEGRATION_LAYER\CLIENTS\CardSchemes;
+namespace Infrastructure\Cards;
 
-use BUSINESS_LOGIC_LAYER\Helpers\CardHelper;
+use Domain\Helpers\CardHelper;
 
 /**
  * CardNumberGenerator - Handles BIN ranges and card number generation
