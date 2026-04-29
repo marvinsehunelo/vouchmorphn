@@ -1,5 +1,7 @@
 <?php
 
+namespace Infrastructure\Reporting\Contracts;
+
 interface ReportingProviderInterface
 {
     /**
