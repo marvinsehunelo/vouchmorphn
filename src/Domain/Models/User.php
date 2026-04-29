@@ -1,9 +1,5 @@
 <?php
 
-require_once dirname(__DIR__, 2) . '/src/bootstrap.php';
-
-// 4. DATA_PERSISTENCE_LAYER/models/User.php
-
 class User
 {
     public int $id;
