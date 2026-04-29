@@ -70,12 +70,12 @@ try {
         $driver = 'pgsql';
     } else {
         // Fallback to environment variables
-        $host = $_ENV['DB_HOST'] ?? getenv('DB_HOST') ?? 'localhost';
-        $port = $_ENV['DB_PORT'] ?? getenv('DB_PORT') ?? '5432';
-        $database = $_ENV['DB_NAME'] ?? getenv('DB_NAME') ?? 'swap_system_bw';
-        $username = $_ENV['DB_USER'] ?? getenv('DB_USER') ?? 'postgres';
-        $password = $_ENV['DB_PASSWORD'] ?? getenv('DB_PASSWORD') ?? '';
-        $driver = $_ENV['DB_DRIVER'] ?? getenv('DB_DRIVER') ?? 'pgsql';
+        $host = $_ENV['DB_HOST'] ?? getenv('DB_HOST') ?: 'localhost';
+        $port = $_ENV['DB_PORT'] ?? getenv('DB_PORT') ?: '5432';
+        $database = $_ENV['DB_NAME'] ?? getenv('DB_NAME') ?: 'swap_system_bw';
+        $username = $_ENV['DB_USER'] ?? getenv('DB_USER') ?: 'postgres';
+        $password = $_ENV['DB_PASSWORD'] ?? getenv('DB_PASSWORD') ?: '';
+        $driver = $_ENV['DB_DRIVER'] ?? getenv('DB_DRIVER') ?: 'pgsql';
     }
     
     // Build DSN for PostgreSQL
@@ -89,7 +89,6 @@ try {
     
     // Set PostgreSQL specific options
     $db->exec("SET NAMES 'UTF8'");
-    $db->exec("SET timezone = 'UTC'");
     
     error_log("[Bootstrap] PostgreSQL connection established to database: $database");
     
@@ -155,25 +154,125 @@ if (file_exists($atmFile)) {
 }
 
 // ============================================================================
-// 7. APPLICATION SETTINGS
+// 7. TIMEZONE HELPER FUNCTION (Inline to avoid dependency issues)
+// ============================================================================
+
+/**
+ * Get valid timezone from environment with intelligent fallback
+ * No hardcoded defaults - uses system intelligence
+ * 
+ * @return string Valid timezone identifier
+ */
+function getValidTimezone(): string
+{
+    // 1. Try environment variables (multiple possible keys)
+    $envKeys = ['APP_TIMEZONE', 'TIMEZONE', 'TZ'];
+    foreach ($envKeys as $key) {
+        // Check $_ENV
+        if (isset($_ENV[$key]) && !empty($_ENV[$key]) && is_string($_ENV[$key])) {
+            $value = trim($_ENV[$key]);
+            if (!empty($value)) {
+                // Validate before returning
+                if (in_array($value, timezone_identifiers_list())) {
+                    return $value;
+                }
+                error_log("[Timezone] Invalid timezone in \$_ENV['{$key}']: {$value}");
+            }
+        }
+        
+        // Check getenv()
+        $value = getenv($key);
+        if ($value !== false && !empty($value) && is_string($value)) {
+            $value = trim($value);
+            if (!empty($value)) {
+                if (in_array($value, timezone_identifiers_list())) {
+                    return $value;
+                }
+                error_log("[Timezone] Invalid timezone in getenv('{$key}'): {$value}");
+            }
+        }
+    }
+    
+    // 2. Try to derive from country code
+    $countryCode = $_ENV['COUNTRY_CODE'] ?? getenv('COUNTRY_CODE') ?: '';
+    if (!empty($countryCode)) {
+        // Use PHP's built-in country to timezone mapping
+        $countryZones = DateTimeZone::listIdentifiers(DateTimeZone::PER_COUNTRY);
+        $countryUpper = strtoupper($countryCode);
+        
+        // Try exact match
+        if (isset($countryZones[$countryUpper]) && !empty($countryZones[$countryUpper])) {
+            $timezone = $countryZones[$countryUpper][0];
+            error_log("[Timezone] Derived from country code {$countryCode}: {$timezone}");
+            return $timezone;
+        }
+        
+        // Try case-insensitive match
+        foreach ($countryZones as $code => $zones) {
+            if (strcasecmp($code, $countryCode) === 0 && !empty($zones)) {
+                $timezone = $zones[0];
+                error_log("[Timezone] Derived from country code {$countryCode}: {$timezone}");
+                return $timezone;
+            }
+        }
+    }
+    
+    // 3. Try to get from system default
+    $systemTimezone = ini_get('date.timezone');
+    if (!empty($systemTimezone) && in_array($systemTimezone, timezone_identifiers_list())) {
+        error_log("[Timezone] Using system default: {$systemTimezone}");
+        return $systemTimezone;
+    }
+    
+    // 4. Ultimate fallback to UTC (never fails)
+    error_log("[Timezone] No valid timezone found, falling back to UTC");
+    return 'UTC';
+}
+
+// ============================================================================
+// 8. APPLICATION SETTINGS
 // ============================================================================
 
 $settings = [
-    'app_name' => $_ENV['APP_NAME'] ?? getenv('APP_NAME') ?? 'VouchMorph',
-    'app_env' => $_ENV['APP_ENV'] ?? getenv('APP_ENV') ?? 'production',
-    'app_url' => $_ENV['APP_URL'] ?? getenv('APP_URL') ?? 'http://localhost',
-    'timezone' => $_ENV['APP_TIMEZONE'] ?? getenv('APP_TIMEZONE') ?? 'Africa/Gaborone',
+    'app_name' => $_ENV['APP_NAME'] ?? getenv('APP_NAME') ?: 'VouchMorph',
+    'app_env' => $_ENV['APP_ENV'] ?? getenv('APP_ENV') ?: 'production',
+    'app_url' => $_ENV['APP_URL'] ?? getenv('APP_URL') ?: 'http://localhost',
+    'timezone' => null, // Will be set after validation
     'country_code' => $countryCode,
     'country_config' => $countryConfig,
-    'encryption_key' => $_ENV['ENCRYPTION_KEY'] ?? getenv('ENCRYPTION_KEY') ?? '',
-    'jwt_secret' => $_ENV['JWT_SECRET'] ?? getenv('JWT_SECRET') ?? '',
+    'encryption_key' => $_ENV['ENCRYPTION_KEY'] ?? getenv('ENCRYPTION_KEY') ?: '',
+    'jwt_secret' => $_ENV['JWT_SECRET'] ?? getenv('JWT_SECRET') ?: '',
     'db_driver' => 'pgsql',
 ];
 
-date_default_timezone_set($settings['timezone']);
+// ============================================================================
+// 9. SET TIMEZONE (NO HARDCODING - FULLY DYNAMIC)
+// ============================================================================
+
+try {
+    $validTimezone = getValidTimezone();
+    
+    // Set PHP timezone
+    date_default_timezone_set($validTimezone);
+    $settings['timezone'] = $validTimezone;
+    
+    // Sync PostgreSQL timezone if database connection exists
+    if (isset($db) && $db instanceof PDO) {
+        $db->exec("SET timezone = '{$validTimezone}'");
+        error_log("[Bootstrap] PostgreSQL timezone set to: {$validTimezone}");
+    }
+    
+    error_log("[Bootstrap] PHP timezone set to: {$validTimezone}");
+    
+} catch (Exception $e) {
+    // Absolute last resort - should never happen
+    date_default_timezone_set('UTC');
+    $settings['timezone'] = 'UTC';
+    error_log("[Bootstrap] CRITICAL: Timezone error - " . $e->getMessage() . " - Forced to UTC");
+}
 
 // ============================================================================
-// 8. DEPENDENCY INJECTION CONTAINER
+// 10. DEPENDENCY INJECTION CONTAINER
 // ============================================================================
 
 class Container
@@ -215,7 +314,7 @@ class Container
 $container = new Container();
 
 // ============================================================================
-// 9. REGISTER CORE SERVICES
+// 11. REGISTER CORE SERVICES
 // ============================================================================
 
 $container->set(PDO::class, $db);
@@ -230,7 +329,7 @@ $container->set('communication', $communication);
 $container->set('atmNotes', $atmNotes);
 
 // ============================================================================
-// 10. REGISTER DOMAIN SERVICES
+// 12. REGISTER DOMAIN SERVICES
 // ============================================================================
 
 // SwapService
@@ -316,7 +415,7 @@ $container->setFactory('VouchMorph\Domain\Services\AuditTrailService', function(
 });
 
 // ============================================================================
-// 11. REGISTER INFRASTRUCTURE SERVICES (Mojaloop)
+// 13. REGISTER INFRASTRUCTURE SERVICES (Mojaloop)
 // ============================================================================
 
 // Mojaloop Router
@@ -361,7 +460,7 @@ $container->setFactory('VouchMorph\Infrastructure\Mojaloop\HttpClient', function
 });
 
 // ============================================================================
-// 12. REGISTER APPLICATION CONTROLLERS
+// 14. REGISTER APPLICATION CONTROLLERS
 // ============================================================================
 
 // USSDController
@@ -424,7 +523,7 @@ $container->setFactory('VouchMorph\Application\Controllers\AdminController', fun
 });
 
 // ============================================================================
-// 13. REGISTER API HANDLERS (Fixed namespace)
+// 15. REGISTER API HANDLERS
 // ============================================================================
 
 // TransfersHandler
@@ -456,7 +555,7 @@ $container->setFactory('VouchMorph\Application\Handlers\ParticipantsHandler', fu
 });
 
 // ============================================================================
-// 14. REGISTER MIDDLEWARE AND UTILITIES
+// 16. REGISTER MIDDLEWARE AND UTILITIES
 // ============================================================================
 
 // AuditLogger
@@ -472,9 +571,9 @@ $container->setFactory('VouchMorph\Application\Middleware\AccessControl', functi
 });
 
 // ============================================================================
-// 15. RETURN CONTAINER (No global eager loading)
+// 17. RETURN CONTAINER
 // ============================================================================
 
-error_log("[Bootstrap] VouchMorph initialized successfully. Country: {$countryCode}, Environment: " . ($settings['app_env'] ?? 'unknown'));
+error_log("[Bootstrap] VouchMorph initialized successfully. Country: {$countryCode}, Timezone: {$settings['timezone']}, Environment: " . ($settings['app_env'] ?? 'unknown'));
 
 return $container;
