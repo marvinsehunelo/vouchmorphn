@@ -2,10 +2,10 @@
 
 require_once dirname(__DIR__, 2) . '/src/bootstrap.php';
 
-namespace CORE_LAYER\FACTORIES;
+namespace Core\Factories;
 
-use INFRASTRUCTURE\SMS\SmsGatewayClient;
-use INFRASTRUCTURE\SMS\Contracts\ProviderInterface;
+use Infrastructure\SMS\SmsGatewayClient;
+use Infrastructure\SMS\Contracts\ProviderInterface;
 use Exception;
 
 class CommunicationFactory
