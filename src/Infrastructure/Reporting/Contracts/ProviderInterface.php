@@ -1,9 +1,5 @@
 <?php
 
-require_once dirname(__DIR__, 2) . '/src/bootstrap.php';
-
-// 5. INTEGRATION_LAYER/interfaces/ReportingProviderInterface.php
-
 interface ReportingProviderInterface
 {
     /**
