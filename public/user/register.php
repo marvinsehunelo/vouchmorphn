@@ -5,46 +5,34 @@ ini_set('display_errors', 1);
 ini_set('display_startup_errors', 1);
 
 // ============================================================
-// FIXED PATHS - Based on your file location
-// Assuming register.php is in: /APP_LAYER/views/register.php
+// CORRECTED PATHS - Based on your actual file structure
+// register.php is in: public/user/register.php
 // ============================================================
 
-// Try different path possibilities
-$paths = [
-    __DIR__ . '/../../src/APP_LAYER/utils/SessionManager.php',
-    __DIR__ . '/../APP_LAYER/utils/SessionManager.php',
-    __DIR__ . '/src/APP_LAYER/utils/SessionManager.php'
-];
-
-$loaded = false;
-foreach ($paths as $path) {
-    if (file_exists($path)) {
-        require_once $path;
-        $loaded = true;
-        break;
-    }
+// Correct SessionManager path
+$sessionManagerPath = __DIR__ . '/../../src/Application/Utils/SessionManager.php';
+if (!file_exists($sessionManagerPath)) {
+    die("DEBUG: Could not find SessionManager.php at: " . $sessionManagerPath . "<br>Current directory: " . __DIR__);
 }
+require_once $sessionManagerPath;
 
-if (!$loaded) {
-    die("DEBUG: Could not find SessionManager.php. Current directory: " . __DIR__ . "<br>");
-}
+// Correct paths for other required files
+require_once __DIR__ . '/../../src/Core/Database/DBConnection.php';
+require_once __DIR__ . '/../../src/Infrastructure/SMS/Contracts/ProviderInterface.php';
+require_once __DIR__ . '/../../src/Infrastructure/SMS/SmsGatewayClient.php';
+require_once __DIR__ . '/../../src/Core/Factories/CommunicationFactory.php';
 
-require_once __DIR__ . '/../../src/DATA_PERSISTENCE_LAYER/config/DBConnection.php';
-require_once __DIR__ . '/../../src/INTEGRATION_LAYER/INTERFACES/CommunicationProviderInterface.php';
-require_once __DIR__ . '/../../src/INTEGRATION_LAYER/CLIENTS/CommunicationClients/SmsGatewayClient.php';
-require_once __DIR__ . '/../../src/FACTORY_LAYER/CommunicationFactory.php';
-
-// Check if config file exists
-$configPath = __DIR__ . '/../../src/CORE_CONFIG/load_country.php';
+// Check if config file exists - using new LoadCountry.php
+$configPath = __DIR__ . '/../../src/Core/Config/LoadCountry.php';
 if (!file_exists($configPath)) {
     die("DEBUG: Config file not found at: " . $configPath);
 }
 
 $config = require $configPath;
 
-use APP_LAYER\utils\SessionManager;
-use DATA_PERSISTENCE_LAYER\Config\DBConnection;
-use FACTORY_LAYER\CommunicationFactory;
+use Application\Utils\SessionManager;
+use Core\Database\DBConnection;
+use Core\Factories\CommunicationFactory;
 
 SessionManager::start();
 
