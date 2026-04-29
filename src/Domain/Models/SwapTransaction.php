@@ -1,10 +1,8 @@
 <?php
 
-require_once dirname(__DIR__, 2) . '/src/bootstrap.php';
-
 declare(strict_types=1);
 
-namespace BUSINESS_LOGIC_LAYER\models;
+namespace Domain\Models;
 
 use PDO;
 use Exception;
