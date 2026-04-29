@@ -1,10 +1,6 @@
 <?php
 
-require_once dirname(__DIR__, 2) . '/src/bootstrap.php';
-
-// INTEGRATION_LAYER/Interfaces/CommunicationProviderInterface.php
-
-namespace INTEGRATION_LAYER\INTERFACES;
+namespace Infrastructure\SMS\Contracts;
 
 interface CommunicationProviderInterface
 {
