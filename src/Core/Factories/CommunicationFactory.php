@@ -1,9 +1,11 @@
 <?php
 
-namespace Core\Factories;
+require_once dirname(__DIR__, 2) . '/src/bootstrap.php';
 
-use Infrastructure\SMS\SmsGatewayClient;
-use Infrastructure\SMS\Contracts\ProviderInterface;
+namespace CORE_LAYER\FACTORIES;
+
+use INFRASTRUCTURE\SMS\SmsGatewayClient;
+use INFRASTRUCTURE\SMS\Contracts\ProviderInterface;
 use Exception;
 
 class CommunicationFactory
@@ -22,7 +24,11 @@ class CommunicationFactory
         $systemCountryPath = __DIR__ . '/../Config/SystemCountry.php';
         
         if (!file_exists($systemCountryPath)) {
-            throw new Exception("System country configuration not found at: src/Core/Config/SystemCountry.php");
+            // Try alternative location
+            $systemCountryPath = dirname(__DIR__, 3) . '/src/Core/Config/SystemCountry.php';
+            if (!file_exists($systemCountryPath)) {
+                throw new Exception("System country configuration not found");
+            }
         }
         
         $country = require $systemCountryPath;
@@ -36,12 +42,23 @@ class CommunicationFactory
             throw new Exception("Active country not configured in SystemCountry.php");
         }
 
-        // Load country communication config from JSON file
-        $countryLower = strtolower($country);
-        $configFile = dirname(__DIR__, 4) . "/config/countries/{$countryLower}/communication.json";
+        // Try multiple possible locations for communication.json
+        $possiblePaths = [
+            dirname(__DIR__, 4) . "/config/countries/" . strtolower($country) . "/communication.json",
+            dirname(__DIR__, 3) . "/config/countries/" . strtolower($country) . "/communication.json",
+            __DIR__ . "/../../../config/countries/" . strtolower($country) . "/communication.json",
+        ];
         
-        if (!file_exists($configFile)) {
-            throw new Exception("Communication config not found: config/countries/{$countryLower}/communication.json");
+        $configFile = null;
+        foreach ($possiblePaths as $path) {
+            if (file_exists($path)) {
+                $configFile = $path;
+                break;
+            }
+        }
+        
+        if (!$configFile) {
+            throw new Exception("Communication config not found for country: {$country}");
         }
 
         $jsonContent = file_get_contents($configFile);
@@ -76,12 +93,17 @@ class CommunicationFactory
         switch ($type) {
             case 'sms':
                 // Use SmsGatewayClient from Infrastructure
+                if (!class_exists('INFRASTRUCTURE\SMS\SmsGatewayClient')) {
+                    throw new Exception("SmsGatewayClient class not found. Check autoloading.");
+                }
                 return new SmsGatewayClient($config);
                 
             case 'ussd':
-                // USSD provider - you may need to create this class
-                // For now, throw an exception with guidance
-                throw new Exception("USSD provider not yet implemented. Create INFRASTRUCTURE\USSD\UssdGatewayClient");
+                // USSD provider - check if exists
+                if (class_exists('INFRASTRUCTURE\USSD\UssdGatewayClient')) {
+                    return new \INFRASTRUCTURE\USSD\UssdGatewayClient($config);
+                }
+                throw new Exception("USSD provider not implemented yet");
                 
             default:
                 throw new Exception("Unsupported provider type: {$type}");
@@ -92,42 +114,59 @@ class CommunicationFactory
      * Get available communication providers for current country
      * 
      * @return array List of available providers with their configs
-     * @throws Exception
      */
     public static function getAvailableProviders(): array
     {
-        // Load active country from Core Config
-        $systemCountryPath = __DIR__ . '/../Config/SystemCountry.php';
-        
-        if (!file_exists($systemCountryPath)) {
-            return [];
-        }
-        
-        $country = require $systemCountryPath;
-        
-        if (is_array($country)) {
-            $country = $country['country'] ?? $country[0] ?? null;
-        }
-        
-        if (!$country) {
-            return [];
-        }
+        try {
+            // Load active country from Core Config
+            $systemCountryPath = __DIR__ . '/../Config/SystemCountry.php';
+            
+            if (!file_exists($systemCountryPath)) {
+                $systemCountryPath = dirname(__DIR__, 3) . '/src/Core/Config/SystemCountry.php';
+                if (!file_exists($systemCountryPath)) {
+                    return [];
+                }
+            }
+            
+            $country = require $systemCountryPath;
+            
+            if (is_array($country)) {
+                $country = $country['country'] ?? $country[0] ?? null;
+            }
+            
+            if (!$country) {
+                return [];
+            }
 
-        $countryLower = strtolower($country);
-        $configFile = dirname(__DIR__, 4) . "/config/countries/{$countryLower}/communication.json";
-        
-        if (!file_exists($configFile)) {
-            return [];
-        }
+            $possiblePaths = [
+                dirname(__DIR__, 4) . "/config/countries/" . strtolower($country) . "/communication.json",
+                dirname(__DIR__, 3) . "/config/countries/" . strtolower($country) . "/communication.json",
+                __DIR__ . "/../../../config/countries/" . strtolower($country) . "/communication.json",
+            ];
+            
+            $configFile = null;
+            foreach ($possiblePaths as $path) {
+                if (file_exists($path)) {
+                    $configFile = $path;
+                    break;
+                }
+            }
+            
+            if (!$configFile) {
+                return [];
+            }
 
-        $jsonContent = file_get_contents($configFile);
-        $config = json_decode($jsonContent, true);
-        
-        if (json_last_error() !== JSON_ERROR_NONE) {
+            $jsonContent = file_get_contents($configFile);
+            $config = json_decode($jsonContent, true);
+            
+            if (json_last_error() !== JSON_ERROR_NONE) {
+                return [];
+            }
+            
+            return $config;
+        } catch (Exception $e) {
             return [];
         }
-        
-        return $config;
     }
     
     /**
