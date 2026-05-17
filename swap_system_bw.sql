@@ -4062,3 +4062,62 @@ CREATE TABLE ussd_sessions (
 
 CREATE UNIQUE INDEX uniq_session_key
 ON ussd_sessions (session_id, session_key);
+CREATE TABLE IF NOT EXISTS participant_currencies (
+    id BIGSERIAL PRIMARY KEY,
+    participant_id BIGINT NOT NULL,
+    country_code CHAR(2) NOT NULL,
+    currency_code CHAR(3) NOT NULL,
+    asset_type VARCHAR(50) NOT NULL,
+    can_send BOOLEAN DEFAULT TRUE,
+    can_receive BOOLEAN DEFAULT TRUE,
+    can_hold BOOLEAN DEFAULT TRUE,
+    can_cashout BOOLEAN DEFAULT FALSE,
+    can_settle BOOLEAN DEFAULT TRUE,
+    status VARCHAR(20) DEFAULT 'ACTIVE',
+    metadata JSONB,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS fx_quotes (
+    quote_id BIGSERIAL PRIMARY KEY,
+    quote_uuid UUID NOT NULL UNIQUE,
+    swap_reference VARCHAR(100),
+    source_participant_id BIGINT NOT NULL,
+    destination_participant_id BIGINT NOT NULL,
+    fx_provider_participant_id BIGINT,
+    source_currency CHAR(3) NOT NULL,
+    destination_currency CHAR(3) NOT NULL,
+    source_amount NUMERIC(18,2) NOT NULL,
+    rate NUMERIC(24,10) NOT NULL,
+    destination_amount NUMERIC(18,2) NOT NULL,
+    rate_source VARCHAR(50),
+    markup_amount NUMERIC(18,2) DEFAULT 0,
+    fee_amount NUMERIC(18,2) DEFAULT 0,
+    status VARCHAR(20) DEFAULT 'QUOTED',
+    expires_at TIMESTAMP NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS fx_rates (
+    rate_id BIGSERIAL PRIMARY KEY,
+    fx_provider_id BIGINT,
+    from_currency CHAR(3),
+    to_currency CHAR(3),
+    market_rate NUMERIC(24,10),
+    provider_rate NUMERIC(24,10),
+    your_markup_percent NUMERIC(10,6),
+    your_final_rate NUMERIC(24,10),
+    valid_from TIMESTAMP,
+    valid_until TIMESTAMP,
+    liquidity_available NUMERIC(18,2),
+    status VARCHAR(20) DEFAULT 'ACTIVE',
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE fx_providers (
+    fx_provider_id BIGSERIAL PRIMARY KEY,
+    participant_id BIGINT,
+    provider_type VARCHAR(50),
+    supports_local_fx BOOLEAN DEFAULT TRUE,
+    supports_cross_border BOOLEAN DEFAULT TRUE,
+    status VARCHAR(20) DEFAULT 'ACTIVE',
+    created_at TIMESTAMP DEFAULT NOW()
+);
