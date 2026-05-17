@@ -10,7 +10,7 @@ use RuntimeException;
 require_once __DIR__ . '/../ValueObjects/SwapStatusResolver.php';
 require_once __DIR__ . '/Settlement/HybridSettlementStrategy.php';
 require_once __DIR__ . '/../../Infrastructure/SMS/SmsNotificationService.php';
-
+require_once __DIR__ . '/ForexService.php';
 
 use Security\Encryption\TokenEncryptor;
 use Domain\Services\Settlement\HybridSettlementStrategy;
@@ -23,6 +23,8 @@ use Domain\ValueObjects\SwapStatusResolver;
  * SwapService - ISO20022 & FSPIOP Compliant
  * Multi-country aware, dynamic configuration loading
  * ALL fees and rates are loaded from country configuration files - NO HARDCODING
+ * 
+ * NOW WITH FX AND CROSS-BORDER CAPABILITIES
  */
 class SwapService
 {
@@ -40,6 +42,8 @@ class SwapService
     private HybridSettlementStrategy $settlement;
     private ?SmsNotificationService $smsService = null;
     private ?CardService $cardService = null;
+    private ?ForexService $forexService = null;
+    private ?array $fxContext = null;
 
     private const LOG_FILE = '/tmp/vouchmorphn_swap_audit.log';
     private const DEBUG_FILE = '/tmp/hold_debug.log';
@@ -162,6 +166,15 @@ class SwapService
             throw new RuntimeException("Failed to initialize settlement strategy: " . $e->getMessage());
         }
         
+        // Initialize Forex Service for cross-border/multi-currency
+        try {
+            $this->forexService = new ForexService($this->swapDB, $this->config, $this->participants);
+            error_log("[SwapService] ✅ ForexService initialized");
+        } catch (Exception $e) {
+            error_log("[SwapService] ❌ ForexService initialization failed: " . $e->getMessage());
+            $this->forexService = null;
+        }
+        
         try {
             $this->initSmsService();
             error_log("[SwapService] SMS Service initialized successfully");
@@ -193,21 +206,19 @@ class SwapService
         
         error_log("=== SWAPSERVICE CONSTRUCTOR COMPLETE ===");
         error_log("Card service status: " . ($this->cardService ? "ACTIVE" : "NOT AVAILABLE"));
+        error_log("Forex service status: " . ($this->forexService ? "ACTIVE" : "NOT AVAILABLE"));
     }
     
     /**
      * Get country data directory path - Compatible with LoadCountry paths
-     * Now searches in the correct locations for config files
      */
     private function getCountryDataDir(): string
     {
-        // First, get the country slug from SystemCountry.php (same as LoadCountry)
         $systemCountryFile = __DIR__ . "/../../Core/Config/SystemCountry.php";
         if (file_exists($systemCountryFile)) {
             $countryMeta = require $systemCountryFile;
             $countrySlug = $countryMeta['slug'] ?? 'botswana';
             
-            // Look in the same locations as LoadCountry
             $possibleLocations = [
                 dirname(__DIR__, 3) . "/config/countries/" . $countrySlug,
                 __DIR__ . "/../../../config/countries/" . $countrySlug,
@@ -223,7 +234,6 @@ class SwapService
             }
         }
         
-        // Fallback: try with country code
         $possiblePaths = [
             dirname(__DIR__, 3) . "/config/countries/" . strtolower($this->countryCode),
             __DIR__ . "/../../../config/countries/" . strtolower($this->countryCode),
@@ -239,7 +249,6 @@ class SwapService
             }
         }
         
-        // Ultimate fallback
         $fallback = dirname(__DIR__, 3) . "/config/countries/botswana";
         error_log("[SwapService] WARNING: Using fallback country data dir: {$fallback}");
         return $fallback;
@@ -719,6 +728,9 @@ class SwapService
                 }
             }
             
+            // Use FX context currency if available
+            $currency = $this->fxContext['source_currency'] ?? $source['currency'] ?? 'BWP';
+            
             $stmt = $this->swapDB->prepare("
                 INSERT INTO hold_transactions 
                 (hold_reference, swap_reference, participant_id, participant_name,
@@ -734,7 +746,7 @@ class SwapService
                 $participantName,
                 $source['asset_type'],
                 $source['amount'],
-                $source['currency'] ?? 'BWP',
+                $currency,
                 $holdResult['hold_expiry'] ?? null,
                 json_encode($this->maskIdentifier($source)),
                 $destination['institution'] ?? null,
@@ -743,6 +755,7 @@ class SwapService
                     'source_institution' => $source['institution'],
                     'source_asset_type' => $source['asset_type'],
                     'destination_institution' => $destination['institution'] ?? null,
+                    'fx_context' => $this->fxContext ?? null
                 ])
             ]);
         } catch (Exception $e) {
@@ -911,7 +924,86 @@ class SwapService
     }
 
     /**
-     * Verify source asset with institution
+     * Get source currency from verification response
+     * Participants MUST return currency - do NOT default
+     */
+    private function getSourceCurrencyFromVerification(array $verificationResult, array $source): string
+    {
+        // Priority 1: Currency from participant response (MANDATORY)
+        if (isset($verificationResult['currency']) && !empty($verificationResult['currency'])) {
+            return strtoupper($verificationResult['currency']);
+        }
+        
+        // Priority 2: Currency from asset_details
+        if (isset($verificationResult['asset_details']['currency']) && !empty($verificationResult['asset_details']['currency'])) {
+            return strtoupper($verificationResult['asset_details']['currency']);
+        }
+        
+        // Priority 3: Currency from source payload
+        if (isset($source['currency']) && !empty($source['currency'])) {
+            return strtoupper($source['currency']);
+        }
+        
+        // DO NOT default - participants must provide currency
+        throw new RuntimeException(
+            "Source participant did not return currency. " .
+            "Response must include 'currency' field in verification response."
+        );
+    }
+    
+    /**
+     * Get destination currency from participant config
+     */
+    private function getDestinationCurrency(array $destination, array $participant): string
+    {
+        // Priority 1: Explicit in destination payload
+        if (isset($destination['currency']) && !empty($destination['currency'])) {
+            return strtoupper($destination['currency']);
+        }
+        
+        // Priority 2: From participant config
+        if (isset($participant['default_currency'])) {
+            return strtoupper($participant['default_currency']);
+        }
+        
+        // Priority 3: From participant currencies table (query)
+        try {
+            $stmt = $this->swapDB->prepare("
+                SELECT currency_code FROM participant_currencies 
+                WHERE participant_id = ? AND can_receive = TRUE
+                LIMIT 1
+            ");
+            $stmt->execute([$participant['participant_id'] ?? 0]);
+            $result = $stmt->fetch(PDO::FETCH_ASSOC);
+            if ($result) {
+                return $result['currency_code'];
+            }
+        } catch (Exception $e) {
+            error_log("Failed to get destination currency from DB: " . $e->getMessage());
+        }
+        
+        // Fallback to country mapping
+        $countryCode = $participant['country_code'] ?? $this->countryCode;
+        return $this->mapCountryToCurrency($countryCode);
+    }
+    
+    /**
+     * Map country code to currency (fallback only)
+     */
+    private function mapCountryToCurrency(string $countryCode): string
+    {
+        $map = [
+            'BW' => 'BWP', 'ZA' => 'ZAR', 'NA' => 'NAD', 'NG' => 'NGN',
+            'GH' => 'GHS', 'UG' => 'UGX', 'TZ' => 'TZS', 'KE' => 'KES',
+            'ZM' => 'ZMW', 'MZ' => 'MZN', 'ZW' => 'ZWL', 'US' => 'USD',
+            'GB' => 'GBP', 'EU' => 'EUR', 'CA' => 'CAD', 'AU' => 'AUD',
+            'CN' => 'CNY', 'JP' => 'JPY', 'IN' => 'INR'
+        ];
+        return $map[strtoupper($countryCode)] ?? 'BWP';
+    }
+
+    /**
+     * Verify source asset with institution - ENHANCED to capture currency
      */
     private function verifySourceAsset(string $swapRef, array $source, array $participant): array
     {
@@ -1022,12 +1114,24 @@ class SwapService
                 ];
             }
 
+            // Extract currency from response - CRITICAL for FX
+            $currency = null;
+            if (isset($bankResponse['currency'])) {
+                $currency = strtoupper($bankResponse['currency']);
+            } elseif (isset($bankResponse['asset_details']['currency'])) {
+                $currency = strtoupper($bankResponse['asset_details']['currency']);
+            } elseif (isset($bankResponse['metadata']['currency'])) {
+                $currency = strtoupper($bankResponse['metadata']['currency']);
+            }
+
             return [
                 'verified' => true,
+                'currency' => $currency,
                 'asset_details' => [
                     'id' => $bankResponse['asset_id'] ?? $bankResponse['wallet_id'] ?? $bankResponse['account_id'] ?? null,
                     'available_balance' => $bankResponse['available_balance'] ?? $bankResponse['balance'] ?? null,
                     'holder_name' => $bankResponse['holder_name'] ?? $bankResponse['account_holder'] ?? null,
+                    'currency' => $currency,
                     'expiry_date' => $bankResponse['expiry_date'] ?? null,
                     'metadata' => $bankResponse['metadata'] ?? []
                 ]
@@ -1039,13 +1143,18 @@ class SwapService
     }
 
     /**
-     * Place hold on source asset
+     * Place hold on source asset - UPDATED for FX context
      */
     private function placeHoldOnSourceAsset(string $swapRef, array $source, array $verificationResult, array $participant, array $destination): array
     {
+        // Use FX context source currency if available
+        $sourceCurrency = $this->fxContext['source_currency'] ?? $verificationResult['currency'] ?? $source['currency'] ?? 'BWP';
+        $holdAmount = $this->fxContext['source_amount'] ?? $source['amount'];
+        
         $this->logEvent($swapRef, 'PLACING_HOLD', [
             'institution' => $participant['provider_code'] ?? $source['institution'],
-            'amount' => $source['amount'],
+            'amount' => $holdAmount,
+            'currency' => $sourceCurrency,
             'asset_type' => $source['asset_type']
         ]);
 
@@ -1055,10 +1164,10 @@ class SwapService
             'reference' => $swapRef,
             'asset_type' => $source['asset_type'],
             'asset_id' => $verificationResult['asset_details']['id'] ?? null,
-            'amount' => $source['amount'],
-            'currency' => $source['currency'] ?? 'BWP',
+            'amount' => $holdAmount,
+            'currency' => $sourceCurrency,
             'expiry_hours' => self::HOLD_EXPIRY_HOURS,
-            'reason' => 'Swap transaction'
+            'reason' => 'Swap transaction' . ($this->fxContext ? ' (FX: ' . $this->fxContext['source_currency'] . '→' . $this->fxContext['destination_currency'] . ')' : '')
         ];
 
         switch ($source['asset_type']) {
@@ -1149,7 +1258,9 @@ class SwapService
             
             $this->logEvent($swapRef, 'HOLD_PLACED', [
                 'hold_reference' => $holdResult['hold_reference'],
-                'expiry' => $holdResult['hold_expiry']
+                'expiry' => $holdResult['hold_expiry'],
+                'currency' => $sourceCurrency,
+                'amount' => $holdAmount
             ]);
 
             return $holdResult;
@@ -1160,7 +1271,7 @@ class SwapService
     }
 
     /**
-     * Execute swap with unified payload structure
+     * Execute swap with unified payload structure - ENHANCED with FX
      */
     public function executeSwap(array $payload): array
     { 
@@ -1171,6 +1282,7 @@ class SwapService
         $swapRef = bin2hex(random_bytes(16));
         $atmResult = null;
         $cashoutResult = null;
+        $this->fxContext = null;
         
         $debugSteps = [];
         $debugSteps[] = ['time' => microtime(true), 'step' => 'START', 'swap_ref' => $swapRef];
@@ -1184,7 +1296,7 @@ class SwapService
                 throw new RuntimeException("Destination institution is required");
             }
 
-            $currency = $payload['currency'] ?? 'BWP';
+            $payloadCurrency = $payload['currency'] ?? null;
             $source = $payload['source'];
             $destination = $payload['destination'];
             
@@ -1199,16 +1311,11 @@ class SwapService
             $debugSteps[] = ['time' => microtime(true), 'step' => 'SOURCE_FOUND', 'participant' => $sourceParticipant['provider_code'] ?? $sourceInstitutionKey];
             
             $source = $this->sanitizePhones($source, $sourceParticipant);
+            $destination = $this->sanitizePhones($destination, null);
 
-            if (isset($destination['delivery_mode']) && $destination['delivery_mode'] === 'cashout') {
-                $errors = $this->validateCashoutAmount((float)$destination['amount'], $currency);
-                if (!empty($errors)) {
-                    throw new RuntimeException("Cashout validation failed: " . implode(', ', $errors));
-                }
-                $atmResult = $this->getDispensableAmount((float)$destination['amount'], $currency);
-                $debugSteps[] = ['time' => microtime(true), 'step' => 'CASHOUT_VALIDATED', 'dispensable' => $atmResult['dispensable_amount']];
-            }
-
+            // =============================================
+            // STEP 1: Verify source asset and get currency
+            // =============================================
             $debugSteps[] = ['time' => microtime(true), 'step' => 'START_VERIFY_ASSET'];
             $verificationResult = $this->verifySourceAsset($swapRef, $source, $sourceParticipant);
             $debugSteps[] = ['time' => microtime(true), 'step' => 'VERIFY_ASSET_COMPLETE', 'verified' => $verificationResult['verified']];
@@ -1220,6 +1327,86 @@ class SwapService
                 );
             }
             
+            // =============================================
+            // STEP 2: Get source currency (MUST be provided)
+            // =============================================
+            $sourceCurrency = $this->getSourceCurrencyFromVerification($verificationResult, $source);
+            
+            $debugSteps[] = ['time' => microtime(true), 'step' => 'SOURCE_CURRENCY_DETECTED', 'currency' => $sourceCurrency];
+            
+            // =============================================
+            // STEP 3: Get destination participant and currency
+            // =============================================
+            $destInstitutionKey = $this->findInstitutionKey($destination['institution']);
+            if (!$destInstitutionKey) {
+                throw new RuntimeException("Destination institution not found: {$destination['institution']}");
+            }
+            $destParticipant = $this->participants[$destInstitutionKey];
+            $destinationCurrency = $this->getDestinationCurrency($destination, $destParticipant);
+            
+            $debugSteps[] = ['time' => microtime(true), 'step' => 'DEST_CURRENCY_DETECTED', 'currency' => $destinationCurrency];
+            
+            // =============================================
+            // STEP 4: Handle FX if currencies differ
+            // =============================================
+            $sourceAmount = (float)$source['amount'];
+            $creditAmount = $sourceAmount;
+            $exchangeRate = null;
+            
+            if ($this->forexService && $sourceCurrency !== $destinationCurrency) {
+                $debugSteps[] = ['time' => microtime(true), 'step' => 'FX_NEEDED', 'from' => $sourceCurrency, 'to' => $destinationCurrency];
+                
+                $this->fxContext = $this->forexService->prepareFxContext(
+                    $swapRef,
+                    $sourceParticipant,
+                    $destParticipant,
+                    $sourceCurrency,
+                    $sourceAmount,
+                    $destination
+                );
+                
+                $debugSteps[] = ['time' => microtime(true), 'step' => 'FX_CONTEXT_PREPARED',
+                                 'needs_fx' => $this->fxContext['needs_fx'],
+                                 'dest_amount' => $this->fxContext['destination_amount'] ?? null,
+                                 'rate' => $this->fxContext['rate'] ?? null];
+                
+                if ($this->fxContext['needs_fx']) {
+                    $creditAmount = $this->fxContext['destination_amount'];
+                    $exchangeRate = $this->fxContext['rate'];
+                    
+                    // Update destination amount with FX-converted value
+                    $destination['amount'] = $creditAmount;
+                    $destination['original_amount'] = $sourceAmount;
+                    $destination['exchange_rate'] = $exchangeRate;
+                    $destination['fx_quote_uuid'] = $this->fxContext['quote_uuid'];
+                    $destination['fx_rate_source'] = $this->fxContext['rate_source'] ?? null;
+                    
+                    $debugSteps[] = ['time' => microtime(true), 'step' => 'FX_APPLIED',
+                                     'original_amount' => $sourceAmount,
+                                     'converted_amount' => $creditAmount,
+                                     'rate' => $exchangeRate];
+                }
+            } else {
+                $debugSteps[] = ['time' => microtime(true), 'step' => 'NO_FX_NEEDED', 'currency' => $sourceCurrency];
+            }
+            
+            // =============================================
+            // STEP 5: Validate cashout if needed
+            // =============================================
+            if (isset($destination['delivery_mode']) && $destination['delivery_mode'] === 'cashout') {
+                $errors = $this->validateCashoutAmount($creditAmount, $destinationCurrency);
+                if (!empty($errors)) {
+                    throw new RuntimeException("Cashout validation failed: " . implode(', ', $errors));
+                }
+                $atmResult = $this->getDispensableAmount($creditAmount, $destinationCurrency);
+                $debugSteps[] = ['time' => microtime(true), 'step' => 'CASHOUT_VALIDATED', 
+                                 'dispensable' => $atmResult['dispensable_amount'],
+                                 'currency' => $destinationCurrency];
+            }
+            
+            // =============================================
+            // STEP 6: Place hold (in source currency)
+            // =============================================
             $debugSteps[] = ['time' => microtime(true), 'step' => 'START_PLACE_HOLD'];
             $holdResult = $this->placeHoldOnSourceAsset($swapRef, $source, $verificationResult, $sourceParticipant, $destination);
             $bankClient = new GenericBankClient($sourceParticipant);
@@ -1232,52 +1419,66 @@ class SwapService
                 throw new RuntimeException("Failed to place hold: " . ($holdResult['message'] ?? 'Unknown error'));
             }
 
+            // =============================================
+            // STEP 7: Record swap with FX info
+            // =============================================
             $debugSteps[] = ['time' => microtime(true), 'step' => 'START_RECORD_SWAP'];
             $swapId = $this->recordMasterSwap(
                 $swapRef,
                 $source,
                 $destination,
-                $currency,
-                $verificationResult
+                $sourceCurrency,
+                $destinationCurrency,
+                $verificationResult,
+                $exchangeRate,
+                $this->fxContext['quote_uuid'] ?? null
             );
             $debugSteps[] = ['time' => microtime(true), 'step' => 'RECORD_SWAP_COMPLETE', 'swap_id' => $swapId];
 
+            // =============================================
+            // STEP 8: Process destination based on delivery mode
+            // =============================================
             $debugSteps[] = ['time' => microtime(true), 'step' => 'BEFORE_PROCESS_DESTINATION', 
-                            'delivery_mode' => $destination['delivery_mode'] ?? 'deposit'];
+                            'delivery_mode' => $destination['delivery_mode'] ?? 'deposit',
+                            'amount' => $creditAmount,
+                            'currency' => $destinationCurrency];
 
             if (isset($destination['delivery_mode'])) {
                 switch ($destination['delivery_mode']) {
                     case 'card_load':
                         $debugSteps[] = ['time' => microtime(true), 'step' => 'START_CARD_LOAD'];
-                        $this->processCardLoad($swapId, $swapRef, $source, $destination, $currency, $holdResult);
+                        $this->processCardLoad($swapId, $swapRef, $source, $destination, $destinationCurrency, $holdResult);
                         $debugSteps[] = ['time' => microtime(true), 'step' => 'CARD_LOAD_COMPLETE'];
                         break;
                         
                     case 'card':
                         $debugSteps[] = ['time' => microtime(true), 'step' => 'START_CARD_ISSUANCE'];
-                        $this->processCardIssuance($swapId, $swapRef, $source, $destination, $currency, $holdResult);
+                        $this->processCardIssuance($swapId, $swapRef, $source, $destination, $destinationCurrency, $holdResult);
                         $debugSteps[] = ['time' => microtime(true), 'step' => 'CARD_ISSUANCE_COMPLETE'];
                         break;
                         
                     case 'cashout':
                         $debugSteps[] = ['time' => microtime(true), 'step' => 'START_PROCESS_CASHOUT'];
-                        $cashoutResult = $this->processCashout($swapId, $swapRef, $source, $destination, $currency, $holdResult);
+                        $cashoutResult = $this->processCashout($swapId, $swapRef, $source, $destination, $destinationCurrency, $holdResult);
                         $debugSteps[] = ['time' => microtime(true), 'step' => 'PROCESS_CASHOUT_COMPLETE'];
                         break;
                         
                     case 'deposit':
                     default:
                         $debugSteps[] = ['time' => microtime(true), 'step' => 'START_PROCESS_DEPOSIT'];
-                        $this->processDeposit($swapId, $swapRef, $source, $destination, $currency, $holdResult);
+                        $this->processDeposit($swapId, $swapRef, $source, $destination, $destinationCurrency, $holdResult);
                         $debugSteps[] = ['time' => microtime(true), 'step' => 'PROCESS_DEPOSIT_COMPLETE'];
                         break;
                 }
             } else {
                 $debugSteps[] = ['time' => microtime(true), 'step' => 'START_PROCESS_DEPOSIT'];
-                $this->processDeposit($swapId, $swapRef, $source, $destination, $currency, $holdResult);
+                $this->processDeposit($swapId, $swapRef, $source, $destination, $destinationCurrency, $holdResult);
                 $debugSteps[] = ['time' => microtime(true), 'step' => 'PROCESS_DEPOSIT_COMPLETE'];
             }
 
+            // =============================================
+            // STEP 9: Debit source funds (unless skip)
+            // =============================================
             $debugSteps[] = ['time' => microtime(true), 'step' => 'CHECKING_IF_DEBIT_NEEDED'];
             
             $skipDebit = $this->shouldSkipDebit($destination);
@@ -1294,6 +1495,9 @@ class SwapService
                 ]);
             }
 
+            // =============================================
+            // STEP 10: Handle undispensed amount for cashout
+            // =============================================
             if ($atmResult && $atmResult['undispensed_amount'] > 0.01) {
                 $debugSteps[] = ['time' => microtime(true), 'step' => 'HANDLE_UNDISPENSED', 
                                 'amount' => $atmResult['undispensed_amount']];
@@ -1305,6 +1509,11 @@ class SwapService
                 );
             }
 
+            // Mark FX quote as used if applicable
+            if ($this->fxContext && isset($this->fxContext['quote_uuid'])) {
+                $this->forexService->markQuoteUsed($this->fxContext['quote_uuid']);
+            }
+
             $this->swapDB->commit();
             $debugSteps[] = ['time' => microtime(true), 'step' => 'TRANSACTION_COMMITTED'];
             
@@ -1313,9 +1522,14 @@ class SwapService
                 'source_type' => $source['asset_type'],
                 'destination_type' => $destination['asset_type'],
                 'skip_debit' => $skipDebit,
+                'fx_applied' => $this->fxContext ? true : false,
+                'fx_rate' => $exchangeRate,
                 'debug_steps' => $debugSteps
             ]);
 
+            // =============================================
+            // STEP 11: Build response
+            // =============================================
             $response = [
                 'status' => 'success',
                 'swap_reference' => $swapRef,
@@ -1324,12 +1538,40 @@ class SwapService
                 'debug' => $debugSteps
             ];
 
+            // Add FX info if applicable
+            if ($this->fxContext && $this->fxContext['needs_fx']) {
+                $response['fx'] = [
+                    'source_currency' => $this->fxContext['source_currency'],
+                    'destination_currency' => $this->fxContext['destination_currency'],
+                    'source_amount' => $this->fxContext['source_amount'],
+                    'destination_amount' => $this->fxContext['destination_amount'],
+                    'exchange_rate' => $this->fxContext['rate'],
+                    'rate_source' => $this->fxContext['rate_source'] ?? 'unknown',
+                    'quote_uuid' => $this->fxContext['quote_uuid'],
+                    'rate_locked_until' => $this->fxContext['expires_at'] ?? null
+                ];
+                $response['message'] = sprintf(
+                    'Swap initiated: %s %s → %s %s (Rate: 1 %s = %s %s)',
+                    $this->fxContext['source_amount'],
+                    $this->fxContext['source_currency'],
+                    $this->fxContext['destination_amount'],
+                    $this->fxContext['destination_currency'],
+                    $this->fxContext['source_currency'],
+                    $this->fxContext['rate'],
+                    $this->fxContext['destination_currency']
+                );
+            }
+
             // Add cashout response data if applicable
             if ($cashoutResult) {
                 $response['withdrawal_code'] = $cashoutResult['generated_code'];
                 $response['sat_number'] = $cashoutResult['sat_number'] ?? null;
                 $response['token_reference'] = $cashoutResult['token_reference'];
                 $response['expires_at'] = $cashoutResult['expires_at'];
+                if (isset($response['fx'])) {
+                    $response['withdrawal_currency'] = $this->fxContext['destination_currency'];
+                    $response['withdrawal_amount'] = $this->fxContext['destination_amount'];
+                }
                 $response['message'] = 'Cashout code generated by ' . $destination['institution'];
             }
 
@@ -1419,7 +1661,7 @@ class SwapService
             'reference' => $swapRef,
             'hold_reference' => $holdResult['hold_reference'],
             'amount' => $source['amount'],
-            'reason' => 'Swap completed'
+            'reason' => 'Swap completed' . ($this->fxContext ? ' (FX applied)' : '')
         ];
 
         $result = $bankClient->debitHold($debitPayload);
@@ -1462,7 +1704,7 @@ class SwapService
     }
 
     /**
-     * Process card load
+     * Process card load - UPDATED for FX
      */
     private function processCardLoad(int $swapId, string $swapRef, array $source, array $destination, string $currency, array $holdResult): void
     {
@@ -1470,12 +1712,18 @@ class SwapService
         $debug[] = ['time' => microtime(true), 'step' => 'CARD_LOAD_START'];
         
         try {
-            $grossAmount = (float)$destination['amount'];
+            // Use FX-converted amount if available, otherwise use destination amount
+            $grossAmount = $this->fxContext 
+                ? (float)($this->fxContext['destination_amount'] ?? $destination['amount'])
+                : (float)$destination['amount'];
+            
             $cardType = $this->getCardType($destination);
             
             $debug[] = ['time' => microtime(true), 'step' => 'CARD_TYPE_DETERMINED', 
                        'type' => $cardType, 
-                       'institution' => $destination['institution']];
+                       'institution' => $destination['institution'],
+                       'amount' => $grossAmount,
+                       'currency' => $currency];
             
             if ($cardType === 'balance_based') {
                 $this->processBalanceBasedCardLoad($swapId, $swapRef, $source, $destination, $currency, $holdResult, $grossAmount);
@@ -1525,6 +1773,7 @@ class SwapService
             'swap_reference' => $swapRef,
             'card_suffix' => $cardSuffix,
             'amount' => $netAmount,
+            'currency' => $currency,
             'load_type' => 'balance'
         ]);
         
@@ -1536,18 +1785,21 @@ class SwapService
             'card_load_result' => [
                 'card_suffix' => $cardSuffix,
                 'amount' => $netAmount,
+                'currency' => $currency,
                 'new_balance' => $cardResult['new_balance'] ?? null,
-                'card_type' => 'balance_based'
+                'card_type' => 'balance_based',
+                'fx_applied' => $this->fxContext ? true : false
             ]
         ]);
         
         $this->logEvent($swapRef, 'BALANCE_CARD_LOADED', [
             'card_suffix' => $cardSuffix,
-            'amount' => $netAmount
+            'amount' => $netAmount,
+            'currency' => $currency
         ]);
         
         $this->queueSettlementMessage($swapRef, $source, $destination, $grossAmount, $holdResult, $feeDetails);
-        $this->settlement->updateNetPosition($source['institution'], $destination['institution'], $netAmount, 'card_load');
+        $this->settlement->updateNetPosition($source['institution'], $destination['institution'], $netAmount, 'card_load', $currency);
     }
 
     /**
@@ -1587,13 +1839,15 @@ class SwapService
             'fee_details' => $feeDetails,
             'source_institution' => $source['institution'],
             'source_hold_reference' => $holdResult['hold_reference'],
+            'currency' => $currency,
             'expiry_days' => self::MESSAGE_CARD_EXPIRY_DAYS,
             'metadata' => [
                 'source_institution' => $source['institution'],
                 'source_asset_type' => $source['asset_type'],
                 'destination_institution' => $destination['institution'],
                 'gross_amount' => $grossAmount,
-                'fee_amount' => $feeDetails['fee_amount']
+                'fee_amount' => $feeDetails['fee_amount'],
+                'fx_applied' => $this->fxContext ? true : false
             ]
         ];
         
@@ -1606,7 +1860,8 @@ class SwapService
                     'hold_reference' => $holdResult['hold_reference'],
                     'swap_reference' => $swapRef,
                     'card_suffix' => $cardSuffix,
-                    'amount' => $netAmount
+                    'amount' => $netAmount,
+                    'currency' => $currency
                 ]);
                 
                 $cardResult['authorized'] = true;
@@ -1632,10 +1887,12 @@ class SwapService
                 'authorized_amount' => $netAmount,
                 'gross_amount' => $grossAmount,
                 'fee_amount' => $feeDetails['fee_amount'],
+                'currency' => $currency,
                 'hold_reference' => $holdResult['hold_reference'],
                 'status' => 'AUTHORIZED',
                 'card_type' => 'message_based',
-                'fee_details' => $feeDetails
+                'fee_details' => $feeDetails,
+                'fx_applied' => $this->fxContext ? true : false
             ]
         ]);
         
@@ -1643,6 +1900,7 @@ class SwapService
             'card_suffix' => $cardSuffix,
             'amount' => $netAmount,
             'gross_amount' => $grossAmount,
+            'currency' => $currency,
             'fee' => $feeDetails['fee_amount'],
             'hold_reference' => $holdResult['hold_reference']
         ]);
@@ -1657,12 +1915,16 @@ class SwapService
         $debug[] = ['time' => microtime(true), 'step' => 'CARD_ISSUANCE_START'];
         
         try {
-            $grossAmount = (float)$destination['amount'];
+            $grossAmount = $this->fxContext 
+                ? (float)($this->fxContext['destination_amount'] ?? $destination['amount'])
+                : (float)$destination['amount'];
             $cardType = $this->getCardType($destination);
             
             $debug[] = ['time' => microtime(true), 'step' => 'CARD_TYPE_DETERMINED', 
                        'type' => $cardType, 
-                       'institution' => $destination['institution']];
+                       'institution' => $destination['institution'],
+                       'amount' => $grossAmount,
+                       'currency' => $currency];
             
             if ($cardType === 'balance_based') {
                 $this->processBalanceBasedCardIssuance($swapId, $swapRef, $source, $destination, $currency, $holdResult, $grossAmount);
@@ -1716,12 +1978,14 @@ class SwapService
             'daily_limit' => $cardData['daily_limit'] ?? null,
             'monthly_limit' => $cardData['monthly_limit'] ?? null,
             'atm_daily_limit' => $cardData['atm_daily_limit'] ?? null,
+            'currency' => $currency,
             'issued_by' => 'swap_service',
             'card_type' => 'balance_based',
             'metadata' => [
                 'source_institution' => $source['institution'],
                 'source_asset_type' => $source['asset_type'],
-                'destination_institution' => $destination['institution']
+                'destination_institution' => $destination['institution'],
+                'fx_applied' => $this->fxContext ? true : false
             ]
         ];
         
@@ -1735,18 +1999,21 @@ class SwapService
                 'card_suffix' => $cardResult['card_suffix'] ?? substr($cardResult['card_number'] ?? '', -4),
                 'expiry' => $cardResult['expiry'] ?? null,
                 'amount' => $netAmount,
+                'currency' => $currency,
                 'card_id' => $cardResult['card_id'] ?? null,
-                'card_type' => 'balance_based'
+                'card_type' => 'balance_based',
+                'fx_applied' => $this->fxContext ? true : false
             ]
         ]);
         
         $this->logEvent($swapRef, 'BALANCE_CARD_ISSUED', [
             'card_suffix' => $cardResult['card_suffix'] ?? substr($cardResult['card_number'] ?? '', -4),
-            'amount' => $netAmount
+            'amount' => $netAmount,
+            'currency' => $currency
         ]);
         
         $this->queueSettlementMessage($swapRef, $source, $destination, $grossAmount, $holdResult, $feeDetails);
-        $this->settlement->updateNetPosition($source['institution'], $destination['institution'], $netAmount, 'card_issuance');
+        $this->settlement->updateNetPosition($source['institution'], $destination['institution'], $netAmount, 'card_issuance', $currency);
     }
 
     /**
@@ -1780,6 +2047,7 @@ class SwapService
             'daily_limit' => $cardData['daily_limit'] ?? null,
             'monthly_limit' => $cardData['monthly_limit'] ?? null,
             'atm_daily_limit' => $cardData['atm_daily_limit'] ?? null,
+            'currency' => $currency,
             'issued_by' => 'swap_service',
             'card_type' => 'message_based',
             'status' => 'AUTHORIZED',
@@ -1788,7 +2056,8 @@ class SwapService
                 'source_institution' => $source['institution'],
                 'source_asset_type' => $source['asset_type'],
                 'destination_institution' => $destination['institution'],
-                'fee_details' => $feeDetails
+                'fee_details' => $feeDetails,
+                'fx_applied' => $this->fxContext ? true : false
             ]
         ];
         
@@ -1804,15 +2073,18 @@ class SwapService
                 'card_suffix' => $cardResult['card_suffix'] ?? substr($cardResult['card_number'] ?? '', -4),
                 'expiry' => $cardResult['expiry'] ?? null,
                 'authorized_amount' => $grossAmount,
+                'currency' => $currency,
                 'card_id' => $cardResult['card_id'] ?? null,
                 'card_type' => 'message_based',
-                'status' => 'AUTHORIZED'
+                'status' => 'AUTHORIZED',
+                'fx_applied' => $this->fxContext ? true : false
             ]
         ]);
         
         $this->logEvent($swapRef, 'MESSAGE_CARD_ISSUED', [
             'card_suffix' => $cardResult['card_suffix'] ?? substr($cardResult['card_number'] ?? '', -4),
-            'amount' => $grossAmount
+            'amount' => $grossAmount,
+            'currency' => $currency
         ]);
     }
 
@@ -1843,7 +2115,7 @@ class SwapService
     }
 
     /**
-     * Process cashout to ATM/Agent - UPDATED to use destination institution's generated code
+     * Process cashout to ATM/Agent - UPDATED for FX
      */
     private function processCashout(int $swapId, string $swapRef, array $source, array $destination, string $currency, array $holdResult): array
     {
@@ -1851,8 +2123,11 @@ class SwapService
         $debug[] = ['time' => microtime(true), 'step' => 'CASHOUT_START'];
         
         try {
-            $grossAmount = (float)$destination['amount'];
-            $debug[] = ['time' => microtime(true), 'step' => 'GROSS_AMOUNT', 'amount' => $grossAmount];
+            // Use FX-converted amount if available
+            $grossAmount = $this->fxContext 
+                ? (float)($this->fxContext['destination_amount'] ?? $destination['amount'])
+                : (float)$destination['amount'];
+            $debug[] = ['time' => microtime(true), 'step' => 'GROSS_AMOUNT', 'amount' => $grossAmount, 'currency' => $currency];
             
             $feeDetails = $this->deductSwapFee(
                 $swapRef,
@@ -1883,14 +2158,15 @@ class SwapService
             
             $debug[] = ['time' => microtime(true), 'step' => 'REQUESTING_TOKEN_FROM_DESTINATION'];
             
-            // Request token from destination institution - it will generate its own code
+            // Request token from destination institution with FX info
             $tokenResult = $this->requestTokenFromDestination(
                 $swapRef, 
                 $source, 
                 $destination, 
                 $holdResult, 
                 $destParticipant, 
-                $netAmount
+                $netAmount,
+                $currency
             );
             $debug[] = ['time' => microtime(true), 'step' => 'TOKEN_RECEIVED_FROM_DESTINATION'];
             
@@ -1922,7 +2198,7 @@ class SwapService
             $debug[] = ['time' => microtime(true), 'step' => 'SETTLEMENT_QUEUED'];
 
             $debug[] = ['time' => microtime(true), 'step' => 'UPDATING_NET_POSITION'];
-            $this->settlement->updateNetPosition($source['institution'], $destination['institution'], $netAmount, 'cashout');
+            $this->settlement->updateNetPosition($source['institution'], $destination['institution'], $netAmount, 'cashout', $currency);
             $debug[] = ['time' => microtime(true), 'step' => 'NET_POSITION_UPDATED'];
             
             $debug[] = ['time' => microtime(true), 'step' => 'UPDATING_SWAP_LEDGER'];
@@ -1937,7 +2213,8 @@ class SwapService
                 'token_reference' => $tokenResult['token_reference'] ?? $satNumber,
                 'expires_at' => $tokenResult['expires_at'] ?? null,
                 'net_amount' => $netAmount,
-                'fee_amount' => $feeDetails['fee_amount']
+                'fee_amount' => $feeDetails['fee_amount'],
+                'currency' => $currency
             ];
             
         } catch (Exception $e) {
@@ -1948,7 +2225,7 @@ class SwapService
     }
 
     /**
-     * Request token/code from destination institution
+     * Request token/code from destination institution - UPDATED for FX
      */
     private function requestTokenFromDestination(
         string $swapRef, 
@@ -1956,7 +2233,8 @@ class SwapService
         array $destination, 
         array $holdResult, 
         array $participant, 
-        ?float $netAmount = null
+        ?float $netAmount = null,
+        ?string $currency = null
     ): array {
         $debug = [];
         $debug[] = ['time' => microtime(true), 'step' => 'REQUEST_TOKEN_START'];
@@ -1972,9 +2250,21 @@ class SwapService
                 'source_asset_type' => $source['asset_type'],
                 'beneficiary_phone' => $destination['cashout']['beneficiary_phone'] ?? '',
                 'amount' => $netAmount ?? $destination['amount'],
+                'currency' => $currency ?? 'BWP',
                 'code_hash' => null,
                 'action' => 'GENERATE_ATM_TOKEN'
             ];
+            
+            // Add FX info if available
+            if ($this->fxContext && $this->fxContext['needs_fx']) {
+                $payload['fx_info'] = [
+                    'source_currency' => $this->fxContext['source_currency'],
+                    'destination_currency' => $this->fxContext['destination_currency'],
+                    'exchange_rate' => $this->fxContext['rate'],
+                    'original_amount' => $this->fxContext['source_amount'],
+                    'converted_amount' => $this->fxContext['destination_amount']
+                ];
+            }
             
             $debug[] = ['time' => microtime(true), 'step' => 'PAYLOAD_PREPARED'];
 
@@ -2172,6 +2462,13 @@ class SwapService
                 }
                 
                 $this->updateHoldStatus($swap['hold_reference'], 'RELEASED');
+            }
+            
+            // Release FX quote if applicable
+            if (isset($swap['fx_quote_uuid'])) {
+                $this->swapDB->prepare("
+                    UPDATE fx_quotes SET status = 'CANCELLED' WHERE quote_uuid = ?
+                ")->execute([$swap['fx_quote_uuid']]);
             }
             
             if ($swap['voucher_id'] && $swap['voucher_status'] === 'ACTIVE') {
@@ -2706,6 +3003,17 @@ class SwapService
                 'split' => $feeDetails['split'] ?? null
             ];
         }
+        
+        // Add FX info if applicable
+        if ($this->fxContext && $this->fxContext['needs_fx']) {
+            $metadata['fx'] = [
+                'source_currency' => $this->fxContext['source_currency'],
+                'destination_currency' => $this->fxContext['destination_currency'],
+                'exchange_rate' => $this->fxContext['rate'],
+                'source_amount' => $this->fxContext['source_amount'],
+                'destination_amount' => $this->fxContext['destination_amount']
+            ];
+        }
 
         $stmt = $this->swapDB->prepare("
             INSERT INTO settlement_messages
@@ -2745,18 +3053,28 @@ class SwapService
             ]);
         } else {
             $this->logEvent('SWAP_TO_SWAP', 'INFO', ['amount' => $amount, 'ref' => $ref]);
-            $this->settlement->updateNetPosition($destination['institution'], $origin, $amount);
+            $currency = $this->fxContext['destination_currency'] ?? 'BWP';
+            $this->settlement->updateNetPosition($destination['institution'], $origin, $amount, 'swap_to_swap', $currency);
         }
     }
 
-    private function recordMasterSwap(string $swapRef, array $source, array $destination, string $currency, array $verificationResult): int
-    {
+    private function recordMasterSwap(
+        string $swapRef, 
+        array $source, 
+        array $destination, 
+        string $sourceCurrency,
+        string $destinationCurrency,
+        array $verificationResult,
+        ?float $exchangeRate = null,
+        ?string $fxQuoteUuid = null
+    ): int {
         $sourceDetails = [
             'institution' => $source['institution'],
             'asset_type' => $source['asset_type'],
             'reference' => $this->maskIdentifier($source),
             'holder_name' => $verificationResult['asset_details']['holder_name'] ?? null,
-            'available_balance' => $verificationResult['asset_details']['available_balance'] ?? null
+            'available_balance' => $verificationResult['asset_details']['available_balance'] ?? null,
+            'currency' => $sourceCurrency
         ];
 
         $destinationAssetType = 'UNKNOWN';
@@ -2780,6 +3098,7 @@ class SwapService
             'asset_type' => $destinationAssetType,
             'delivery_mode' => $destination['delivery_mode'] ?? 'deposit',
             'card_type' => $this->getCardType($destination),
+            'currency' => $destinationCurrency,
             'beneficiary' => $destination['cashout']['beneficiary_phone'] ?? 
                             $destination['beneficiary_account'] ?? 
                             $destination['beneficiary_wallet'] ?? 
@@ -2787,17 +3106,33 @@ class SwapService
                             $destination['cashout']['beneficiary'] ??
                             null
         ];
+        
+        // Add FX info to destination details if applicable
+        if ($exchangeRate) {
+            $destinationDetails['exchange_rate'] = $exchangeRate;
+            $destinationDetails['original_currency'] = $sourceCurrency;
+            $destinationDetails['original_amount'] = $source['amount'];
+        }
 
         $stmt = $this->swapDB->prepare("
             INSERT INTO swap_requests 
-            (swap_uuid, from_currency, to_currency, amount, source_details, destination_details, status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'pending', NOW())
+            (swap_uuid, from_currency, to_currency, amount, source_details, destination_details, 
+             source_currency, destination_currency, exchange_rate, fx_quote_uuid, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NOW())
             RETURNING swap_id
         ");
 
         $stmt->execute([
-            $swapRef, $currency, $currency, $source['amount'],
-            json_encode($sourceDetails), json_encode($destinationDetails)
+            $swapRef, 
+            $sourceCurrency, 
+            $destinationCurrency, 
+            $source['amount'],
+            json_encode($sourceDetails), 
+            json_encode($destinationDetails),
+            $sourceCurrency,
+            $destinationCurrency,
+            $exchangeRate,
+            $fxQuoteUuid
         ]);
 
         return (int)$stmt->fetchColumn();
@@ -2826,7 +3161,10 @@ class SwapService
 
     private function processDeposit(int $swapId, string $swapRef, array $source, array $destination, string $currency, array $holdResult): void
     {
-        $grossAmount = (float)$destination['amount'];
+        // Use FX-converted amount if available
+        $grossAmount = $this->fxContext 
+            ? (float)($this->fxContext['destination_amount'] ?? $destination['amount'])
+            : (float)$destination['amount'];
         
         $feeDetails = $this->deductSwapFee(
             $swapRef,
@@ -2852,6 +3190,7 @@ class SwapService
             'source_hold_reference' => $holdResult['hold_reference'] ?? null,
             'destination_account' => $destination['beneficiary_account'] ?? $destination['beneficiary_wallet'] ?? null,
             'amount' => $netAmount,
+            'currency' => $currency,
             'action' => 'PROCESS_DEPOSIT'
         ], 'deposit_direct');
 
@@ -2886,7 +3225,7 @@ class SwapService
         }
         
         $this->queueSettlementMessage($swapRef, $source, $destination, $grossAmount, $holdResult, $feeDetails);
-        $this->settlement->updateNetPosition($source['institution'], $destination['institution'], $netAmount, 'deposit');
+        $this->settlement->updateNetPosition($source['institution'], $destination['institution'], $netAmount, 'deposit', $currency);
     }
 
     private function maskIdentifier(array $source): string
@@ -3070,12 +3409,19 @@ class SwapService
             $stmt->execute([$swapRef]);
             $cardAuths = $stmt->fetchAll(PDO::FETCH_ASSOC);
             
+            $stmt = $this->swapDB->prepare("
+                SELECT * FROM fx_quotes WHERE swap_reference = ?
+            ");
+            $stmt->execute([$swapRef]);
+            $fxQuotes = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            
             return [
                 'swap' => $swap,
                 'holds' => $holds,
                 'api_messages' => $apiLogs,
                 'fees' => $fees,
-                'card_authorizations' => $cardAuths
+                'card_authorizations' => $cardAuths,
+                'fx_quotes' => $fxQuotes
             ];
         } catch (Exception $e) {
             error_log("Failed to get transaction trace: " . $e->getMessage());
