@@ -7,6 +7,14 @@ namespace Domain\Services;
  * FeeService - ALL fees from country config, NO HARDCODING
  * 
  * Every fee value must come from config/countries/{country}/fees.json
+ * 
+ * Cashout Fee Logic:
+ * - Client pays total CASHOUT_SWAP_FEE upfront (e.g., 10.00)
+ * - Swap Levy (e.g., 1.00) goes to VouchMorph immediately
+ * - Remaining split: Platform 35% / Source 15% / Destination 50%
+ * - Destination's 50% split: Generate Code Fee (10%) earned immediately, Cashout Fee (90%) earned only on success
+ * - On failed cashout: Only Generate Code Fee is paid to first destination
+ * - On free retry: VouchMorph pays Generate Code Fee, unearned Cashout Fee from first attempt pays new destination
  */
 class FeeService
 {
@@ -20,60 +28,260 @@ class FeeService
     }
     
     /**
-     * Get generate code fee (for cashout code generation)
+     * Get total cashout swap fee (client pays this upfront)
+     * Example: 10.00 BWP
      */
-    public function getGenerateCodeFee(string $currency = 'BWP'): float
+    public function getTotalCashoutFee(string $currency = 'BWP'): float
     {
-        $config = $this->feeConfig['fees']['CODE_GENERATION_FEE'] ?? null;
+        $config = $this->feeConfig['fees']['CASHOUT_SWAP_FEE'] ?? null;
         
         if (!$config) {
-            throw new \RuntimeException("CODE_GENERATION_FEE not configured in fees.json");
+            throw new \RuntimeException("CASHOUT_SWAP_FEE not configured in fees.json");
         }
         
-        return (float)($config['total_amount'] ?? 2.00);
+        return (float)($config['total_amount'] ?? 10.00);
     }
     
     /**
-     * Get cashout fee (percentage or fixed)
+     * Get swap levy (immediately to VouchMorph)
+     * Example: 1.00 BWP
      */
-    public function getCashoutFee(float $amount, string $currency = 'BWP'): float
+    public function getSwapLevy(string $currency = 'BWP'): float
     {
-        $config = $this->feeConfig['fees']['CASHOUT_FEE'] ?? null;
+        $config = $this->feeConfig['fees']['CASHOUT_SWAP_FEE'] ?? null;
         
         if (!$config) {
-            throw new \RuntimeException("CASHOUT_FEE not configured in fees.json");
+            throw new \RuntimeException("CASHOUT_SWAP_FEE not configured in fees.json");
         }
         
-        if (isset($config['percentage'])) {
-            $fee = $amount * $config['percentage'];
-            $max = $config['max_amount'] ?? PHP_FLOAT_MAX;
-            $min = $config['min_amount'] ?? 0;
-            return min($max, max($min, $fee));
-        }
-        
-        return (float)($config['total_amount'] ?? 0.50);
+        return (float)($config['swap_levy'] ?? 1.00);
     }
     
     /**
-     * Get swap-on-swap fee (for retry attempts)
-     * First retry is FREE if configured
+     * Get split percentages after swap levy
+     * Returns: ['platform' => 35, 'source' => 15, 'destination' => 50]
      */
-    public function getSwapOnSwapFee(int $retryCount, string $currency = 'BWP'): float
+    public function getSplitAfterLevy(): array
     {
-        $config = $this->feeConfig['fees']['SWAP_ON_SWAP_FEE'] ?? null;
+        $config = $this->feeConfig['fees']['CASHOUT_SWAP_FEE']['split_after_levy'] ?? null;
         
         if (!$config) {
-            return 0; // No fee configured
+            return [
+                'platform_percent' => 35,
+                'source_institution_percent' => 15,
+                'destination_institution_percent' => 50
+            ];
         }
         
-        $freeFirstRetry = $config['free_first_retry'] ?? true;
+        return [
+            'platform_percent' => (int)($config['platform_percent'] ?? 35),
+            'source_institution_percent' => (int)($config['source_institution_percent'] ?? 15),
+            'destination_institution_percent' => (int)($config['destination_institution_percent'] ?? 50)
+        ];
+    }
+    
+    /**
+     * Get destination split percentages
+     * Returns: ['generate_code' => 10, 'cashout' => 90]
+     */
+    public function getDestinationSplit(): array
+    {
+        $config = $this->feeConfig['fees']['CASHOUT_SWAP_FEE']['destination_split'] ?? null;
         
-        // Free on first retry (retryCount = 1 means first retry)
-        if ($freeFirstRetry && $retryCount <= 1) {
-            return 0;
+        if (!$config) {
+            return [
+                'generate_code_fee_percent' => 10,
+                'cashout_fee_percent' => 90
+            ];
         }
         
-        return (float)($config['total_amount'] ?? 1.00);
+        return [
+            'generate_code_fee_percent' => (int)($config['generate_code_fee_percent'] ?? 10),
+            'cashout_fee_percent' => (int)($config['cashout_fee_percent'] ?? 90)
+        ];
+    }
+    
+    /**
+     * Calculate complete cashout fee breakdown for first attempt
+     * 
+     * Example with 10.00 total fee:
+     * - Swap Levy: 1.00 → VouchMorph (immediate)
+     * - Remaining: 9.00
+     *   - Platform (35%): 3.15 → VouchMorph
+     *   - Source (15%): 1.35 → Source Institution
+     *   - Destination (50%): 4.50 → Destination Institution (reserved)
+     *     - Generate Code (10%): 0.45 → Earned immediately
+     *     - Cashout (90%): 4.05 → Earned only on success
+     */
+    public function calculateFirstAttemptFees(string $currency = 'BWP'): array
+    {
+        $totalFee = $this->getTotalCashoutFee($currency);
+        $swapLevy = $this->getSwapLevy($currency);
+        $remaining = $totalFee - $swapLevy;
+        
+        $split = $this->getSplitAfterLevy();
+        $destinationSplit = $this->getDestinationSplit();
+        
+        $platformShare = $remaining * ($split['platform_percent'] / 100);
+        $sourceShare = $remaining * ($split['source_institution_percent'] / 100);
+        $destinationShare = $remaining * ($split['destination_institution_percent'] / 100);
+        
+        $generateCodeFee = $destinationShare * ($destinationSplit['generate_code_fee_percent'] / 100);
+        $cashoutFee = $destinationShare * ($destinationSplit['cashout_fee_percent'] / 100);
+        
+        return [
+            'total_fee' => $totalFee,
+            'swap_levy_to_vouchmorph' => $swapLevy,
+            'remaining_after_levy' => $remaining,
+            'platform_share' => round($platformShare, 2),
+            'source_institution_share' => round($sourceShare, 2),
+            'destination_share' => round($destinationShare, 2),
+            'generate_code_fee' => round($generateCodeFee, 2),
+            'cashout_fee' => round($cashoutFee, 2),
+            'vouchmorph_total_immediate' => round($swapLevy + $platformShare, 2),
+            'currency' => $currency,
+            'earnings_rules' => [
+                'generate_code_fee_earned_at' => 'code_generation',
+                'cashout_fee_earned_at' => 'cashout_completion'
+            ]
+        ];
+    }
+    
+    /**
+     * Calculate fees for a failed cashout
+     * Only generate code fee is paid to destination
+     * Cashout fee is NOT earned (held for retry)
+     */
+    public function calculateFailedCashoutFees(string $currency = 'BWP'): array
+    {
+        $firstAttempt = $this->calculateFirstAttemptFees($currency);
+        
+        return [
+            'total_fee_collected' => $firstAttempt['total_fee'],
+            'vouchmorph_gets' => $firstAttempt['vouchmorph_total_immediate'],
+            'source_gets' => $firstAttempt['source_institution_share'],
+            'destination_gets' => $firstAttempt['generate_code_fee'], // Only generate code fee
+            'unearned_cashout_fee' => $firstAttempt['cashout_fee'], // Held for retry
+            'currency' => $currency,
+            'status' => 'failed_cashout'
+        ];
+    }
+    
+    /**
+     * Calculate fees for free swap-on-swap (first retry)
+     * 
+     * Rules:
+     * - Client pays NOTHING (already paid on first attempt)
+     * - VouchMorph pays generate code fee to new destination (from its share)
+     * - Unearned cashout fee from first attempt pays new destination's cashout fee
+     */
+    public function calculateFreeRetryFees(string $currency = 'BWP'): array
+    {
+        $firstAttempt = $this->calculateFirstAttemptFees($currency);
+        
+        return [
+            'client_pays' => 0,
+            'new_destination_gets' => [
+                'generate_code_fee' => $firstAttempt['generate_code_fee'], // Paid by VouchMorph
+                'cashout_fee' => $firstAttempt['cashout_fee'], // From unearned first attempt
+                'total' => $firstAttempt['generate_code_fee'] + $firstAttempt['cashout_fee']
+            ],
+            'vouchmorph_pays' => $firstAttempt['generate_code_fee'],
+            'vouchmorph_net' => $firstAttempt['vouchmorph_total_immediate'] - $firstAttempt['generate_code_fee'],
+            'first_destination_keeps' => $firstAttempt['generate_code_fee'],
+            'source_keeps' => $firstAttempt['source_institution_share'],
+            'currency' => $currency,
+            'free_retry_applied' => true
+        ];
+    }
+    
+    /**
+     * Get deposit swap fee (simple - no split logic for deposits)
+     */
+    public function getDepositSwapFee(string $currency = 'BWP'): float
+    {
+        $config = $this->feeConfig['fees']['DEPOSIT_SWAP_FEE'] ?? null;
+        
+        if (!$config) {
+            throw new \RuntimeException("DEPOSIT_SWAP_FEE not configured in fees.json");
+        }
+        
+        return (float)($config['total_amount'] ?? 6.00);
+    }
+    
+    /**
+     * Calculate deposit fee breakdown
+     */
+    public function calculateDepositFees(string $currency = 'BWP'): array
+    {
+        $totalFee = $this->getDepositSwapFee($currency);
+        $swapLevy = $this->getSwapLevy($currency);
+        $remaining = $totalFee - $swapLevy;
+        
+        $split = $this->getSplitAfterLevy();
+        
+        $platformShare = $remaining * ($split['platform_percent'] / 100);
+        $sourceShare = $remaining * ($split['source_institution_percent'] / 100);
+        $destinationShare = $remaining * ($split['destination_institution_percent'] / 100);
+        
+        return [
+            'total_fee' => $totalFee,
+            'swap_levy_to_vouchmorph' => $swapLevy,
+            'platform_share' => round($platformShare, 2),
+            'source_institution_share' => round($sourceShare, 2),
+            'destination_institution_share' => round($destinationShare, 2),
+            'vouchmorph_total' => round($swapLevy + $platformShare, 2),
+            'currency' => $currency
+        ];
+    }
+    
+    /**
+     * Get card load fee (follows deposit fee structure)
+     */
+    public function getCardLoadFee(string $currency = 'BWP'): float
+    {
+        $config = $this->feeConfig['fees']['CARD_LOAD_FEE'] ?? null;
+        
+        if (!$config) {
+            return $this->getDepositSwapFee($currency);
+        }
+        
+        return (float)($config['total_amount'] ?? 6.00);
+    }
+    
+    /**
+     * Get card issuance fee
+     */
+    public function getCardIssuanceFee(string $currency = 'BWP'): float
+    {
+        $config = $this->feeConfig['fees']['CARD_ISSUANCE_FEE'] ?? null;
+        
+        if (!$config) {
+            throw new \RuntimeException("CARD_ISSUANCE_FEE not configured in fees.json");
+        }
+        
+        return (float)($config['total_amount'] ?? 25.00);
+    }
+    
+    /**
+     * Check if free retry is available for this client/swap
+     */
+    public function isFreeRetryAvailable(int $retryCount, ?array $failedSwapMetadata = null): bool
+    {
+        $config = $this->feeConfig['fees']['CASHOUT_SWAP_FEE']['swap_on_swap'] ?? null;
+        
+        if (!$config) {
+            return false;
+        }
+        
+        $freeFirst = $config['free_first'] ?? true;
+        
+        // First retry (retryCount = 1 means first retry attempt)
+        if ($freeFirst && $retryCount <= 1) {
+            return true;
+        }
+        
+        return false;
     }
     
     /**
@@ -140,26 +348,19 @@ class FeeService
     }
     
     /**
-     * Calculate all cashout fees at once
+     * Get VAT rate from regulatory config
      */
-    public function calculateCashoutFees(float $amount, int $retryCount, string $currency = 'BWP'): array
+    public function getVatRate(): float
     {
-        $generateCodeFee = $this->getGenerateCodeFee($currency);
-        $cashoutFee = $this->getCashoutFee($amount, $currency);
-        $swapOnSwapFee = $this->getSwapOnSwapFee($retryCount, $currency);
-        
-        $totalFee = $generateCodeFee + $cashoutFee + $swapOnSwapFee;
-        
-        return [
-            'generate_code_fee' => $generateCodeFee,
-            'cashout_fee' => $cashoutFee,
-            'swap_on_swap_fee' => $swapOnSwapFee,
-            'total_fee' => $totalFee,
-            'net_amount' => $amount - $totalFee,
-            'free_retry_used' => ($retryCount <= 1 && $swapOnSwapFee == 0),
-            'currency' => $currency,
-            'timestamp' => date('c')
-        ];
+        return (float)($this->feeConfig['regulatory']['vat_rate'] ?? 0.12);
+    }
+    
+    /**
+     * Get reporting currency
+     */
+    public function getReportingCurrency(): string
+    {
+        return $this->feeConfig['regulatory']['reporting_currency'] ?? $this->defaultCurrency;
     }
     
     /**
