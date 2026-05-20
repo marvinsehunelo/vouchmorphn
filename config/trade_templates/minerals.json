@@ -1,0 +1,23 @@
+{
+    "trade_type": "minerals",
+    "version": "1.0",
+    "description": "Mineral trade payment template",
+    "required_documents": [
+        "invoice",
+        "certificate_of_origin",
+        "export_permit",
+        "mineral_license"
+    ],
+    "optional_documents": [
+        "assay_report",
+        "transport_manifest",
+        "insurance_certificate"
+    ],
+    "settlement_flow": "hold_then_release",
+    "compliance_level": "HIGH",
+    "fx_required": true,
+    "requires_escrow": false,
+    "min_amount": 1000,
+    "max_amount": 10000000,
+    "allowed_currencies": ["BWP", "USD", "ZAR", "EUR"]
+}
