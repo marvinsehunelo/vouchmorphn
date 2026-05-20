@@ -16,12 +16,14 @@ use Exception;
  * 1. Orchestrates settlement messages between participants
  * 2. Tracks net positions for reconciliation
  * 3. Bills participants for fees into VouchMorph's operational account
+ * 4. Routes cross-border settlements through VouchMorph corridor accounts
  * 
  * Real money movement happens directly between participants via:
  * - RTGS
  * - SWIFT  
  * - Central bank rails
  * - Correspondent banking
+ * - VouchMorph corridor accounts (for cross-border)
  * 
  * VouchMorph's only account: Where financial institutions pay fees
  */
@@ -29,10 +31,12 @@ class HybridSettlementStrategy
 {
     private PDO $db;
     private string $defaultCurrency = 'BWP';
+    private array $vouchmorphCorridorAccounts = [];
     
     // VouchMorph's operational account (where fees are paid)
     private const VOUCHMORPH_FEE_ACCOUNT = 'VOUCHMORPH_OPERATIONS';
     private const VOUCHMORPH_FEE_ACCOUNT_NUMBER = 'VM-OP-001';
+    private const VOUCHMORPH_CORRIDOR_PREFIX = 'VM-CB-';
     
     // Settlement statuses - messages only, not fund status
     private const STATUS_PENDING = 'PENDING';      // Message queued
@@ -47,10 +51,13 @@ class HybridSettlementStrategy
     private const MSG_CREDIT_INSTRUCTION = 'CREDIT_INSTRUCTION';
     private const MSG_FEE_INVOICE = 'FEE_INVOICE';
     private const MSG_RECONCILIATION = 'RECONCILIATION';
+    private const MSG_CROSS_BORDER = 'CROSS_BORDER_SETTLEMENT';
+    private const MSG_CORRIDOR_INSTRUCTION = 'CORRIDOR_INSTRUCTION';
 
-    public function __construct(PDO $db)
+    public function __construct(PDO $db, array $vouchmorphCorridorAccounts = [])
     {
         $this->db = $db;
+        $this->vouchmorphCorridorAccounts = $vouchmorphCorridorAccounts;
         $this->ensureMessageTablesExist();
     }
     
@@ -130,10 +137,28 @@ class HybridSettlementStrategy
                 destination_currency CHAR(3) NOT NULL,
                 exchange_rate NUMERIC(24,10),
                 fx_provider_id BIGINT,
+                corridor_fee NUMERIC(12,2) DEFAULT 0,
                 message_type VARCHAR(50),
                 swift_reference VARCHAR(50),
                 status VARCHAR(20) DEFAULT 'PENDING',
                 created_at TIMESTAMP DEFAULT NOW()
+            )
+        ");
+        
+        // Corridor accounts table
+        $this->db->exec("
+            CREATE TABLE IF NOT EXISTS vouchmorph_corridor_accounts (
+                id BIGSERIAL PRIMARY KEY,
+                country_code CHAR(2) NOT NULL,
+                account_number VARCHAR(50) NOT NULL,
+                account_name VARCHAR(100) NOT NULL,
+                currency CHAR(3) NOT NULL,
+                is_active BOOLEAN DEFAULT TRUE,
+                balance NUMERIC(24,2) DEFAULT 0,
+                last_reconciled_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW(),
+                UNIQUE(country_code, currency)
             )
         ");
         
@@ -147,6 +172,28 @@ class HybridSettlementStrategy
                 ack_type VARCHAR(20) NOT NULL,
                 ack_payload JSONB,
                 received_at TIMESTAMP DEFAULT NOW()
+            )
+        ");
+        
+        // Corridor settlement ledger
+        $this->db->exec("
+            CREATE TABLE IF NOT EXISTS corridor_settlement_ledger (
+                id BIGSERIAL PRIMARY KEY,
+                transaction_uuid UUID NOT NULL,
+                swap_reference VARCHAR(100) NOT NULL,
+                source_country CHAR(2) NOT NULL,
+                destination_country CHAR(2) NOT NULL,
+                source_amount NUMERIC(24,2) NOT NULL,
+                source_currency CHAR(3) NOT NULL,
+                converted_amount NUMERIC(24,2) NOT NULL,
+                destination_currency CHAR(3) NOT NULL,
+                exchange_rate NUMERIC(24,10) NOT NULL,
+                corridor_fee NUMERIC(12,2) DEFAULT 0,
+                source_vm_account VARCHAR(50),
+                destination_vm_account VARCHAR(50),
+                status VARCHAR(20) DEFAULT 'PENDING',
+                settled_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT NOW()
             )
         ");
     }
@@ -249,6 +296,532 @@ class HybridSettlementStrategy
         $this->deliverToParticipant($toParticipant, $instruction);
         
         return $messageUuid;
+    }
+    
+    /**
+     * Process cross-border settlement through VouchMorph corridor accounts
+     * 
+     * Flow: Source Institution → VouchMorph (source country) → VouchMorph (destination country) → Destination Institution
+     * 
+     * @param string $swapRef Swap reference
+     * @param string $sourceCountry Source country code (ISO 2)
+     * @param string $destinationCountry Destination country code (ISO 2)
+     * @param string $sourceInstitution Source institution name
+     * @param string $destinationInstitution Destination institution name
+     * @param float $amount Amount in source currency
+     * @param string $sourceCurrency Source currency
+     * @param string $destinationCurrency Destination currency
+     * @param float $exchangeRate Exchange rate
+     * @param float $corridorFee VouchMorph corridor service fee
+     * @return array Settlement result
+     */
+    public function processCrossBorderSettlement(
+        string $swapRef,
+        string $sourceCountry,
+        string $destinationCountry,
+        string $sourceInstitution,
+        string $destinationInstitution,
+        float $amount,
+        string $sourceCurrency,
+        string $destinationCurrency,
+        float $exchangeRate,
+        float $corridorFee = 0
+    ): array {
+        
+        $this->logEvent('CROSS_BORDER_START', [
+            'swap_ref' => $swapRef,
+            'from' => $sourceCountry,
+            'to' => $destinationCountry,
+            'amount' => $amount,
+            'currencies' => "{$sourceCurrency}→{$destinationCurrency}"
+        ]);
+        
+        $convertedAmount = $amount * $exchangeRate;
+        
+        // Get VouchMorph accounts for both countries
+        $sourceAccount = $this->getVouchMorphCorridorAccount($sourceCountry, $sourceCurrency);
+        $destinationAccount = $this->getVouchMorphCorridorAccount($destinationCountry, $destinationCurrency);
+        
+        if (!$sourceAccount || !$destinationAccount) {
+            throw new Exception("VouchMorph corridor accounts not configured for {$sourceCountry}/{$destinationCountry}");
+        }
+        
+        // Step 1: Source institution pays VouchMorph (source country account)
+        $this->logEvent('CROSS_BORDER_STEP_1', [
+            'step' => 'Source→VouchMorph',
+            'from' => $sourceInstitution,
+            'to' => $sourceAccount['account_name'],
+            'amount' => $amount,
+            'currency' => $sourceCurrency
+        ]);
+        
+        $this->updateNetPosition(
+            $sourceInstitution,
+            $sourceAccount['account_name'],
+            $amount,
+            'cross_border_source_to_vm',
+            $sourceCurrency
+        );
+        
+        // Step 2: Record internal transfer between VouchMorph accounts
+        $this->logEvent('CROSS_BORDER_STEP_2', [
+            'step' => 'VouchMorph Internal Transfer',
+            'from' => $sourceAccount['account_name'],
+            'to' => $destinationAccount['account_name'],
+            'amount' => $convertedAmount,
+            'source_currency' => $sourceCurrency,
+            'destination_currency' => $destinationCurrency,
+            'rate' => $exchangeRate
+        ]);
+        
+        $this->recordInternalTransfer(
+            $swapRef,
+            $sourceAccount['account_name'],
+            $destinationAccount['account_name'],
+            $convertedAmount,
+            $destinationCurrency,
+            $exchangeRate
+        );
+        
+        // Step 3: VouchMorph (destination) pays destination institution
+        $this->logEvent('CROSS_BORDER_STEP_3', [
+            'step' => 'VouchMorph→Destination',
+            'from' => $destinationAccount['account_name'],
+            'to' => $destinationInstitution,
+            'amount' => $convertedAmount,
+            'currency' => $destinationCurrency
+        ]);
+        
+        $this->updateNetPosition(
+            $destinationAccount['account_name'],
+            $destinationInstitution,
+            $convertedAmount,
+            'cross_border_vm_to_destination',
+            $destinationCurrency
+        );
+        
+        // Step 4: Charge corridor fee
+        if ($corridorFee > 0) {
+            $this->invoiceFee(
+                $swapRef,
+                $sourceInstitution,
+                0,
+                'CORRIDOR_FEE',
+                $corridorFee,
+                $sourceCurrency
+            );
+        }
+        
+        // Record the cross-border transaction
+        $transactionId = $this->recordCrossBorderTransaction(
+            $swapRef,
+            $sourceCountry,
+            $destinationCountry,
+            $sourceInstitution,
+            $destinationInstitution,
+            $amount,
+            $sourceCurrency,
+            $convertedAmount,
+            $destinationCurrency,
+            $exchangeRate,
+            $corridorFee,
+            $sourceAccount['account_number'],
+            $destinationAccount['account_number']
+        );
+        
+        $this->logEvent('CROSS_BORDER_COMPLETE', [
+            'swap_ref' => $swapRef,
+            'transaction_id' => $transactionId,
+            'original_amount' => $amount,
+            'converted_amount' => $convertedAmount,
+            'corridor_fee' => $corridorFee
+        ]);
+        
+        return [
+            'success' => true,
+            'transaction_id' => $transactionId,
+            'source_amount' => $amount,
+            'source_currency' => $sourceCurrency,
+            'destination_amount' => $convertedAmount,
+            'destination_currency' => $destinationCurrency,
+            'exchange_rate' => $exchangeRate,
+            'corridor_fee' => $corridorFee,
+            'source_vm_account' => $sourceAccount['account_number'],
+            'destination_vm_account' => $destinationAccount['account_number']
+        ];
+    }
+    
+    /**
+     * Process corridor settlement (simplified version for direct corridor routing)
+     * 
+     * @param string $swapRef Swap reference
+     * @param string $sourceInstitution Source institution
+     * @param string $destinationInstitution Destination institution
+     * @param string $sourceCountry Source country
+     * @param string $destinationCountry Destination country
+     * @param float $amount Amount
+     * @param string $currency Currency
+     * @param float $corridorFee Corridor fee percentage or amount
+     * @return array Corridor routing result
+     */
+    public function processCorridorSettlement(
+        string $swapRef,
+        string $sourceInstitution,
+        string $destinationInstitution,
+        string $sourceCountry,
+        string $destinationCountry,
+        float $amount,
+        string $currency,
+        float $corridorFee = 0
+    ): array {
+        
+        // Get VouchMorph corridor accounts
+        $vmSourceAccount = $this->getVouchMorphCorridorAccount($sourceCountry, $currency);
+        $vmDestAccount = $this->getVouchMorphCorridorAccount($destinationCountry, $currency);
+        
+        if (!$vmSourceAccount || !$vmDestAccount) {
+            // Fall back to direct settlement if corridor not configured
+            $this->updateNetPosition($sourceInstitution, $destinationInstitution, $amount, 'direct_settlement', $currency);
+            return [
+                'method' => 'direct',
+                'corridor_fee' => 0,
+                'message' => 'Direct settlement used (corridor not configured)'
+            ];
+        }
+        
+        // Route: Source → VouchMorph (source) → VouchMorph (dest) → Destination
+        $this->updateNetPosition($sourceInstitution, $vmSourceAccount['account_name'], $amount, 'corridor_inbound', $currency);
+        $this->updateNetPosition($vmDestAccount['account_name'], $destinationInstitution, $amount, 'corridor_outbound', $currency);
+        
+        // Apply corridor fee if any
+        $actualCorridorFee = 0;
+        if ($corridorFee > 0) {
+            // If corridorFee is percentage, calculate amount
+            if ($corridorFee < 1) {
+                $actualCorridorFee = $amount * $corridorFee;
+            } else {
+                $actualCorridorFee = $corridorFee;
+            }
+            
+            $this->invoiceFee(
+                $swapRef,
+                $sourceInstitution,
+                0,
+                'CORRIDOR_FEE',
+                $actualCorridorFee,
+                $currency
+            );
+        }
+        
+        // Record corridor transaction
+        $this->recordCorridorTransaction(
+            $swapRef,
+            $sourceCountry,
+            $destinationCountry,
+            $sourceInstitution,
+            $destinationInstitution,
+            $amount,
+            $currency,
+            $actualCorridorFee,
+            $vmSourceAccount['account_number'],
+            $vmDestAccount['account_number']
+        );
+        
+        return [
+            'method' => 'corridor',
+            'corridor_fee' => $actualCorridorFee,
+            'source_vm_account' => $vmSourceAccount['account_number'],
+            'destination_vm_account' => $vmDestAccount['account_number'],
+            'source_country' => $sourceCountry,
+            'destination_country' => $destinationCountry
+        ];
+    }
+    
+    /**
+     * Get VouchMorph corridor account for a country
+     */
+    public function getVouchMorphCorridorAccount(string $countryCode, string $currency): ?array
+    {
+        // First check in-memory config
+        $key = strtoupper($countryCode) . '_' . strtoupper($currency);
+        if (isset($this->vouchmorphCorridorAccounts[$key])) {
+            return $this->vouchmorphCorridorAccounts[$key];
+        }
+        
+        // Query database
+        try {
+            $stmt = $this->db->prepare("
+                SELECT * FROM vouchmorph_corridor_accounts
+                WHERE country_code = ? AND currency = ? AND is_active = TRUE
+                LIMIT 1
+            ");
+            $stmt->execute([$countryCode, $currency]);
+            $result = $stmt->fetch(PDO::FETCH_ASSOC);
+            
+            if ($result) {
+                $result['account_name'] = self::VOUCHMORPH_CORRIDOR_PREFIX . $countryCode;
+            }
+            
+            return $result ?: null;
+        } catch (Exception $e) {
+            error_log("[SETTLEMENT] Failed to get corridor account: " . $e->getMessage());
+            return null;
+        }
+    }
+    
+    /**
+     * Register a VouchMorph corridor account
+     */
+    public function registerCorridorAccount(string $countryCode, string $accountNumber, string $currency, float $initialBalance = 0): array
+    {
+        $accountName = self::VOUCHMORPH_CORRIDOR_PREFIX . $countryCode;
+        
+        $stmt = $this->db->prepare("
+            INSERT INTO vouchmorph_corridor_accounts 
+            (country_code, account_number, account_name, currency, balance, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, NOW(), NOW())
+            ON CONFLICT (country_code, currency) DO UPDATE SET
+                account_number = EXCLUDED.account_number,
+                updated_at = NOW()
+            RETURNING id
+        ");
+        
+        $stmt->execute([$countryCode, $accountNumber, $accountName, $currency, $initialBalance]);
+        
+        return [
+            'country_code' => $countryCode,
+            'account_number' => $accountNumber,
+            'account_name' => $accountName,
+            'currency' => $currency,
+            'balance' => $initialBalance
+        ];
+    }
+    
+    /**
+     * Check balance of a VouchMorph corridor account
+     */
+    public function checkCorridorAccountBalance(string $countryCode, string $currency): array
+    {
+        try {
+            $stmt = $this->db->prepare("
+                SELECT * FROM vouchmorph_corridor_accounts
+                WHERE country_code = ? AND currency = ? AND is_active = TRUE
+                LIMIT 1
+            ");
+            $stmt->execute([$countryCode, $currency]);
+            $account = $stmt->fetch(PDO::FETCH_ASSOC);
+            
+            if (!$account) {
+                return ['error' => "No corridor account for {$countryCode}/{$currency}"];
+            }
+            
+            // Calculate balance from ledger
+            $stmt = $this->db->prepare("
+                SELECT 
+                    COALESCE(SUM(CASE WHEN source_vm_account = ? THEN -source_amount ELSE 0 END), 0) +
+                    COALESCE(SUM(CASE WHEN destination_vm_account = ? THEN converted_amount ELSE 0 END), 0) as ledger_balance
+                FROM corridor_settlement_ledger
+                WHERE source_vm_account = ? OR destination_vm_account = ?
+            ");
+            
+            $stmt->execute([
+                $account['account_number'],
+                $account['account_number'],
+                $account['account_number'],
+                $account['account_number']
+            ]);
+            
+            $ledgerBalance = (float)$stmt->fetchColumn();
+            
+            return [
+                'country' => $countryCode,
+                'currency' => $currency,
+                'account_number' => $account['account_number'],
+                'account_name' => $account['account_name'],
+                'recorded_balance' => (float)$account['balance'],
+                'ledger_balance' => $ledgerBalance,
+                'as_at' => date('Y-m-d H:i:s')
+            ];
+            
+        } catch (Exception $e) {
+            error_log("[SETTLEMENT] Failed to check corridor balance: " . $e->getMessage());
+            return ['error' => $e->getMessage()];
+        }
+    }
+    
+    /**
+     * Update corridor account balance (for reconciliation)
+     */
+    public function updateCorridorAccountBalance(string $countryCode, string $currency, float $newBalance): void
+    {
+        try {
+            $stmt = $this->db->prepare("
+                UPDATE vouchmorph_corridor_accounts 
+                SET balance = ?, last_reconciled_at = NOW(), updated_at = NOW()
+                WHERE country_code = ? AND currency = ?
+            ");
+            $stmt->execute([$newBalance, $countryCode, $currency]);
+        } catch (Exception $e) {
+            error_log("[SETTLEMENT] Failed to update corridor balance: " . $e->getMessage());
+        }
+    }
+    
+    /**
+     * Check if a settlement needs cross-border routing
+     */
+    public function needsCrossBorder(string $sourceInstitution, string $destinationInstitution, array $participants): bool
+    {
+        $sourceCountry = $this->getInstitutionCountry($sourceInstitution, $participants);
+        $destinationCountry = $this->getInstitutionCountry($destinationInstitution, $participants);
+        
+        return $sourceCountry !== $destinationCountry;
+    }
+    
+    /**
+     * Get institution country from participants config
+     */
+    private function getInstitutionCountry(string $institution, array $participants): string
+    {
+        foreach ($participants as $participant) {
+            if (strtolower($participant['name'] ?? '') === strtolower($institution) ||
+                strtolower($participant['provider_code'] ?? '') === strtolower($institution)) {
+                return $participant['country_code'] ?? 'BW';
+            }
+        }
+        return 'BW'; // Default to Botswana
+    }
+    
+    /**
+     * Record internal transfer between VouchMorph accounts
+     */
+    private function recordInternalTransfer(
+        string $swapRef,
+        string $fromAccount,
+        string $toAccount,
+        float $amount,
+        string $currency,
+        float $exchangeRate
+    ): void {
+        try {
+            $stmt = $this->db->prepare("
+                INSERT INTO corridor_settlement_ledger
+                (transaction_uuid, swap_reference, source_country, destination_country,
+                 source_amount, source_currency, converted_amount, destination_currency,
+                 exchange_rate, source_vm_account, destination_vm_account, status, created_at)
+                VALUES (gen_random_uuid(), ?, 
+                        (SELECT country_code FROM vouchmorph_corridor_accounts WHERE account_number = ?),
+                        (SELECT country_code FROM vouchmorph_corridor_accounts WHERE account_number = ?),
+                        ?, ?, ?, ?, ?, ?, ?, 'COMPLETED', NOW())
+            ");
+            
+            $sourceCountry = substr($fromAccount, -2);
+            $destinationCountry = substr($toAccount, -2);
+            
+            $stmt->execute([
+                $swapRef,
+                $fromAccount,
+                $toAccount,
+                $amount,
+                $currency,
+                $amount,
+                $currency,
+                $exchangeRate,
+                $fromAccount,
+                $toAccount
+            ]);
+        } catch (Exception $e) {
+            error_log("[SETTLEMENT] Failed to record internal transfer: " . $e->getMessage());
+        }
+    }
+    
+    /**
+     * Record corridor transaction
+     */
+    private function recordCorridorTransaction(
+        string $swapRef,
+        string $sourceCountry,
+        string $destinationCountry,
+        string $sourceInstitution,
+        string $destinationInstitution,
+        float $amount,
+        string $currency,
+        float $corridorFee,
+        string $sourceVmAccount,
+        string $destinationVmAccount
+    ): void {
+        try {
+            $stmt = $this->db->prepare("
+                INSERT INTO corridor_settlement_ledger
+                (transaction_uuid, swap_reference, source_country, destination_country,
+                 source_amount, source_currency, converted_amount, destination_currency,
+                 exchange_rate, corridor_fee, source_vm_account, destination_vm_account, status, created_at)
+                VALUES (gen_random_uuid(), ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 'PENDING', NOW())
+            ");
+            
+            $stmt->execute([
+                $swapRef,
+                $sourceCountry,
+                $destinationCountry,
+                $amount,
+                $currency,
+                $amount,
+                $currency,
+                $corridorFee,
+                $sourceVmAccount,
+                $destinationVmAccount
+            ]);
+        } catch (Exception $e) {
+            error_log("[SETTLEMENT] Failed to record corridor transaction: " . $e->getMessage());
+        }
+    }
+    
+    /**
+     * Record cross-border transaction
+     */
+    private function recordCrossBorderTransaction(
+        string $swapRef,
+        string $sourceCountry,
+        string $destinationCountry,
+        string $sourceInstitution,
+        string $destinationInstitution,
+        float $sourceAmount,
+        string $sourceCurrency,
+        float $destinationAmount,
+        string $destinationCurrency,
+        float $exchangeRate,
+        float $corridorFee,
+        string $sourceVmAccount,
+        string $destinationVmAccount
+    ): int {
+        try {
+            $stmt = $this->db->prepare("
+                INSERT INTO cross_border_messages
+                (message_uuid, swap_reference, from_country, to_country,
+                 from_participant, to_participant, amount, source_currency,
+                 destination_currency, exchange_rate, corridor_fee, status, created_at)
+                VALUES (gen_random_uuid(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', NOW())
+                RETURNING message_id
+            ");
+            
+            $stmt->execute([
+                $swapRef,
+                $sourceCountry,
+                $destinationCountry,
+                $sourceInstitution,
+                $destinationInstitution,
+                $sourceAmount,
+                $sourceCurrency,
+                $destinationCurrency,
+                $exchangeRate,
+                $corridorFee
+            ]);
+            
+            return (int)$stmt->fetchColumn();
+            
+        } catch (Exception $e) {
+            error_log("[SETTLEMENT] Failed to record cross-border transaction: " . $e->getMessage());
+            return 0;
+        }
     }
     
     /**
@@ -627,6 +1200,19 @@ class HybridSettlementStrategy
             mt_rand(0, 0xffff), mt_rand(0, 0xffff), mt_rand(0, 0xffff)
         );
     }
+    
+    /**
+     * Log settlement events
+     */
+    private function logEvent(string $event, array $data): void
+    {
+        $logEntry = json_encode([
+            'timestamp' => date('c'),
+            'event' => $event,
+            'data' => $data
+        ]);
+        file_put_contents('/tmp/settlement_audit.log', $logEntry . PHP_EOL, FILE_APPEND);
+    }
 
     /* =====================================================
        PUBLIC API METHODS - Message-only
@@ -761,6 +1347,9 @@ class HybridSettlementStrategy
         // Get pending settlement messages
         $pendingMessages = $this->getPendingMessagesForParticipant($participantName);
         
+        // Get corridor activity
+        $corridorActivity = $this->getCorridorActivityForParticipant($participantName);
+        
         return [
             'participant' => $participantName,
             'currency' => $currency,
@@ -770,8 +1359,35 @@ class HybridSettlementStrategy
             'net_position' => $netObligation,
             'net_position_text' => $netObligation > 0 ? "OWES $netObligation $currency" : "IS OWED " . abs($netObligation) . " $currency",
             'pending_settlements' => count($pendingMessages),
-            'pending_messages' => $pendingMessages
+            'pending_messages' => $pendingMessages,
+            'corridor_activity' => $corridorActivity
         ];
+    }
+    
+    /**
+     * Get corridor activity for a participant
+     */
+    private function getCorridorActivityForParticipant(string $participantName): array
+    {
+        try {
+            $stmt = $this->db->prepare("
+                SELECT 
+                    source_country,
+                    destination_country,
+                    COUNT(*) as transaction_count,
+                    SUM(source_amount) as total_source_amount,
+                    SUM(converted_amount) as total_destination_amount
+                FROM corridor_settlement_ledger
+                WHERE source_vm_account IN (SELECT account_number FROM vouchmorph_corridor_accounts)
+                AND created_at >= NOW() - INTERVAL '30 days'
+                GROUP BY source_country, destination_country
+            ");
+            $stmt->execute();
+            return $stmt->fetchAll(PDO::FETCH_ASSOC);
+        } catch (Exception $e) {
+            error_log("[SETTLEMENT] Failed to get corridor activity: " . $e->getMessage());
+            return [];
+        }
     }
     
     private function getTotalNetPositionAsDebtor(string $participant, string $currency): float
@@ -796,5 +1412,22 @@ class HybridSettlementStrategy
         $stmt->execute([$participant, $currency]);
         $result = $stmt->fetch(PDO::FETCH_ASSOC);
         return (float)($result['total'] ?? 0);
+    }
+    
+    /**
+     * Get all VouchMorph corridor accounts
+     */
+    public function getAllCorridorAccounts(): array
+    {
+        try {
+            $stmt = $this->db->prepare("
+                SELECT * FROM vouchmorph_corridor_accounts WHERE is_active = TRUE
+            ");
+            $stmt->execute();
+            return $stmt->fetchAll(PDO::FETCH_ASSOC);
+        } catch (Exception $e) {
+            error_log("[SETTLEMENT] Failed to get corridor accounts: " . $e->getMessage());
+            return [];
+        }
     }
 }
