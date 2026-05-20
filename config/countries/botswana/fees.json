@@ -53,7 +53,7 @@
         "CARD_ISSUANCE_FEE": {
             "total_amount": 50.00,
             "currency": "BWP",
-            "description": "Card issuance fee - 50.00
+            "description": "Card issuance fee - 50.00"
             }
         }
     },
