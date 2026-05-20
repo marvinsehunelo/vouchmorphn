@@ -4121,3 +4121,39 @@ CREATE TABLE fx_providers (
     status VARCHAR(20) DEFAULT 'ACTIVE',
     created_at TIMESTAMP DEFAULT NOW()
 );
+
+ALTER TABLE swap_requests ADD COLUMN IF NOT EXISTS retry_count INT DEFAULT 0;
+ALTER TABLE swap_requests ADD COLUMN IF NOT EXISTS original_swap_ref VARCHAR(100);
+ALTER TABLE swap_requests ADD COLUMN IF NOT EXISTS source_country CHAR(2);
+ALTER TABLE swap_requests ADD COLUMN IF NOT EXISTS destination_country CHAR(2);
+ALTER TABLE swap_requests ADD COLUMN IF NOT EXISTS fee_breakdown JSONB DEFAULT '{}'::jsonb;
+ALTER TABLE swap_requests ADD COLUMN IF NOT EXISTS trade_metadata JSONB DEFAULT '{}'::jsonb;
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_swap_countries 
+ON swap_requests(source_country, destination_country);
+
+CREATE TABLE IF NOT EXISTS cashout_retry_tracking (
+    id BIGSERIAL PRIMARY KEY,
+    client_identifier VARCHAR(100) NOT NULL,
+    original_swap_ref VARCHAR(100) NOT NULL,
+    retry_count INT DEFAULT 0,
+    free_retry_used BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(client_identifier, original_swap_ref)
+);
+
+
+CREATE TABLE IF NOT EXISTS user_hooks (
+    id BIGSERIAL PRIMARY KEY,
+    user_identifier VARCHAR(100) NOT NULL,
+    hook_name VARCHAR(50) NOT NULL,
+    asset_type VARCHAR(30) NOT NULL,
+    institution VARCHAR(100) NOT NULL,
+    asset_reference VARCHAR(100) NOT NULL,
+    credentials JSONB DEFAULT '{}'::jsonb,
+    is_active BOOLEAN DEFAULT TRUE,
+    priority INT DEFAULT 0,
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(user_identifier, hook_name)
+);
