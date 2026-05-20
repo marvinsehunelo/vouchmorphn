@@ -7,6 +7,7 @@ use PDO;
 use Exception;
 use DateTimeImmutable;
 use Ramsey\Uuid\Uuid;
+use Infrastructure\Banks\GenericBankClient;
 
 /**
  * ForexService - Multi-currency FX orchestration
@@ -17,6 +18,7 @@ use Ramsey\Uuid\Uuid;
  * - Rate fetching with layering
  * - Quote locking
  * - Markup application
+ * - INTEGRATION WITH FEE SERVICE FOR FOREX FEES
  */
 class ForexService
 {
@@ -25,6 +27,8 @@ class ForexService
     private array $participants;
     private array $rateProviders = [];
     private string $defaultCurrency = 'BWP';
+    private ?FeeService $feeService = null;
+    private ?array $fxContext = null;
     
     // Rate source priority
     private const PRIORITY_LIVE_PARTICIPANT = 1;
@@ -41,11 +45,86 @@ class ForexService
         'volatile' => 0.05       // 5%
     ];
     
-    public function __construct(PDO $db, array $config, array $participants)
+    public function __construct(PDO $db, array $config, array $participants, ?FeeService $feeService = null)
     {
         $this->db = $db;
         $this->config = $config;
         $this->participants = $participants;
+        $this->feeService = $feeService;
+        $this->ensureFxTablesExist();
+    }
+    
+    /**
+     * Ensure FX tables exist
+     */
+    private function ensureFxTablesExist(): void
+    {
+        // fx_quotes table
+        $this->db->exec("
+            CREATE TABLE IF NOT EXISTS fx_quotes (
+                id BIGSERIAL PRIMARY KEY,
+                quote_uuid UUID NOT NULL UNIQUE,
+                swap_reference VARCHAR(100),
+                source_participant_id BIGINT,
+                destination_participant_id BIGINT,
+                fx_provider_participant_id BIGINT,
+                source_currency CHAR(3) NOT NULL,
+                destination_currency CHAR(3) NOT NULL,
+                source_amount NUMERIC(24,2) NOT NULL,
+                rate NUMERIC(24,10) NOT NULL,
+                destination_amount NUMERIC(24,2) NOT NULL,
+                rate_source VARCHAR(50),
+                markup_amount NUMERIC(12,2) DEFAULT 0,
+                fee_amount NUMERIC(12,2) DEFAULT 0,
+                forex_fee_percent NUMERIC(5,4) DEFAULT 0,
+                forex_fee_amount NUMERIC(12,2) DEFAULT 0,
+                status VARCHAR(20) DEFAULT 'QUOTED',
+                expires_at TIMESTAMP NOT NULL,
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+        ");
+        
+        // fx_rates table for caching
+        $this->db->exec("
+            CREATE TABLE IF NOT EXISTS fx_rates (
+                id BIGSERIAL PRIMARY KEY,
+                from_currency CHAR(3) NOT NULL,
+                to_currency CHAR(3) NOT NULL,
+                market_rate NUMERIC(24,10) NOT NULL,
+                provider_rate NUMERIC(24,10) NOT NULL,
+                your_markup_percent NUMERIC(5,4) DEFAULT 0,
+                your_final_rate NUMERIC(24,10) NOT NULL,
+                valid_from TIMESTAMP DEFAULT NOW(),
+                valid_until TIMESTAMP NOT NULL,
+                status VARCHAR(20) DEFAULT 'ACTIVE',
+                fx_provider_id BIGINT,
+                created_at TIMESTAMP DEFAULT NOW(),
+                UNIQUE(from_currency, to_currency, status)
+            )
+        ");
+        
+        // Add forex_fee columns to swap_requests if not exists
+        $this->db->exec("
+            DO $$ 
+            BEGIN
+                BEGIN
+                    ALTER TABLE swap_requests ADD COLUMN forex_fee_percent NUMERIC(5,4) DEFAULT 0;
+                EXCEPTION
+                    WHEN duplicate_column THEN NULL;
+                END;
+                BEGIN
+                    ALTER TABLE swap_requests ADD COLUMN forex_fee_amount NUMERIC(12,2) DEFAULT 0;
+                EXCEPTION
+                    WHEN duplicate_column THEN NULL;
+                END;
+                BEGIN
+                    ALTER TABLE swap_requests ADD COLUMN total_forex_fee NUMERIC(12,2) DEFAULT 0;
+                EXCEPTION
+                    WHEN duplicate_column THEN NULL;
+                END;
+            END $$;
+        ");
     }
     
     /**
@@ -91,7 +170,9 @@ class ForexService
                 'destination_amount' => $sourceAmount,
                 'rate' => 1.0,
                 'quote_id' => null,
-                'quote_uuid' => null
+                'quote_uuid' => null,
+                'forex_fee_percent' => 0,
+                'forex_fee_amount' => 0
             ];
         }
         
@@ -111,6 +192,29 @@ class ForexService
             );
         }
         
+        // Step 4: Calculate forex fee using FeeService
+        $forexFeePercent = 0;
+        $forexFeeAmount = 0;
+        
+        if ($this->feeService) {
+            // Get forex fee from fees.json configuration
+            $forexFeePercent = $this->getForexFeePercent($sourceCurrency, $destinationCurrency);
+            $forexFeeAmount = $quote['destination_amount'] * $forexFeePercent;
+            
+            $this->logFxEvent($swapRef, 'FOREX_FEE_APPLIED', [
+                'destination_amount' => $quote['destination_amount'],
+                'forex_fee_percent' => $forexFeePercent,
+                'forex_fee_amount' => $forexFeeAmount
+            ]);
+        }
+        
+        // Step 5: Store forex fee in quote
+        $quote['forex_fee_percent'] = $forexFeePercent;
+        $quote['forex_fee_amount'] = $forexFeeAmount;
+        
+        // Store forex fee in swap_requests later when recording
+        $this->storeForexFeeInSwap($swapRef, $forexFeePercent, $forexFeeAmount);
+        
         $this->logFxEvent($swapRef, 'FX_QUOTE_LOCKED', [
             'source_currency' => $sourceCurrency,
             'destination_currency' => $destinationCurrency,
@@ -118,6 +222,8 @@ class ForexService
             'destination_amount' => $quote['destination_amount'],
             'rate' => $quote['rate'],
             'markup' => $quote['markup_amount'],
+            'forex_fee_percent' => $forexFeePercent,
+            'forex_fee_amount' => $forexFeeAmount,
             'expires_at' => $quote['expires_at']
         ]);
         
@@ -131,11 +237,162 @@ class ForexService
             'rate_source' => $quote['rate_source'],
             'markup_amount' => $quote['markup_amount'],
             'fee_amount' => $quote['fee_amount'],
+            'forex_fee_percent' => $forexFeePercent,
+            'forex_fee_amount' => $forexFeeAmount,
             'quote_id' => $quote['quote_id'],
             'quote_uuid' => $quote['quote_uuid'],
             'expires_at' => $quote['expires_at'],
             'fx_provider_id' => $quote['fx_provider_id'] ?? null
         ];
+    }
+    
+    /**
+     * Get forex fee percentage from fees.json configuration
+     * Example: FOREX_FEE = { "percentage": 0.005, "min_amount": 0.50, "max_amount": 50.00 }
+     */
+    private function getForexFeePercent(string $sourceCurrency, string $destinationCurrency): float
+    {
+        if (!$this->feeService) {
+            return 0;
+        }
+        
+        // Try to get config from fees.json - FOREX_FEE section
+        // This would be loaded by FeeService from country config
+        try {
+            $forexFeeConfig = $this->feeService->getForexFeeConfig();
+            if ($forexFeeConfig && isset($forexFeeConfig['percentage'])) {
+                return (float)$forexFeeConfig['percentage'];
+            }
+        } catch (Exception $e) {
+            $this->logFxEvent('CONFIG', 'FOREX_FEE_CONFIG_MISSING', ['error' => $e->getMessage()]);
+        }
+        
+        // Check corridor-specific forex fee
+        $corridorKey = $sourceCurrency . '_' . $destinationCurrency;
+        $corridorFxFee = $this->getCorridorForexFee($corridorKey);
+        if ($corridorFxFee !== null) {
+            return $corridorFxFee;
+        }
+        
+        // Default forex fee (0.5%)
+        return 0.005;
+    }
+    
+    /**
+     * Get corridor-specific forex fee from config
+     */
+    private function getCorridorForexFee(string $corridor): ?float
+    {
+        $corridorFxFees = $this->config['fx_fees']['corridors'] ?? [];
+        
+        if (isset($corridorFxFees[$corridor])) {
+            return (float)$corridorFxFees[$corridor];
+        }
+        
+        return null;
+    }
+    
+    /**
+     * Store forex fee in swap_requests for accounting
+     */
+    private function storeForexFeeInSwap(string $swapRef, float $feePercent, float $feeAmount): void
+    {
+        try {
+            $stmt = $this->db->prepare("
+                UPDATE swap_requests 
+                SET forex_fee_percent = ?,
+                    forex_fee_amount = ?,
+                    total_forex_fee = ?
+                WHERE swap_uuid = ?
+            ");
+            $stmt->execute([$feePercent, $feeAmount, $feeAmount, $swapRef]);
+        } catch (Exception $e) {
+            $this->logFxEvent($swapRef, 'STORE_FOREX_FEE_FAILED', ['error' => $e->getMessage()]);
+        }
+    }
+    
+    /**
+     * Get exchange rate with spread applied (used by CorridorModule)
+     */
+    public function getExchangeRateWithSpread(string $from, string $to, string $corridor): float
+    {
+        $baseRate = $this->getExchangeRate($from, $to);
+        $spread = $this->getCorridorSpread($corridor);
+        
+        return $baseRate * (1 + $spread);
+    }
+    
+    /**
+     * Get basic exchange rate (no markup)
+     */
+    public function getExchangeRate(string $from, string $to): float
+    {
+        // Try to get from cached rates first
+        $cachedRate = $this->getCachedRateOnly($from, $to);
+        if ($cachedRate) {
+            return $cachedRate;
+        }
+        
+        // Fallback to default rates
+        $defaultRates = $this->getDefaultCorridorRates();
+        $key = $from . '_' . $to;
+        
+        if (isset($defaultRates[$key])) {
+            return $defaultRates[$key];
+        }
+        
+        // Inverse rate if available
+        $inverseKey = $to . '_' . $from;
+        if (isset($defaultRates[$inverseKey])) {
+            return 1 / $defaultRates[$inverseKey];
+        }
+        
+        // Default fallback
+        return 1.0;
+    }
+    
+    /**
+     * Get corridor spread from config
+     */
+    private function getCorridorSpread(string $corridor): float
+    {
+        $corridorConfig = $this->config['fx_markup']['corridors'] ?? [];
+        
+        if (isset($corridorConfig[$corridor])) {
+            return (float)$corridorConfig[$corridor];
+        }
+        
+        return 0.01; // Default 1% spread
+    }
+    
+    /**
+     * Get cached rate only (no markup)
+     */
+    private function getCachedRateOnly(string $from, string $to): ?float
+    {
+        try {
+            $stmt = $this->db->prepare("
+                SELECT market_rate FROM fx_rates
+                WHERE from_currency = :from
+                AND to_currency = :to
+                AND status = 'ACTIVE'
+                AND valid_until > NOW()
+                ORDER BY created_at DESC
+                LIMIT 1
+            ");
+            
+            $stmt->execute([':from' => $from, ':to' => $to]);
+            $result = $stmt->fetch(\PDO::FETCH_ASSOC);
+            
+            if ($result) {
+                return (float)$result['market_rate'];
+            }
+            
+        } catch (Exception $e) {
+            $this->logFxEvent('CACHE', 'GET_CACHED_RATE_FAILED', ['error' => $e->getMessage()]);
+        }
+        
+        return null;
     }
     
     /**
@@ -185,7 +442,7 @@ class ForexService
         }
         
         // Try cached/internal rates
-        $cachedQuote = $this->getCachedRate(
+        $cachedQuote = $this->getCachedRateWithMarkup(
             $sourceCurrency,
             $destinationCurrency,
             $sourceAmount
@@ -227,7 +484,7 @@ class ForexService
         }
         
         try {
-            $bankClient = new \Infrastructure\Banks\GenericBankClient($sourceParticipant);
+            $bankClient = new GenericBankClient($sourceParticipant);
             
             $payload = [
                 'reference' => $swapRef,
@@ -301,9 +558,9 @@ class ForexService
     }
     
     /**
-     * Get cached/internal rate
+     * Get cached rate with markup applied
      */
-    private function getCachedRate(
+    private function getCachedRateWithMarkup(
         string $sourceCurrency,
         string $destinationCurrency,
         float $sourceAmount
@@ -402,6 +659,8 @@ class ForexService
     private function lockQuote(string $swapRef, array $quote): array
     {
         $quoteUuid = Uuid::uuid4()->toString();
+        $forexFeePercent = $quote['forex_fee_percent'] ?? 0;
+        $forexFeeAmount = $quote['forex_fee_amount'] ?? 0;
         
         try {
             $stmt = $this->db->prepare("
@@ -409,12 +668,12 @@ class ForexService
                 (quote_uuid, swap_reference, source_participant_id, destination_participant_id,
                  fx_provider_participant_id, source_currency, destination_currency,
                  source_amount, rate, destination_amount, rate_source,
-                 markup_amount, fee_amount, status, expires_at, created_at)
+                 markup_amount, fee_amount, forex_fee_percent, forex_fee_amount, status, expires_at, created_at)
                 VALUES 
                 (:uuid, :swap_ref, 1, 1, :fx_provider_id,
                  :source_currency, :destination_currency, :source_amount,
                  :rate, :destination_amount, :rate_source,
-                 :markup_amount, :fee_amount, 'QUOTED', :expires_at, NOW())
+                 :markup_amount, :fee_amount, :forex_fee_percent, :forex_fee_amount, 'QUOTED', :expires_at, NOW())
             ");
             
             $stmt->execute([
@@ -429,6 +688,8 @@ class ForexService
                 ':rate_source' => $quote['rate_source'],
                 ':markup_amount' => $quote['markup_amount'],
                 ':fee_amount' => $quote['fee_amount'],
+                ':forex_fee_percent' => $forexFeePercent,
+                ':forex_fee_amount' => $forexFeeAmount,
                 ':expires_at' => $quote['expires_at']
             ]);
             
@@ -544,7 +805,11 @@ class ForexService
             'EUR_BWP' => 14.80,
             'BWP_EUR' => 0.0676,
             'GBP_BWP' => 17.20,
-            'BWP_GBP' => 0.0581
+            'BWP_GBP' => 0.0581,
+            'USD_GBP' => 0.79,
+            'GBP_USD' => 1.27,
+            'EUR_USD' => 1.09,
+            'USD_EUR' => 0.92
         ];
     }
     
@@ -569,7 +834,10 @@ class ForexService
             'GB' => 'GBP',
             'EU' => 'EUR',
             'CA' => 'CAD',
-            'AU' => 'AUD'
+            'AU' => 'AUD',
+            'CN' => 'CNY',
+            'JP' => 'JPY',
+            'IN' => 'INR'
         ];
         
         return $map[strtoupper($countryCode)] ?? $this->defaultCurrency;
@@ -603,6 +871,14 @@ class ForexService
                      your_markup_percent, your_final_rate, valid_from, valid_until, status, created_at)
                     VALUES 
                     (:from, :to, :market, :provider, :markup, :final, NOW(), :expires, 'ACTIVE', NOW())
+                    ON CONFLICT (from_currency, to_currency, status) 
+                    DO UPDATE SET 
+                        market_rate = EXCLUDED.market_rate,
+                        provider_rate = EXCLUDED.provider_rate,
+                        your_markup_percent = EXCLUDED.your_markup_percent,
+                        your_final_rate = EXCLUDED.your_final_rate,
+                        valid_until = EXCLUDED.valid_until,
+                        updated_at = NOW()
                 ");
                 
                 $stmt->execute([
@@ -667,5 +943,34 @@ class ForexService
         } catch (Exception $e) {
             $this->logFxEvent($quoteUuid, 'MARK_QUOTE_USED_FAILED', ['error' => $e->getMessage()]);
         }
+    }
+    
+    /**
+     * Get forex fee amount for a given amount and corridor
+     */
+    public function getForexFee(float $amount, string $sourceCurrency, string $destinationCurrency): array
+    {
+        $feePercent = $this->getForexFeePercent($sourceCurrency, $destinationCurrency);
+        $feeAmount = $amount * $feePercent;
+        
+        // Apply min/max if configured
+        if ($this->feeService) {
+            try {
+                $forexFeeConfig = $this->feeService->getForexFeeConfig();
+                if ($forexFeeConfig) {
+                    $minFee = $forexFeeConfig['min_amount'] ?? 0;
+                    $maxFee = $forexFeeConfig['max_amount'] ?? PHP_FLOAT_MAX;
+                    $feeAmount = min($maxFee, max($minFee, $feeAmount));
+                }
+            } catch (Exception $e) {
+                // Use calculated fee
+            }
+        }
+        
+        return [
+            'percent' => $feePercent,
+            'amount' => round($feeAmount, 2),
+            'currency' => $destinationCurrency
+        ];
     }
 }
