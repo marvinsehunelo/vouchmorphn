@@ -165,4 +165,142 @@ class CorridorModule
     /**
      * Check if two countries need cross-border routing
      */
-    public function needsCrossBorder(string $sourceCountry, string $destCountry):
+    public function needsCrossBorder(string $sourceCountry, string $destCountry): bool
+    {
+        if ($sourceCountry === $destCountry) {
+            return false;
+        }
+        
+        try {
+            $corridor = $this->getCorridor($sourceCountry, $destCountry);
+            return $corridor['enabled'];
+        } catch (\Exception $e) {
+            return false;
+        }
+    }
+    
+    /**
+     * Get all available corridors from a source country
+     */
+    public function getAvailableCorridors(string $sourceCountry): array
+    {
+        // In production, this would query enabled destination countries
+        // For now, return common African countries
+        $commonDestinations = ['ZA', 'NG', 'KE', 'TZ', 'UG', 'GH', 'ZW', 'ZM', 'MZ', 'NA'];
+        $corridors = [];
+        
+        foreach ($commonDestinations as $dest) {
+            if ($dest !== $sourceCountry) {
+                try {
+                    $corridors[] = $this->getCorridor($sourceCountry, $dest);
+                } catch (\Exception $e) {
+                    // Corridor not available, skip
+                }
+            }
+        }
+        
+        return $corridors;
+    }
+    
+    /**
+     * Load country configuration from file
+     */
+    private function loadCountryConfig(string $countryCode): array
+    {
+        $countryCode = strtoupper($countryCode);
+        
+        if (isset($this->countryConfigs[$countryCode])) {
+            return $this->countryConfigs[$countryCode];
+        }
+        
+        $configFile = $this->configPath . strtolower($countryCode) . '/config.json';
+        
+        if (!file_exists($configFile)) {
+            // Return sensible defaults for any country
+            $this->countryConfigs[$countryCode] = $this->getDefaultCountryConfig($countryCode);
+        } else {
+            $this->countryConfigs[$countryCode] = json_decode(file_get_contents($configFile), true);
+        }
+        
+        return $this->countryConfigs[$countryCode];
+    }
+    
+    /**
+     * Default config for any country (ensures system works without config)
+     */
+    private function getDefaultCountryConfig(string $countryCode): array
+    {
+        return [
+            'country_code' => $countryCode,
+            'currency' => $this->guessCurrency($countryCode),
+            'vouchmorph' => [
+                'settlement_account' => "VM-{$countryCode}-001",
+                'cross_border_enabled' => true
+            ],
+            'fx' => [
+                'default_spread' => 0.015,
+                'spread_overrides' => []
+            ],
+            'cross_border' => [
+                'enabled' => true,
+                'settlement_hours' => 48,
+                'requires_prefunding' => false
+            ]
+        ];
+    }
+    
+    /**
+     * Guess currency from country code (fallback)
+     */
+    private function guessCurrency(string $countryCode): string
+    {
+        $map = [
+            'BW' => 'BWP', 'ZA' => 'ZAR', 'NG' => 'NGN', 'KE' => 'KES',
+            'GH' => 'GHS', 'UG' => 'UGX', 'TZ' => 'TZS', 'ZM' => 'ZMW',
+            'ZW' => 'ZWL', 'US' => 'USD', 'GB' => 'GBP', 'EU' => 'EUR',
+            'CA' => 'CAD', 'AU' => 'AUD', 'CN' => 'CNY', 'JP' => 'JPY',
+            'IN' => 'INR', 'BR' => 'BRL', 'MX' => 'MXN'
+        ];
+        return $map[$countryCode] ?? 'USD';
+    }
+    
+    /**
+     * Record internal transfer between VouchMorph accounts
+     */
+    private function recordInternalTransfer(string $swapRef, string $fromAccount, string $toAccount, float $amount, string $currency): void
+    {
+        // This is just for audit - no actual money movement
+        $this->logEvent('INTERNAL_TRANSFER', [
+            'swap_ref' => $swapRef,
+            'from' => $fromAccount,
+            'to' => $toAccount,
+            'amount' => $amount,
+            'currency' => $currency
+        ]);
+    }
+    
+    /**
+     * Update swap_requests with corridor information
+     */
+    private function updateSwapWithCorridorInfo(string $swapRef, array $corridor, float $corridorFee): void
+    {
+        // This would be implemented if we have DB access
+        // For now, just log
+        $this->logEvent('CORRIDOR_APPLIED', [
+            'swap_ref' => $swapRef,
+            'source_country' => $corridor['source_country'],
+            'dest_country' => $corridor['destination_country'],
+            'fee' => $corridorFee
+        ]);
+    }
+    
+    private function logEvent(string $event, array $data): void
+    {
+        $log = [
+            'timestamp' => date('c'),
+            'event' => $event,
+            'data' => $data
+        ];
+        file_put_contents('/tmp/corridor_module.log', json_encode($log) . PHP_EOL, FILE_APPEND);
+    }
+}
