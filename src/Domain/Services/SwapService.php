@@ -24,7 +24,7 @@ use Domain\ValueObjects\SwapStatusResolver;
  * Multi-country aware, dynamic configuration loading
  * ALL fees and rates are loaded from country configuration files - NO HARDCODING
  * 
- * NOW WITH FX AND CROSS-BORDER CAPABILITIES
+ * NOW WITH FX, CROSS-BORDER CAPABILITIES, AND FEE SEPARATION FOR CASHOUT RETRY
  */
 class SwapService
 {
@@ -44,6 +44,7 @@ class SwapService
     private ?CardService $cardService = null;
     private ?ForexService $forexService = null;
     private ?array $fxContext = null;
+    private ?FeeService $feeService = null;
 
     private const LOG_FILE = '/tmp/vouchmorphn_swap_audit.log';
     private const DEBUG_FILE = '/tmp/hold_debug.log';
@@ -122,6 +123,10 @@ class SwapService
                 throw new RuntimeException("Failed to load country fees: " . $e->getMessage());
             }
         }
+        
+        // Initialize FeeService with loaded config
+        $this->feeService = new FeeService($this->feesConfig, 'BWP');
+        error_log("[SwapService] FeeService initialized");
         
         // PRIORITY 1: Use card config from LoadCountry
         if (isset($config['card_config']) && !empty($config['card_config'])) {
@@ -207,6 +212,7 @@ class SwapService
         error_log("=== SWAPSERVICE CONSTRUCTOR COMPLETE ===");
         error_log("Card service status: " . ($this->cardService ? "ACTIVE" : "NOT AVAILABLE"));
         error_log("Forex service status: " . ($this->forexService ? "ACTIVE" : "NOT AVAILABLE"));
+        error_log("Fee service status: " . ($this->feeService ? "ACTIVE" : "NOT AVAILABLE"));
     }
     
     /**
@@ -347,10 +353,6 @@ class SwapService
             $fee = $this->feesConfig['fees'][$requiredFee];
             if (!isset($fee['total_amount'])) {
                 throw new RuntimeException("Fee {$requiredFee} missing 'total_amount' in {$feesFile}");
-            }
-            
-            if (!isset($fee['split'])) {
-                throw new RuntimeException("Fee {$requiredFee} missing 'split' configuration in {$feesFile}");
             }
         }
         
@@ -776,6 +778,96 @@ class SwapService
         } catch (Exception $e) {
             error_log("Failed to update hold status: " . $e->getMessage());
         }
+    }
+
+    /**
+     * Get retry count for a client and original swap
+     */
+    private function getRetryCount(string $clientIdentifier, ?string $originalSwapRef): int
+    {
+        if (!$originalSwapRef) {
+            return 0;
+        }
+        
+        try {
+            $stmt = $this->swapDB->prepare("
+                SELECT retry_count FROM cashout_retry_tracking 
+                WHERE client_identifier = ? AND original_swap_ref = ?
+            ");
+            $stmt->execute([$clientIdentifier, $originalSwapRef]);
+            $result = $stmt->fetch(PDO::FETCH_ASSOC);
+            return $result ? (int)$result['retry_count'] : 0;
+        } catch (Exception $e) {
+            error_log("Failed to get retry count: " . $e->getMessage());
+            return 0;
+        }
+    }
+    
+    /**
+     * Record a failed cashout for retry tracking
+     */
+    private function recordFailedCashout(string $clientIdentifier, string $swapRef, string $error): void
+    {
+        try {
+            $stmt = $this->swapDB->prepare("
+                SELECT id, retry_count FROM cashout_retry_tracking 
+                WHERE client_identifier = ? AND original_swap_ref = ?
+            ");
+            $stmt->execute([$clientIdentifier, $swapRef]);
+            $existing = $stmt->fetch(PDO::FETCH_ASSOC);
+            
+            if ($existing) {
+                $stmt = $this->swapDB->prepare("
+                    UPDATE cashout_retry_tracking 
+                    SET retry_count = retry_count + 1, 
+                        last_error = ?,
+                        updated_at = NOW()
+                    WHERE client_identifier = ? AND original_swap_ref = ?
+                ");
+                $stmt->execute([$error, $clientIdentifier, $swapRef]);
+            } else {
+                $stmt = $this->swapDB->prepare("
+                    INSERT INTO cashout_retry_tracking 
+                    (client_identifier, original_swap_ref, retry_count, last_error, created_at)
+                    VALUES (?, ?, 1, ?, NOW())
+                ");
+                $stmt->execute([$clientIdentifier, $swapRef, $error]);
+            }
+            
+            $stmt = $this->swapDB->prepare("
+                UPDATE swap_requests 
+                SET retry_count = COALESCE(retry_count, 0) + 1,
+                    metadata = metadata || ?::jsonb
+                WHERE swap_uuid = ?
+            ");
+            $stmt->execute([json_encode(['last_failure' => $error, 'failed_at' => date('c')]), $swapRef]);
+            
+        } catch (Exception $e) {
+            error_log("Failed to record failed cashout: " . $e->getMessage());
+        }
+    }
+    
+    /**
+     * Extract client identifier from source payload
+     */
+    private function extractClientIdentifier(array $source): string
+    {
+        $fields = ['phone', 'ewallet_phone', 'wallet_phone', 'card_phone', 
+                   'claimant_phone', 'beneficiary_phone', 'account_phone', 'email'];
+        
+        foreach ($fields as $field) {
+            if (isset($source[$field]) && !empty($source[$field])) {
+                return $source[$field];
+            }
+            if (isset($source['cashout'][$field]) && !empty($source['cashout'][$field])) {
+                return $source['cashout'][$field];
+            }
+            if (isset($source['ewallet'][$field]) && !empty($source['ewallet'][$field])) {
+                return $source['ewallet'][$field];
+            }
+        }
+        
+        return 'unknown_' . substr(bin2hex(random_bytes(4)), 0, 8);
     }
 
     private function getFeeKey(string $transactionType): string
@@ -1271,7 +1363,7 @@ class SwapService
     }
 
     /**
-     * Execute swap with unified payload structure - ENHANCED with FX
+     * Execute swap with unified payload structure - ENHANCED with FX and fee separation
      */
     public function executeSwap(array $payload): array
     { 
@@ -1283,6 +1375,9 @@ class SwapService
         $atmResult = null;
         $cashoutResult = null;
         $this->fxContext = null;
+        
+        // Store original swap ref for retry tracking
+        $originalSwapRef = $payload['original_swap_reference'] ?? null;
         
         $debugSteps = [];
         $debugSteps[] = ['time' => microtime(true), 'step' => 'START', 'swap_ref' => $swapRef];
@@ -1296,7 +1391,6 @@ class SwapService
                 throw new RuntimeException("Destination institution is required");
             }
 
-            $payloadCurrency = $payload['currency'] ?? null;
             $source = $payload['source'];
             $destination = $payload['destination'];
             
@@ -1420,7 +1514,7 @@ class SwapService
             }
 
             // =============================================
-            // STEP 7: Record swap with FX info
+            // STEP 7: Record swap with FX info and original ref for retry
             // =============================================
             $debugSteps[] = ['time' => microtime(true), 'step' => 'START_RECORD_SWAP'];
             $swapId = $this->recordMasterSwap(
@@ -1431,7 +1525,8 @@ class SwapService
                 $destinationCurrency,
                 $verificationResult,
                 $exchangeRate,
-                $this->fxContext['quote_uuid'] ?? null
+                $this->fxContext['quote_uuid'] ?? null,
+                $originalSwapRef
             );
             $debugSteps[] = ['time' => microtime(true), 'step' => 'RECORD_SWAP_COMPLETE', 'swap_id' => $swapId];
 
@@ -1459,7 +1554,9 @@ class SwapService
                         
                     case 'cashout':
                         $debugSteps[] = ['time' => microtime(true), 'step' => 'START_PROCESS_CASHOUT'];
-                        $cashoutResult = $this->processCashout($swapId, $swapRef, $source, $destination, $destinationCurrency, $holdResult);
+                        $cashoutResult = $this->processCashoutWithFeeSeparation(
+                            $swapId, $swapRef, $source, $destination, $destinationCurrency, $holdResult, $originalSwapRef
+                        );
                         $debugSteps[] = ['time' => microtime(true), 'step' => 'PROCESS_CASHOUT_COMPLETE'];
                         break;
                         
@@ -1524,6 +1621,7 @@ class SwapService
                 'skip_debit' => $skipDebit,
                 'fx_applied' => $this->fxContext ? true : false,
                 'fx_rate' => $exchangeRate,
+                'is_retry' => !empty($originalSwapRef),
                 'debug_steps' => $debugSteps
             ]);
 
@@ -1568,11 +1666,16 @@ class SwapService
                 $response['sat_number'] = $cashoutResult['sat_number'] ?? null;
                 $response['token_reference'] = $cashoutResult['token_reference'];
                 $response['expires_at'] = $cashoutResult['expires_at'];
+                $response['fee_breakdown'] = $cashoutResult['fee_breakdown'] ?? null;
                 if (isset($response['fx'])) {
                     $response['withdrawal_currency'] = $this->fxContext['destination_currency'];
                     $response['withdrawal_amount'] = $this->fxContext['destination_amount'];
                 }
                 $response['message'] = 'Cashout code generated by ' . $destination['institution'];
+                
+                if ($cashoutResult['is_free_retry'] ?? false) {
+                    $response['message'] .= ' (Free swap-on-swap applied)';
+                }
             }
 
             if (isset($destination['delivery_mode'])) {
@@ -1609,6 +1712,20 @@ class SwapService
                             'error' => $e->getMessage(), 
                             'trace' => $e->getTraceAsString()];
             
+            // Record failed cashout for retry eligibility
+            if (isset($destination['delivery_mode']) && $destination['delivery_mode'] === 'cashout') {
+                try {
+                    $clientIdentifier = $this->extractClientIdentifier($source);
+                    $this->recordFailedCashout($clientIdentifier, $swapRef, $e->getMessage());
+                    $this->logEvent($swapRef, 'FAILED_CASHOUT_RECORDED', [
+                        'client' => $clientIdentifier,
+                        'error' => $e->getMessage()
+                    ]);
+                } catch (Exception $recordError) {
+                    error_log("Failed to record failed cashout: " . $recordError->getMessage());
+                }
+            }
+            
             if ($holdResult && $holdResult['hold_placed'] && $bankClient) {
                 try {
                     $debugSteps[] = ['time' => microtime(true), 'step' => 'RELEASING_HOLD'];
@@ -1641,8 +1758,211 @@ class SwapService
             return [
                 'status' => 'error',
                 'message' => $e->getMessage(),
+                'swap_reference' => $swapRef,
+                'can_retry' => (isset($destination['delivery_mode']) && $destination['delivery_mode'] === 'cashout'),
                 'debug' => $debugSteps
             ];
+        }
+    }
+
+    /**
+     * Process cashout with proper fee separation and retry logic
+     */
+    private function processCashoutWithFeeSeparation(
+        int $swapId, 
+        string $swapRef, 
+        array $source, 
+        array $destination, 
+        string $currency, 
+        array $holdResult,
+        ?string $originalSwapRef = null
+    ): array {
+        $debug = [];
+        $debug[] = ['time' => microtime(true), 'step' => 'CASHOUT_WITH_FEE_SEPARATION_START'];
+        
+        try {
+            // Use FX-converted amount if available
+            $grossAmount = $this->fxContext 
+                ? (float)($this->fxContext['destination_amount'] ?? $destination['amount'])
+                : (float)$destination['amount'];
+            
+            $clientIdentifier = $this->extractClientIdentifier($source);
+            $retryCount = $this->getRetryCount($clientIdentifier, $originalSwapRef);
+            
+            $debug[] = ['time' => microtime(true), 'step' => 'RETRY_CHECK', 
+                       'client' => $clientIdentifier, 
+                       'retry_count' => $retryCount,
+                       'original_swap' => $originalSwapRef];
+            
+            // Determine if this is a free retry (first retry only)
+            $isFreeRetry = ($originalSwapRef && $retryCount <= 1);
+            $feeCalculation = null;
+            $netAmount = $grossAmount;
+            
+            if ($isFreeRetry) {
+                // FREE RETRY: Client pays nothing extra
+                $feeCalculation = $this->feeService->calculateFreeRetryFees($currency);
+                $netAmount = $grossAmount;
+                
+                $debug[] = ['time' => microtime(true), 'step' => 'FREE_RETRY_APPLIED', 
+                           'fee_breakdown' => $feeCalculation];
+                
+                // Mark free retry as used
+                $stmt = $this->swapDB->prepare("
+                    UPDATE cashout_retry_tracking 
+                    SET free_retry_used = TRUE, updated_at = NOW()
+                    WHERE client_identifier = ? AND original_swap_ref = ?
+                ");
+                $stmt->execute([$clientIdentifier, $originalSwapRef]);
+                
+            } else {
+                // FIRST ATTEMPT OR PAID RETRY: Client pays full fee
+                $feeCalculation = $this->feeService->calculateFirstAttemptFees($currency);
+                $netAmount = $grossAmount - $feeCalculation['total_fee'];
+                
+                $debug[] = ['time' => microtime(true), 'step' => 'PAID_ATTEMPT', 
+                           'fee_breakdown' => $feeCalculation,
+                           'net_amount' => $netAmount];
+                
+                // Store fee breakdown in swap_requests
+                $stmt = $this->swapDB->prepare("
+                    UPDATE swap_requests 
+                    SET fee_breakdown = ?::jsonb,
+                        total_cashout_fee = ?
+                    WHERE swap_uuid = ?
+                ");
+                $stmt->execute([
+                    json_encode($feeCalculation),
+                    $feeCalculation['total_fee'],
+                    $swapRef
+                ]);
+                
+                // Invoice VouchMorph's platform share (swap levy + platform share)
+                $vouchmorphTotal = $feeCalculation['vouchmorph_total_immediate'];
+                if ($vouchmorphTotal > 0) {
+                    $this->settlement->invoiceFee(
+                        $swapRef,
+                        $source['institution'],
+                        0,
+                        'VOUCHMORPH_PLATFORM_FEE',
+                        $vouchmorphTotal,
+                        $currency
+                    );
+                }
+                
+                // Invoice source institution share
+                $sourceShare = $feeCalculation['source_institution_share'];
+                if ($sourceShare > 0) {
+                    $this->settlement->invoiceFee(
+                        $swapRef,
+                        $source['institution'],
+                        0,
+                        'SOURCE_INSTITUTION_FEE',
+                        $sourceShare,
+                        $currency
+                    );
+                }
+            }
+            
+            if ($netAmount <= 0) {
+                throw new RuntimeException("Amount after fees would be non-positive: {$grossAmount} -> net {$netAmount}");
+            }
+            
+            $debug[] = ['time' => microtime(true), 'step' => 'NET_AMOUNT_CALCULATED', 
+                       'gross' => $grossAmount, 
+                       'net' => $netAmount];
+            
+            // Validate ATM dispensability
+            $errors = $this->validateCashoutAmount($netAmount, $currency);
+            if (!empty($errors)) {
+                throw new RuntimeException("Cashout validation failed: " . implode(', ', $errors));
+            }
+            $atmResult = $this->getDispensableAmount($netAmount, $currency);
+            
+            $cashoutData = $destination['cashout'] ?? [];
+            
+            $destInstitutionKey = $this->findInstitutionKey($destination['institution']);
+            if (!$destInstitutionKey) {
+                throw new RuntimeException("Destination institution not found: {$destination['institution']}");
+            }
+            $destParticipant = $this->participants[$destInstitutionKey];
+            
+            if (isset($cashoutData['beneficiary_phone'])) {
+                $cashoutData['beneficiary_phone'] = $this->formatPhoneForInstitution(
+                    $cashoutData['beneficiary_phone'], $destParticipant
+                );
+            }
+            
+            // Request token from destination institution
+            $tokenResult = $this->requestTokenFromDestination(
+                $swapRef, 
+                $source, 
+                $destination, 
+                $holdResult, 
+                $destParticipant, 
+                $netAmount,
+                $currency
+            );
+            
+            $generatedCode = $tokenResult['generated_code'] ?? $tokenResult['pin'] ?? null;
+            $satNumber = $tokenResult['sat_number'] ?? $tokenResult['token_reference'] ?? null;
+            
+            if (!$generatedCode) {
+                throw new RuntimeException("Destination institution did not return a withdrawal code");
+            }
+            
+            // Store destination token
+            $this->storeDestinationToken($swapId, $tokenResult);
+            
+            // Send SMS with code
+            $this->sendWithdrawalSms(
+                $cashoutData['beneficiary_phone'] ?? '', 
+                $generatedCode,
+                $satNumber,
+                $netAmount, 
+                $currency,
+                $tokenResult['expires_at'] ?? null
+            );
+            
+            // Queue settlement message
+            $this->queueSettlementMessage($swapRef, $source, $destination, $grossAmount, $holdResult, null);
+            
+            // Update net position
+            $this->settlement->updateNetPosition($source['institution'], $destination['institution'], $netAmount, 'cashout', $currency);
+            
+            $this->logEvent($swapRef, 'CASHOUT_COMPLETED', [
+                'gross_amount' => $grossAmount,
+                'net_amount' => $netAmount,
+                'fee_breakdown' => $feeCalculation,
+                'is_free_retry' => $isFreeRetry,
+                'destination_code_generated' => true
+            ]);
+            
+            return [
+                'generated_code' => $generatedCode,
+                'sat_number' => $satNumber,
+                'token_reference' => $tokenResult['token_reference'] ?? $satNumber,
+                'expires_at' => $tokenResult['expires_at'] ?? null,
+                'net_amount' => $netAmount,
+                'gross_amount' => $grossAmount,
+                'fee_breakdown' => $feeCalculation,
+                'is_free_retry' => $isFreeRetry,
+                'currency' => $currency
+            ];
+            
+        } catch (Exception $e) {
+            $debug[] = ['time' => microtime(true), 'step' => 'CASHOUT_EXCEPTION', 'error' => $e->getMessage()];
+            error_log("CASHOUT ERROR: " . json_encode($debug));
+            
+            // Record failure for retry eligibility
+            try {
+                $clientIdentifier = $this->extractClientIdentifier($source);
+                $this->recordFailedCashout($clientIdentifier, $swapRef, $e->getMessage());
+            } catch (Exception $recordError) {
+                error_log("Failed to record cashout failure: " . $recordError->getMessage());
+            }
+            
+            throw $e;
         }
     }
 
@@ -2112,116 +2432,6 @@ class SwapService
             $feeDetails['vat_amount'],
             $expiryDays
         ]);
-    }
-
-    /**
-     * Process cashout to ATM/Agent - UPDATED for FX
-     */
-    private function processCashout(int $swapId, string $swapRef, array $source, array $destination, string $currency, array $holdResult): array
-    {
-        $debug = [];
-        $debug[] = ['time' => microtime(true), 'step' => 'CASHOUT_START'];
-        
-        try {
-            // Use FX-converted amount if available
-            $grossAmount = $this->fxContext 
-                ? (float)($this->fxContext['destination_amount'] ?? $destination['amount'])
-                : (float)$destination['amount'];
-            $debug[] = ['time' => microtime(true), 'step' => 'GROSS_AMOUNT', 'amount' => $grossAmount, 'currency' => $currency];
-            
-            $feeDetails = $this->deductSwapFee(
-                $swapRef,
-                'CASHOUT',
-                $grossAmount,
-                $source['institution'],
-                $destination['institution']
-            );
-            $debug[] = ['time' => microtime(true), 'step' => 'FEE_DEDUCTED', 'fee' => $feeDetails['fee_amount'], 'net' => $feeDetails['net_amount']];
-            
-            $netAmount = $feeDetails['net_amount'];
-            $cashoutData = $destination['cashout'] ?? [];
-            
-            $destInstitutionKey = $this->findInstitutionKey($destination['institution']);
-            if (!$destInstitutionKey) {
-                throw new RuntimeException("Destination institution not found: {$destination['institution']}");
-            }
-            $destParticipant = $this->participants[$destInstitutionKey];
-            $debug[] = ['time' => microtime(true), 'step' => 'DEST_FOUND', 'participant' => $destParticipant['provider_code'] ?? $destInstitutionKey];
-            
-            if (isset($cashoutData['beneficiary_phone'])) {
-                $originalPhone = $cashoutData['beneficiary_phone'];
-                $cashoutData['beneficiary_phone'] = $this->formatPhoneForInstitution(
-                    $cashoutData['beneficiary_phone'], $destParticipant
-                );
-                $debug[] = ['time' => microtime(true), 'step' => 'PHONE_FORMATTED', 'original' => $originalPhone, 'formatted' => $cashoutData['beneficiary_phone']];
-            }
-            
-            $debug[] = ['time' => microtime(true), 'step' => 'REQUESTING_TOKEN_FROM_DESTINATION'];
-            
-            // Request token from destination institution with FX info
-            $tokenResult = $this->requestTokenFromDestination(
-                $swapRef, 
-                $source, 
-                $destination, 
-                $holdResult, 
-                $destParticipant, 
-                $netAmount,
-                $currency
-            );
-            $debug[] = ['time' => microtime(true), 'step' => 'TOKEN_RECEIVED_FROM_DESTINATION'];
-            
-            // Extract the generated code from destination's response
-            $generatedCode = $tokenResult['generated_code'] ?? $tokenResult['pin'] ?? null;
-            $satNumber = $tokenResult['sat_number'] ?? $tokenResult['token_reference'] ?? null;
-            
-            if (!$generatedCode) {
-                throw new RuntimeException("Destination institution did not return a withdrawal code");
-            }
-            
-            $debug[] = ['time' => microtime(true), 'step' => 'CODE_FROM_DESTINATION', 'code_suffix' => substr($generatedCode, -4)];
-            
-            $this->storeDestinationToken($swapId, $tokenResult);
-            
-            $debug[] = ['time' => microtime(true), 'step' => 'SENDING_SMS_WITH_DESTINATION_CODE'];
-            $this->sendWithdrawalSms(
-                $cashoutData['beneficiary_phone'] ?? '', 
-                $generatedCode,
-                $satNumber,
-                $netAmount, 
-                $currency,
-                $tokenResult['expires_at'] ?? null
-            );
-            $debug[] = ['time' => microtime(true), 'step' => 'SMS_SENT'];
-            
-            $debug[] = ['time' => microtime(true), 'step' => 'QUEUEING_SETTLEMENT'];
-            $this->queueSettlementMessage($swapRef, $source, $destination, $grossAmount, $holdResult, $feeDetails);
-            $debug[] = ['time' => microtime(true), 'step' => 'SETTLEMENT_QUEUED'];
-
-            $debug[] = ['time' => microtime(true), 'step' => 'UPDATING_NET_POSITION'];
-            $this->settlement->updateNetPosition($source['institution'], $destination['institution'], $netAmount, 'cashout', $currency);
-            $debug[] = ['time' => microtime(true), 'step' => 'NET_POSITION_UPDATED'];
-            
-            $debug[] = ['time' => microtime(true), 'step' => 'UPDATING_SWAP_LEDGER'];
-            $this->updateSwapLedgerFees($swapRef, $source['institution'], $destination['institution'], $grossAmount, $currency);
-            $debug[] = ['time' => microtime(true), 'step' => 'SWAP_LEDGER_UPDATED'];
-            
-            error_log("CASHOUT DEBUG: " . json_encode($debug));
-            
-            return [
-                'generated_code' => $generatedCode,
-                'sat_number' => $satNumber,
-                'token_reference' => $tokenResult['token_reference'] ?? $satNumber,
-                'expires_at' => $tokenResult['expires_at'] ?? null,
-                'net_amount' => $netAmount,
-                'fee_amount' => $feeDetails['fee_amount'],
-                'currency' => $currency
-            ];
-            
-        } catch (Exception $e) {
-            $debug[] = ['time' => microtime(true), 'step' => 'CASHOUT_EXCEPTION', 'error' => $e->getMessage()];
-            error_log("CASHOUT ERROR: " . json_encode($debug));
-            throw $e;
-        }
     }
 
     /**
@@ -3066,7 +3276,8 @@ class SwapService
         string $destinationCurrency,
         array $verificationResult,
         ?float $exchangeRate = null,
-        ?string $fxQuoteUuid = null
+        ?string $fxQuoteUuid = null,
+        ?string $originalSwapRef = null
     ): int {
         $sourceDetails = [
             'institution' => $source['institution'],
@@ -3117,8 +3328,8 @@ class SwapService
         $stmt = $this->swapDB->prepare("
             INSERT INTO swap_requests 
             (swap_uuid, from_currency, to_currency, amount, source_details, destination_details, 
-             source_currency, destination_currency, exchange_rate, fx_quote_uuid, status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NOW())
+             source_currency, destination_currency, exchange_rate, fx_quote_uuid, original_swap_ref, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NOW())
             RETURNING swap_id
         ");
 
@@ -3132,7 +3343,8 @@ class SwapService
             $sourceCurrency,
             $destinationCurrency,
             $exchangeRate,
-            $fxQuoteUuid
+            $fxQuoteUuid,
+            $originalSwapRef
         ]);
 
         return (int)$stmt->fetchColumn();
