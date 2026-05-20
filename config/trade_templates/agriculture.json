@@ -1,0 +1,22 @@
+{
+    "trade_type": "agriculture",
+    "version": "1.0",
+    "description": "Agricultural product trade payment template",
+    "required_documents": [
+        "invoice",
+        "phytosanitary_certificate",
+        "export_permit"
+    ],
+    "optional_documents": [
+        "quality_certificate",
+        "origin_certificate",
+        "fumigation_certificate"
+    ],
+    "settlement_flow": "escrow",
+    "compliance_level": "MEDIUM",
+    "fx_required": false,
+    "requires_escrow": true,
+    "min_amount": 100,
+    "max_amount": 500000,
+    "allowed_currencies": ["BWP", "ZAR", "USD"]
+}
